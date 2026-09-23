@@ -1,0 +1,101 @@
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.database import get_db
+from app.api.deps import get_current_admin
+from app.services.credential_service import CredentialService
+from app.schemas.entities import CredentialCreate, CredentialUpdate, CredentialRead, CredentialTestResult, CredentialBulkAssignProxy, CredentialBulkAssignGroup
+
+router = APIRouter(prefix="/credentials", tags=["Admin Credentials"])
+
+@router.get("", response_model=List[CredentialRead])
+async def list_credentials(
+    provider_id: Optional[int] = None,
+    username: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await CredentialService.list_credentials(db, provider_id=provider_id)
+
+@router.post("/bulk-assign-proxy", response_model=List[CredentialRead])
+async def bulk_assign_proxy(
+    data: CredentialBulkAssignProxy,
+    username: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await CredentialService.bulk_assign_proxy(db, data.credential_ids, data.proxy_id)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+@router.post("/bulk-assign-group", response_model=List[CredentialRead])
+async def bulk_assign_group(
+    data: CredentialBulkAssignGroup,
+    username: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await CredentialService.bulk_assign_group(db, data.credential_ids, data.group_name)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+@router.post("", response_model=CredentialRead, status_code=status.HTTP_201_CREATED)
+async def create_credential(
+    data: CredentialCreate,
+    username: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await CredentialService.create_credential(db, data)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+@router.put("/{credential_id}", response_model=CredentialRead)
+async def update_credential(
+    credential_id: int,
+    data: CredentialUpdate,
+    username: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    updated = await CredentialService.update_credential(db, credential_id, data)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    return updated
+
+@router.delete("/{credential_id}")
+async def delete_credential(
+    credential_id: int,
+    username: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    success = await CredentialService.delete_credential(db, credential_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    return {"message": "Credential deleted"}
+
+@router.post("/{credential_id}/test", response_model=CredentialTestResult)
+async def test_credential(
+    credential_id: int,
+    username: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await CredentialService.test_credential(db, credential_id)
+
+@router.post("/{credential_id}/reset-circuit-breaker")
+async def reset_circuit_breaker(
+    credential_id: int,
+    username: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    await CredentialService.reset_circuit_breaker(db, credential_id)
+    return {"message": "Circuit breaker reset to HEALTHY"}
+
+@router.post("/{credential_id}/preferences")
+async def set_model_preferences(
+    credential_id: int,
+    payload: dict,
+    username: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    model_ids = payload.get("model_ids", [])
+    await CredentialService.set_model_preferences(db, credential_id, model_ids)
+    return {"message": "Model preferences saved"}

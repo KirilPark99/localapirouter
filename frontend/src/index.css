@@ -1,0 +1,143 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  --font-mono: "Roboto Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+:root {
+  color-scheme: dark;
+  --ease-out-snappy: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-spring: cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+html {
+  zoom: 1.35;
+}
+
+@supports not (zoom: 1) {
+  html {
+    font-size: 135%;
+  }
+}
+
+/* Content area 25% smaller while navigation block remains at current zoom */
+.content-pane {
+  zoom: 0.75;
+}
+
+@supports not (zoom: 1) {
+  .content-pane {
+    font-size: 75%;
+  }
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: #080c14;
+  color: #f1f5f9;
+  font-family: var(--font-sans);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+/* Ensure all form controls inherit Roboto across all browsers and pages */
+input, button, select, textarea, optgroup {
+  font-family: inherit;
+}
+
+/* Headings scale & optical kerning for Roboto */
+h1, h2, h3, h4 {
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+
+h1 {
+  letter-spacing: -0.025em;
+}
+
+/* Monospace font & code elements */
+code, kbd, samp, pre, .font-mono {
+  font-family: var(--font-mono);
+  letter-spacing: -0.01em;
+}
+
+/* Numbers in tables, metrics, latencies and badges don't jitter during updates */
+table, .tabular-nums, .font-mono {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Optical tracking for uppercase micro-badges and category headers */
+.tracking-wider {
+  letter-spacing: 0.045em;
+}
+
+.tracking-widest {
+  letter-spacing: 0.075em;
+}
+
+/* Text selection */
+::selection {
+  background: rgba(99, 102, 241, 0.35);
+  color: #ffffff;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+/* Tactile button micro-interaction (Emil Kowalski / Apple Design) */
+.btn-press {
+  transition: transform 140ms var(--ease-out-snappy), background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+.btn-press:active {
+  transform: scale(0.97);
+}
+
+/* Glassmorphic card styling */
+.glass-panel {
+  background: rgba(15, 23, 42, 0.65);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.35);
+}
+
+.glass-card {
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.4) 0%, rgba(15, 23, 42, 0.6) 100%);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 16px -1px rgba(0, 0, 0, 0.3);
+}
+
+/* Specular highlight on top edge for depth */
+.card-specular {
+  position: relative;
+}
+.card-specular::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.12) 50%, rgba(255, 255, 255, 0) 100%);
+  pointer-events: none;
+}
