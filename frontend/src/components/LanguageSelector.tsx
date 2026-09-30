@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from "react";
-import { Globe, ChevronDown, Check } from "lucide-react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
+import { Globe, ChevronDown, Check, Search, X } from "lucide-react";
 import { useI18n } from "../i18n/context";
 import { Language, SUPPORTED_LANGUAGES } from "../i18n/types";
 
@@ -14,7 +14,11 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
 }) => {
   const { language, setLanguage, currentLanguage, t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const selectedItemRef = useRef<HTMLButtonElement>(null);
+  const listContainerRef = useRef<HTMLDivElement>(null);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -30,6 +34,45 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
       document.removeEventListener("mousedown", handleClickOutside);
     };
   }, [isOpen]);
+
+  // Close on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setIsOpen(false);
+      }
+    };
+    if (isOpen) {
+      window.addEventListener("keydown", handleKeyDown);
+    }
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isOpen]);
+
+  // When dropdown opens: reset search and scroll selected language into view
+  useEffect(() => {
+    if (isOpen) {
+      setSearchQuery("");
+      const timer = setTimeout(() => {
+        if (selectedItemRef.current) {
+          selectedItemRef.current.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [isOpen]);
+
+  const filteredLanguages = useMemo(() => {
+    if (!searchQuery.trim()) return SUPPORTED_LANGUAGES;
+    const q = searchQuery.toLowerCase().trim();
+    return SUPPORTED_LANGUAGES.filter(
+      (l) =>
+        l.name.toLowerCase().includes(q) ||
+        l.nativeName.toLowerCase().includes(q) ||
+        l.code.toLowerCase().includes(q)
+    );
+  }, [searchQuery]);
 
   if (variant === "full") {
     return (
@@ -81,7 +124,7 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className={`btn-press flex items-center gap-2 px-3 py-1.5 rounded-xl border transition-all shadow-md cursor-pointer ${
+        className={`btn-press flex items-center gap-2 px-3 py-1.5 rounded-xl border transition-all shadow-md cursor-pointer shrink-0 select-none ${
           isOpen
             ? "bg-indigo-600/20 border-indigo-500/60 text-white ring-1 ring-indigo-500/40"
             : "bg-slate-900/95 hover:bg-slate-800 border-slate-700/80 hover:border-slate-600 text-slate-100"
@@ -92,7 +135,7 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
         <span className="text-sm shrink-0" role="img" aria-label={currentLanguage.name}>
           {currentLanguage.flag}
         </span>
-        <span className="font-semibold text-xs tracking-tight text-slate-100">
+        <span className="font-semibold text-xs tracking-tight text-slate-100 whitespace-nowrap">
           {currentLanguage.nativeName}
         </span>
         <ChevronDown
@@ -103,65 +146,108 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
 
       {isOpen && (
         <div
-          className="absolute right-0 mt-2 w-80 max-h-[480px] flex flex-col rounded-2xl bg-slate-950/98 border border-slate-700/90 shadow-2xl shadow-black/90 p-2 z-[100] animate-in fade-in zoom-in-95 duration-150 backdrop-blur-2xl"
-          style={{ maxHeight: "calc(100vh - 80px)" }}
+          className="absolute right-0 mt-2 w-80 max-h-[380px] flex flex-col rounded-2xl bg-slate-900/98 border border-slate-700/90 shadow-2xl shadow-black/95 p-2 z-[100] animate-in fade-in zoom-in-95 duration-150 backdrop-blur-2xl overflow-hidden ring-1 ring-white/10"
+          style={{ maxHeight: "min(380px, calc(100vh - 84px))" }}
         >
-          <div className="px-3 py-2 flex items-center justify-between border-b border-white/[0.08] mb-1.5">
-            <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
-              <Globe size={14} className="text-indigo-400" />
-              <span>{t.header.language}</span>
+          {/* Header & Search */}
+          <div className="px-2 pt-1 pb-2 border-b border-white/[0.08] mb-1.5 shrink-0 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                <Globe size={14} className="text-indigo-400" />
+                <span>{t.header.language}</span>
+              </div>
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-white/[0.06] text-slate-400 border border-white/[0.08]">
+                {filteredLanguages.length} / {SUPPORTED_LANGUAGES.length}
+              </span>
             </div>
-            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-white/[0.06] text-slate-400 border border-white/[0.08]">
-              {SUPPORTED_LANGUAGES.length} {t.common.total}
-            </span>
-          </div>
-          <div className="overflow-y-auto space-y-1 pr-1 flex-1">
-            {SUPPORTED_LANGUAGES.map((lang) => {
-              const isSelected = lang.code === language;
-              return (
+
+            {/* Quick search input */}
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={`${t.common.search}...`}
+                className="w-full pl-8 pr-7 py-1 text-xs bg-slate-950/80 border border-slate-800 rounded-lg text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500/80 focus:ring-1 focus:ring-indigo-500/30 transition-all"
+                autoFocus
+              />
+              {searchQuery && (
                 <button
-                  key={lang.code}
                   type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setLanguage(lang.code as Language);
-                    setIsOpen(false);
-                  }}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all text-left cursor-pointer ${
-                    isSelected
-                      ? "bg-indigo-600/30 text-white font-semibold border border-indigo-500/50 shadow-sm"
-                      : "text-slate-300 hover:bg-white/[0.08] hover:text-white hover:border-white/10 border border-transparent"
-                  }`}
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 p-0.5 cursor-pointer"
                 >
-                  <div className="flex items-center gap-2.5 truncate">
-                    <span className="text-lg shrink-0" role="img" aria-label={lang.name}>
-                      {lang.flag}
-                    </span>
-                    <div className="truncate">
-                      <div className="leading-tight font-medium text-slate-100 flex items-center gap-1.5">
-                        <span>{lang.nativeName}</span>
-                        {lang.dir === "rtl" && (
-                          <span className="text-[9px] font-mono px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                            RTL
-                          </span>
-                        )}
-                        {lang.code === "en" && (
-                          <span className="text-[9px] font-mono px-1 py-0.2 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                            Default
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-[10px] text-slate-400 truncate mt-0.5">{lang.name}</div>
-                    </div>
-                  </div>
-                  {isSelected && (
-                    <div className="w-5 h-5 rounded-full bg-indigo-500 text-white flex items-center justify-center shrink-0 ml-2 shadow-xs">
-                      <Check size={12} strokeWidth={3} />
-                    </div>
-                  )}
+                  <X size={12} />
                 </button>
-              );
-            })}
+              )}
+            </div>
+          </div>
+
+          {/* Scrollable list with min-h-0 so flexbox allows scrolling */}
+          <div
+            ref={listContainerRef}
+            tabIndex={0}
+            className="overflow-y-auto min-h-0 flex-1 space-y-1 pr-1 overscroll-contain focus:outline-none custom-scrollbar"
+            style={{
+              scrollbarWidth: "thin",
+              scrollbarColor: "#475569 transparent",
+            }}
+          >
+            {filteredLanguages.length === 0 ? (
+              <div className="py-6 text-center text-xs text-slate-500">
+                {t.logs?.noLogsFound || "No languages found"}
+              </div>
+            ) : (
+              filteredLanguages.map((lang) => {
+                const isSelected = lang.code === language;
+                return (
+                  <button
+                    key={lang.code}
+                    ref={isSelected ? selectedItemRef : undefined}
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setLanguage(lang.code as Language);
+                      setIsOpen(false);
+                    }}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all text-left cursor-pointer ${
+                      isSelected
+                        ? "bg-indigo-600/30 text-white font-semibold border border-indigo-500/50 shadow-sm"
+                        : "text-slate-300 hover:bg-white/[0.08] hover:text-white hover:border-white/10 border border-transparent"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 truncate">
+                      <span className="text-lg shrink-0" role="img" aria-label={lang.name}>
+                        {lang.flag}
+                      </span>
+                      <div className="truncate">
+                        <div className="leading-tight font-medium text-slate-100 flex items-center gap-1.5">
+                          <span>{lang.nativeName}</span>
+                          {lang.dir === "rtl" && (
+                            <span className="text-[9px] font-mono px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                              RTL
+                            </span>
+                          )}
+                          {lang.code === "en" && (
+                            <span className="text-[9px] font-mono px-1 py-0.2 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                              Default
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-slate-400 truncate mt-0.5">{lang.name}</div>
+                      </div>
+                    </div>
+                    {isSelected && (
+                      <div className="w-5 h-5 rounded-full bg-indigo-500 text-white flex items-center justify-center shrink-0 ml-2 shadow-xs">
+                        <Check size={12} strokeWidth={3} />
+                      </div>
+                    )}
+                  </button>
+                );
+              })
+            )}
           </div>
         </div>
       )}
