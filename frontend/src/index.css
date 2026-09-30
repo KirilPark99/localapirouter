@@ -11,6 +11,16 @@
   --ease-spring: cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
 html {
   zoom: 1.35;
 }
@@ -33,15 +43,12 @@ html {
 }
 
 body {
-  margin: 0;
-  padding: 0;
   background-color: #080c14;
   color: #f1f5f9;
   font-family: var(--font-sans);
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  overflow-x: hidden;
 }
 
 /* Ensure all form controls inherit Roboto across all browsers and pages */

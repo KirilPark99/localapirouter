@@ -94,6 +94,8 @@ export const ModelsPage: React.FC = () => {
 
   // Selection set of model IDs
   const [selectedModelIds, setSelectedModelIds] = useState<Set<number>>(new Set());
+  const lastSelectedModelIdRef = useRef<number | null>(null);
+  const [isTopActionsOpen, setIsTopActionsOpen] = useState(false);
 
   // Collapsible state for each provider group
   const [collapsedProviders, setCollapsedProviders] = useState<Record<number, boolean>>({});
@@ -840,12 +842,13 @@ export const ModelsPage: React.FC = () => {
     } else {
       next.add(modelId);
     }
+    lastSelectedModelIdRef.current = modelId;
     setSelectedModelIds(next);
   };
 
   const toggleSelectProviderModels = (providerModels: DiscoveredModel[]) => {
     const next = new Set(selectedModelIds);
-    const allSelected = providerModels.every((m) => next.has(m.id));
+    const allSelected = providerModels.length > 0 && providerModels.every((m) => next.has(m.id));
 
     if (allSelected) {
       providerModels.forEach((m) => next.delete(m.id));
@@ -857,6 +860,8 @@ export const ModelsPage: React.FC = () => {
 
   const clearSelection = () => {
     setSelectedModelIds(new Set());
+    lastSelectedModelIdRef.current = null;
+    setIsTopActionsOpen(false);
   };
 
   // Batch action handlers
@@ -1084,6 +1089,63 @@ export const ModelsPage: React.FC = () => {
     return groups;
   }, [models, providers, search, visibilityFilter, ratingFilter, sortBy]);
 
+  const allVisibleModels = useMemo(() => {
+    return providerGroups.flatMap((g) => g.models);
+  }, [providerGroups]);
+
+  const allVisibleSelected = useMemo(() => {
+    return allVisibleModels.length > 0 && allVisibleModels.every((m) => selectedModelIds.has(m.id));
+  }, [allVisibleModels, selectedModelIds]);
+
+  const someVisibleSelected = useMemo(() => {
+    return allVisibleModels.some((m) => selectedModelIds.has(m.id));
+  }, [allVisibleModels, selectedModelIds]);
+
+  const toggleSelectAllVisible = () => {
+    const next = new Set(selectedModelIds);
+    if (allVisibleSelected) {
+      allVisibleModels.forEach((m) => next.delete(m.id));
+    } else {
+      allVisibleModels.forEach((m) => next.add(m.id));
+    }
+    setSelectedModelIds(next);
+  };
+
+  const handleModelCheckboxClick = (modelId: number, event: React.MouseEvent) => {
+    event.stopPropagation();
+    const next = new Set(selectedModelIds);
+
+    if (event.shiftKey && lastSelectedModelIdRef.current !== null && lastSelectedModelIdRef.current !== modelId) {
+      const allList = allVisibleModels;
+      const idx1 = allList.findIndex((m) => m.id === lastSelectedModelIdRef.current);
+      const idx2 = allList.findIndex((m) => m.id === modelId);
+
+      if (idx1 !== -1 && idx2 !== -1) {
+        const start = Math.min(idx1, idx2);
+        const end = Math.max(idx1, idx2);
+        const shouldSelect = !selectedModelIds.has(modelId);
+        for (let i = start; i <= end; i++) {
+          if (shouldSelect) {
+            next.add(allList[i].id);
+          } else {
+            next.delete(allList[i].id);
+          }
+        }
+        setSelectedModelIds(next);
+        lastSelectedModelIdRef.current = modelId;
+        return;
+      }
+    }
+
+    if (next.has(modelId)) {
+      next.delete(modelId);
+    } else {
+      next.add(modelId);
+    }
+    lastSelectedModelIdRef.current = modelId;
+    setSelectedModelIds(next);
+  };
+
   const totalUniqueModels = useMemo(() => {
     const unique = new Set<string>();
     models.forEach((m) => unique.add(`${m.provider_id}:${m.provider_model_id}`));
@@ -1264,7 +1326,26 @@ export const ModelsPage: React.FC = () => {
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="border-b border-slate-800/80 bg-slate-950/50 text-slate-400 font-semibold uppercase tracking-wider text-[10px]">
-                    <th className="py-2.5 px-4 w-10 text-center">Select</th>
+                    <th className="py-2.5 px-4 w-10 text-center">
+                      <button
+                        type="button"
+                        onClick={() => toggleSelectProviderModels(newlyDiscoveredModels)}
+                        className="inline-flex items-center justify-center p-1 rounded hover:bg-white/[0.08] text-slate-400 hover:text-slate-200 cursor-pointer transition-colors"
+                        title={
+                          newlyDiscoveredModels.length > 0 && newlyDiscoveredModels.every((m) => selectedModelIds.has(m.id))
+                            ? "Deselect all new models"
+                            : "Select all new models"
+                        }
+                      >
+                        {newlyDiscoveredModels.length > 0 && newlyDiscoveredModels.every((m) => selectedModelIds.has(m.id)) ? (
+                          <CheckSquare size={15} className="text-indigo-400" />
+                        ) : newlyDiscoveredModels.some((m) => selectedModelIds.has(m.id)) ? (
+                          <MinusSquare size={15} className="text-indigo-400" />
+                        ) : (
+                          <Square size={15} className="text-slate-500" />
+                        )}
+                      </button>
+                    </th>
                     <th className="py-2.5 px-4">Provider</th>
                     <th className="py-2.5 px-4">Model / Canonical Slug</th>
                     <th className="py-2.5 px-4">
@@ -1293,12 +1374,15 @@ export const ModelsPage: React.FC = () => {
                         }`}
                       >
                         {/* Checkbox */}
-                        <td className="py-2.5 px-4 text-center">
+                        <td
+                          className="py-2.5 px-4 text-center cursor-pointer select-none"
+                          onClick={(e) => handleModelCheckboxClick(m.id, e)}
+                        >
                           <input
                             type="checkbox"
                             checked={isSelected}
-                            onChange={() => toggleSelectModel(m.id)}
-                            className="rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-0 cursor-pointer"
+                            onChange={() => {}}
+                            className="rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-0 cursor-pointer pointer-events-none"
                           />
                         </td>
 
@@ -1600,6 +1684,179 @@ export const ModelsPage: React.FC = () => {
             >
               Show All
             </button>
+
+            {/* Select All Visible models toggle */}
+            <button
+              type="button"
+              onClick={toggleSelectAllVisible}
+              className={`btn-press px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                allVisibleSelected
+                  ? "bg-indigo-600/30 text-indigo-300 border-indigo-500/50"
+                  : someVisibleSelected
+                  ? "bg-indigo-950/60 text-indigo-300 border-indigo-500/40"
+                  : "bg-slate-950/80 hover:bg-slate-800 border-white/[0.06] text-slate-300"
+              }`}
+              title={
+                allVisibleSelected
+                  ? "Deselect all visible models"
+                  : "Select all visible models (Shift+Click on rows to range select)"
+              }
+            >
+              {allVisibleSelected ? (
+                <CheckSquare size={14} className="text-indigo-400" />
+              ) : someVisibleSelected ? (
+                <MinusSquare size={14} className="text-indigo-400" />
+              ) : (
+                <Square size={14} className="text-slate-400" />
+              )}
+              <span>{allVisibleSelected ? "Deselect Visible" : `Select Visible (${allVisibleModels.length})`}</span>
+            </button>
+
+            {/* Top Actions dropdown when models are selected */}
+            {selectedModelIds.size > 0 && (
+              <div className="relative inline-block text-left">
+                <button
+                  type="button"
+                  onClick={() => setIsTopActionsOpen((prev) => !prev)}
+                  className="btn-press px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-400/40 rounded-xl text-xs font-semibold shadow-md shadow-indigo-600/20 transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <span className="w-4 h-4 rounded-full bg-white/20 text-white text-[10px] font-bold flex items-center justify-center">
+                    {selectedModelIds.size}
+                  </span>
+                  <span>Actions</span>
+                  <ChevronDown
+                    size={13}
+                    className={`transition-transform duration-150 ${isTopActionsOpen ? "rotate-180" : ""}`}
+                  />
+                </button>
+
+                {isTopActionsOpen && (
+                  <div
+                    className="absolute right-0 mt-2 w-56 rounded-xl bg-slate-900 border border-indigo-500/40 shadow-2xl shadow-black/80 py-1.5 z-50 animate-in fade-in zoom-in-95 duration-100"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="px-3 py-1.5 text-[11px] text-slate-400 font-semibold border-b border-slate-800 flex items-center justify-between">
+                      <span>Selected: {selectedModelIds.size} models</span>
+                      <button
+                        type="button"
+                        onClick={clearSelection}
+                        className="text-indigo-400 hover:text-indigo-300 text-[10px] cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleBatchEnable(true);
+                        setIsTopActionsOpen(false);
+                      }}
+                      disabled={batchProcessing}
+                      className="w-full text-left px-3 py-2 text-xs text-emerald-300 hover:bg-slate-800/80 flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <CheckCircle2 size={14} className="text-emerald-400" />
+                      <span>Enable Selected</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleBatchEnable(false);
+                        setIsTopActionsOpen(false);
+                      }}
+                      disabled={batchProcessing}
+                      className="w-full text-left px-3 py-2 text-xs text-slate-300 hover:bg-slate-800/80 flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <XCircle size={14} className="text-rose-400" />
+                      <span>Disable Selected</span>
+                    </button>
+
+                    <div className="my-1 border-t border-slate-800" />
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleBatchHide(true);
+                        setIsTopActionsOpen(false);
+                      }}
+                      disabled={batchProcessing}
+                      className="w-full text-left px-3 py-2 text-xs text-amber-300 hover:bg-slate-800/80 flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <EyeOff size={14} className="text-amber-400" />
+                      <span>Hide Selected</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleBatchHide(false);
+                        setIsTopActionsOpen(false);
+                      }}
+                      disabled={batchProcessing}
+                      className="w-full text-left px-3 py-2 text-xs text-slate-300 hover:bg-slate-800/80 flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <Eye size={14} className="text-slate-400" />
+                      <span>Unhide Selected</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleKeepOnlySelectedVisible();
+                        setIsTopActionsOpen(false);
+                      }}
+                      disabled={batchProcessing}
+                      className="w-full text-left px-3 py-2 text-xs text-indigo-300 hover:bg-slate-800/80 flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <Sparkles size={14} className="text-indigo-400" />
+                      <span>Keep Only Selected</span>
+                    </button>
+
+                    <div className="my-1 border-t border-slate-800" />
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        openBatchContextModal();
+                        setIsTopActionsOpen(false);
+                      }}
+                      disabled={batchProcessing}
+                      className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-slate-800/80 flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <SlidersHorizontal size={14} className="text-indigo-400" />
+                      <span>Set Context Window...</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        openBatchReasoningModal();
+                        setIsTopActionsOpen(false);
+                      }}
+                      disabled={batchProcessing}
+                      className="w-full text-left px-3 py-2 text-xs text-amber-200 hover:bg-slate-800/80 flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <Brain size={14} className="text-amber-400" />
+                      <span>Set Reasoning Effort...</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        openBatchTempModal();
+                        setIsTopActionsOpen(false);
+                      }}
+                      disabled={batchProcessing}
+                      className="w-full text-left px-3 py-2 text-xs text-rose-200 hover:bg-slate-800/80 flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <Thermometer size={14} className="text-rose-400" />
+                      <span>Set Temperature...</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1691,98 +1948,110 @@ export const ModelsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Floating / Sticky Batch Action Bar when models are selected */}
+      {/* Floating Batch Action Bar when models are selected (Fixed at bottom viewport, always visible) */}
       {selectedModelIds.size > 0 && (
-        <div className="sticky top-2 z-20 p-3 bg-indigo-950/90 border border-indigo-700/80 rounded-xl shadow-xl flex items-center justify-between flex-wrap gap-3 backdrop-blur-md animate-in fade-in slide-in-from-top-2 duration-150">
-          <div className="flex items-center gap-2 text-xs text-indigo-200 font-medium">
-            <span className="w-5 h-5 rounded-full bg-indigo-600 flex items-center justify-center text-white font-mono text-[11px] font-bold">
-              {selectedModelIds.size}
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 max-w-[96vw] bg-slate-900/95 border border-indigo-500/60 shadow-2xl shadow-indigo-950/90 rounded-2xl px-4 py-3 backdrop-blur-md flex items-center justify-between gap-3 flex-wrap animate-in fade-in slide-in-from-bottom-5 duration-200">
+          <div className="flex items-center gap-2.5 pr-3 border-r border-slate-700/60 text-xs text-indigo-200 font-medium whitespace-nowrap">
+            <div className="w-7 h-7 rounded-lg bg-indigo-600/30 border border-indigo-500/50 flex items-center justify-center text-indigo-300">
+              <CheckSquare size={15} />
+            </div>
+            <span>
+              Selected: <strong className="text-white font-bold">{selectedModelIds.size}</strong>{" "}
+              {selectedModelIds.size === 1 ? "model" : "models"}
             </span>
-            <span>selected models</span>
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
             <button
+              type="button"
               onClick={() => handleBatchEnable(true)}
               disabled={batchProcessing}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer whitespace-nowrap"
             >
               <CheckCircle2 size={14} />
-              Enable Selected
+              <span>Enable Selected</span>
             </button>
 
             <button
+              type="button"
               onClick={() => handleBatchEnable(false)}
               disabled={batchProcessing}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 shadow-xs transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 shadow-xs transition-colors cursor-pointer whitespace-nowrap"
             >
               <XCircle size={14} />
-              Disable Selected
+              <span>Disable Selected</span>
             </button>
 
             <button
+              type="button"
               onClick={() => handleBatchHide(true)}
               disabled={batchProcessing}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-amber-300 text-xs font-semibold rounded-lg border border-slate-700 shadow-xs transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-amber-300 text-xs font-semibold rounded-lg border border-slate-700 shadow-xs transition-colors cursor-pointer whitespace-nowrap"
               title="Hide selected models from catalog and API"
             >
               <EyeOff size={14} />
-              Hide Selected
+              <span>Hide Selected</span>
             </button>
 
             <button
+              type="button"
               onClick={() => handleBatchHide(false)}
               disabled={batchProcessing}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 text-xs font-semibold rounded-lg border border-slate-700 shadow-xs transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 text-xs font-semibold rounded-lg border border-slate-700 shadow-xs transition-colors cursor-pointer whitespace-nowrap"
               title="Unhide selected models (show in catalog and API)"
             >
               <Eye size={14} />
-              Unhide Selected
+              <span>Unhide Selected</span>
             </button>
 
             <button
+              type="button"
               onClick={handleKeepOnlySelectedVisible}
               disabled={batchProcessing}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer whitespace-nowrap"
               title="Keep ONLY selected models visible in API and catalog (hide all others)"
             >
               <Sparkles size={14} />
-              Keep Only Selected
+              <span>Keep Only Selected</span>
             </button>
 
             <button
+              type="button"
               onClick={openBatchContextModal}
               disabled={batchProcessing}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-900/60 hover:bg-indigo-800 disabled:opacity-50 text-indigo-200 text-xs font-semibold rounded-lg border border-indigo-700 shadow-xs transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-900/60 hover:bg-indigo-800 disabled:opacity-50 text-indigo-200 text-xs font-semibold rounded-lg border border-indigo-700 shadow-xs transition-colors cursor-pointer whitespace-nowrap"
               title="Set context window for selected models"
             >
               <SlidersHorizontal size={14} />
-              Set Context ({selectedModelIds.size})
+              <span>Set Context ({selectedModelIds.size})</span>
             </button>
 
             <button
+              type="button"
               onClick={openBatchReasoningModal}
               disabled={batchProcessing}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-950/60 hover:bg-amber-900 disabled:opacity-50 text-amber-200 text-xs font-semibold rounded-lg border border-amber-700/70 shadow-xs transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-950/60 hover:bg-amber-900 disabled:opacity-50 text-amber-200 text-xs font-semibold rounded-lg border border-amber-700/70 shadow-xs transition-colors cursor-pointer whitespace-nowrap"
               title="Set reasoning effort for selected models"
             >
               <Brain size={14} />
-              Set Reasoning ({selectedModelIds.size})
+              <span>Set Reasoning ({selectedModelIds.size})</span>
             </button>
 
             <button
+              type="button"
               onClick={openBatchTempModal}
               disabled={batchProcessing}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-950/60 hover:bg-rose-900 disabled:opacity-50 text-rose-200 text-xs font-semibold rounded-lg border border-rose-700/70 shadow-xs transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-950/60 hover:bg-rose-900 disabled:opacity-50 text-rose-200 text-xs font-semibold rounded-lg border border-rose-700/70 shadow-xs transition-colors cursor-pointer whitespace-nowrap"
               title="Set temperature for selected models"
             >
               <Thermometer size={14} />
-              Set Temperature ({selectedModelIds.size})
+              <span>Set Temperature ({selectedModelIds.size})</span>
             </button>
 
             <button
+              type="button"
               onClick={clearSelection}
-              className="px-2.5 py-1.5 bg-transparent hover:bg-indigo-900/50 text-indigo-300 text-xs font-medium rounded-lg transition-colors ml-1"
+              className="px-2.5 py-1.5 bg-transparent hover:bg-indigo-900/50 text-indigo-300 text-xs font-medium rounded-lg transition-colors ml-1 cursor-pointer whitespace-nowrap"
             >
               Deselect All
             </button>
@@ -1827,12 +2096,13 @@ export const ModelsPage: React.FC = () => {
 
                     {/* Select All Checkbox for this Provider */}
                     {groupModels.length > 0 && (
-                      <div
+                      <button
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           toggleSelectProviderModels(groupModels);
                         }}
-                        className="flex items-center text-slate-400 hover:text-slate-200 cursor-pointer p-0.5"
+                        className="flex items-center text-slate-400 hover:text-slate-200 cursor-pointer p-0.5 rounded hover:bg-white/[0.06] transition-colors"
                         title={allSelected ? "Deselect all models of this provider" : "Select all models of this provider"}
                       >
                         {allSelected ? (
@@ -1842,7 +2112,7 @@ export const ModelsPage: React.FC = () => {
                         ) : (
                           <Square size={16} className="text-slate-500" />
                         )}
-                      </div>
+                      </button>
                     )}
 
                     <div className="w-8 h-8 rounded-xl bg-indigo-500/10 border border-indigo-500/25 flex items-center justify-center text-indigo-300 shrink-0 shadow-sm">
@@ -1905,46 +2175,70 @@ export const ModelsPage: React.FC = () => {
                         No models discovered yet for this provider. Add an API key and click "Refresh Models".
                       </div>
                     ) : (
-                      <table className="w-full text-left border-collapse text-xs">
-                        <thead>
-                          <tr className="border-b border-slate-800/80 bg-slate-950/30 text-slate-400 font-semibold uppercase tracking-wider text-[10px]">
-                            <th className="py-2.5 px-4 w-10 text-center">Select</th>
-                            <th className="py-2.5 px-4">Canonical Slug & Display Name</th>
-                            <th className="py-2.5 px-4">
-                              <div className="flex items-center gap-1">
-                                <Brain size={12} className="text-indigo-400" />
-                                <span>Intelligence</span>
-                              </div>
-                            </th>
-                            <th className="py-2.5 px-4">Capabilities</th>
-                            <th className="py-2.5 px-4">Limits & Context</th>
-                            <th className="py-2.5 px-4">Availability</th>
-                            <th className="py-2.5 px-4 text-center w-24">Display</th>
-                            <th className="py-2.5 px-4 text-right">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-800/50 text-slate-300">
-                          {groupModels.map((m) => {
-                            const isSelected = selectedModelIds.has(m.id);
-                            const isHidden = m.is_visible === false;
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="border-b border-slate-800/80 bg-slate-950/30 text-slate-400 font-semibold uppercase tracking-wider text-[10px]">
+                              <th className="py-2.5 px-4 w-10 text-center">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleSelectProviderModels(groupModels)}
+                                  className="inline-flex items-center justify-center p-1 rounded hover:bg-white/[0.08] text-slate-400 hover:text-slate-200 cursor-pointer transition-colors"
+                                  title={
+                                    allSelected
+                                      ? "Deselect all models in this provider"
+                                      : "Select all models in this provider"
+                                  }
+                                >
+                                  {allSelected ? (
+                                    <CheckSquare size={14} className="text-indigo-400" />
+                                  ) : isPartiallySelected ? (
+                                    <MinusSquare size={14} className="text-indigo-400" />
+                                  ) : (
+                                    <Square size={14} className="text-slate-500" />
+                                  )}
+                                </button>
+                              </th>
+                              <th className="py-2.5 px-4">Canonical Slug & Display Name</th>
+                              <th className="py-2.5 px-4">
+                                <div className="flex items-center gap-1">
+                                  <Brain size={12} className="text-indigo-400" />
+                                  <span>Intelligence</span>
+                                </div>
+                              </th>
+                              <th className="py-2.5 px-4">Capabilities</th>
+                              <th className="py-2.5 px-4">Limits & Context</th>
+                              <th className="py-2.5 px-4">Availability</th>
+                              <th className="py-2.5 px-4 text-center w-24">Display</th>
+                              <th className="py-2.5 px-4 text-right">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800/50 text-slate-300">
+                            {groupModels.map((m) => {
+                              const isSelected = selectedModelIds.has(m.id);
+                              const isHidden = m.is_visible === false;
 
-                            return (
-                              <tr
-                                key={m.id}
-                                id={`model-row-${m.id}`}
-                                className={`hover:bg-slate-800/25 transition-colors ${
-                                  isSelected ? "bg-indigo-950/20" : isHidden ? "opacity-60 bg-slate-950/40" : ""
-                                }`}
-                              >
-                                {/* Row Checkbox */}
-                                <td className="py-2.5 px-4 text-center">
-                                  <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    onChange={() => toggleSelectModel(m.id)}
-                                    className="rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-0 cursor-pointer"
-                                  />
-                                </td>
+                              return (
+                                <tr
+                                  key={m.id}
+                                  id={`model-row-${m.id}`}
+                                  className={`hover:bg-slate-800/25 transition-colors ${
+                                    isSelected ? "bg-indigo-950/20" : isHidden ? "opacity-60 bg-slate-950/40" : ""
+                                  }`}
+                                >
+                                  {/* Row Checkbox */}
+                                  <td
+                                    className="py-2.5 px-4 text-center cursor-pointer select-none"
+                                    onClick={(e) => handleModelCheckboxClick(m.id, e)}
+                                    title="Click to select/deselect (Hold Shift to select range)"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isSelected}
+                                      readOnly
+                                      className="rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-0 pointer-events-none"
+                                    />
+                                  </td>
 
                                 {/* Canonical Slug & Display Name */}
                                 <td className="py-2.5 px-4 font-mono font-medium text-indigo-300">
@@ -2141,6 +2435,7 @@ export const ModelsPage: React.FC = () => {
                           })}
                         </tbody>
                       </table>
+                      </div>
                     )}
                   </div>
                 )}

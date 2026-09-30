@@ -79,7 +79,7 @@ export const App: React.FC = () => {
   const activePageLabel = (t.nav as Record<string, any>)[activePage] || activePage.replace("-", " ");
 
   return (
-    <div className="flex h-screen bg-[#080c14] text-slate-100 overflow-hidden relative">
+    <div className="flex h-full w-full bg-[#080c14] text-slate-100 overflow-hidden relative">
       {/* Ambient background glow orbs */}
       <div className="fixed top-0 right-1/4 w-[500px] h-[350px] bg-indigo-600/[0.04] rounded-full blur-3xl pointer-events-none" />
       <div className="fixed bottom-0 right-1/3 w-[450px] h-[350px] bg-purple-600/[0.04] rounded-full blur-3xl pointer-events-none" />
@@ -126,7 +126,7 @@ export const App: React.FC = () => {
         </header>
 
         {/* Scrollable Page Body */}
-        <main className="flex-1 overflow-y-auto p-6 relative content-pane">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden p-6 relative content-pane">
           {activePage === "dashboard" && <DashboardPage />}
           {activePage === "analytics" && <AnalyticsPage />}
           {activePage === "providers" && <ProvidersPage />}
