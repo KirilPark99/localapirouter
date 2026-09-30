@@ -1872,6 +1872,14 @@ export const CredentialsPage: React.FC = () => {
                                               {actionMessage.latency}ms
                                             </span>
                                           )}
+                                          {c.model_cooldowns && Object.keys(c.model_cooldowns).length > 0 && (
+                                            <span
+                                              className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/60 border border-amber-500/30 text-amber-300 font-mono cursor-help"
+                                              title={Object.entries(c.model_cooldowns).map(([m, s]) => `${m}: ${s}s cooldown`).join("\n")}
+                                            >
+                                              {Object.keys(c.model_cooldowns).length} model(s) cooldown
+                                            </span>
+                                          )}
                                         </div>
                                         {c.last_error && (
                                           <span

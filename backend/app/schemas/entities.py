@@ -171,6 +171,7 @@ class CredentialRead(BaseModel):
     last_error: Optional[str] = None
     consecutive_failures: int
     cooldown_until: Optional[datetime] = None
+    model_cooldowns: Optional[Dict[str, int]] = None
     priority: int
     weight: int
     rpm_limit: Optional[int] = None

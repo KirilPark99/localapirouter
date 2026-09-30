@@ -115,6 +115,7 @@ export interface Credential {
   last_error?: string;
   consecutive_failures: number;
   cooldown_until?: string;
+  model_cooldowns?: Record<string, number>;
   priority: number;
   weight: number;
   rpm_limit?: number;

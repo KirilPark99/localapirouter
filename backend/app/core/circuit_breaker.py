@@ -1,5 +1,5 @@
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from app.core.errors import ErrorCategory
 import asyncio
 
@@ -24,20 +24,33 @@ class CircuitBreaker:
         self._last_errors: Dict[int, str] = {}
         self._lock = asyncio.Lock()
 
-    def _is_model_specific_rate_limit(self, error_message: str, model_id: Optional[str]) -> bool:
-        if not model_id or not error_message:
+    @staticmethod
+    def _normalize_model_keys(model_id: str) -> List[str]:
+        clean = model_id.strip().lower()
+        keys = [clean]
+        if "/" in clean:
+            short = clean.split("/")[-1]
+            if short and short not in keys:
+                keys.append(short)
+        return keys
+
+    @staticmethod
+    def _is_account_wide_quota_exhaustion(error_message: str) -> bool:
+        if not error_message:
             return False
         lower_err = error_message.lower()
-        lower_model = model_id.lower().strip()
-        if lower_model in lower_err:
-            return True
-        if "/" in lower_model:
-            short_name = lower_model.split("/")[-1]
-            if short_name and short_name in lower_err:
-                return True
-        if any(kw in lower_err for kw in ("for model", "model `", "model '", "per model", "otpm", "output tokens per minute")):
-            return True
-        return False
+        return any(kw in lower_err for kw in (
+            "insufficient_quota",
+            "check your plan and billing",
+            "billing details",
+            "credit balance is too low",
+            "organization has been disabled",
+            "account deactivated",
+            "account has been suspended",
+            "account is suspended",
+            "usage limit reached for this organization",
+            "monthly organization quota",
+        ))
 
     def is_available(self, cred_id: int, model_id: Optional[str] = None) -> Tuple[bool, str]:
         """Check if credential is available for routing requests (and optionally for a specific model)."""
@@ -61,27 +74,28 @@ class CircuitBreaker:
 
         # Check model-specific rate limit cooldown if model_id provided
         if model_id:
-            clean_model = model_id.strip().lower()
-            m_cooldown = self._model_cooldown_until.get((cred_id, clean_model))
-            if m_cooldown and now < m_cooldown:
-                remaining = int((m_cooldown - now).total_seconds())
-                return False, f"Model '{model_id}' is in cooldown for {remaining}s (RATE_LIMITED)"
-            elif m_cooldown and now >= m_cooldown:
-                self._model_cooldown_until.pop((cred_id, clean_model), None)
-                self._model_last_errors.pop((cred_id, clean_model), None)
+            for m in self._normalize_model_keys(model_id):
+                m_cooldown = self._model_cooldown_until.get((cred_id, m))
+                if m_cooldown and now < m_cooldown:
+                    remaining = int((m_cooldown - now).total_seconds())
+                    return False, f"Model '{model_id}' is in cooldown for {remaining}s (RATE_LIMITED)"
+                elif m_cooldown and now >= m_cooldown:
+                    self._model_cooldown_until.pop((cred_id, m), None)
+                    self._model_last_errors.pop((cred_id, m), None)
 
         return True, "OK"
 
     def record_success(self, cred_id: int, model_id: Optional[str] = None):
         """Record successful request through this credential."""
         self._consecutive_failures[cred_id] = 0
-        self._statuses[cred_id] = CredentialStatus.HEALTHY
+        if self._statuses.get(cred_id) in (CredentialStatus.DEGRADED, CredentialStatus.RATE_LIMITED, CredentialStatus.COOLDOWN):
+            self._statuses[cred_id] = CredentialStatus.HEALTHY
         self._cooldown_until.pop(cred_id, None)
         self._last_errors.pop(cred_id, None)
         if model_id:
-            clean_model = model_id.strip().lower()
-            self._model_cooldown_until.pop((cred_id, clean_model), None)
-            self._model_last_errors.pop((cred_id, clean_model), None)
+            for m in self._normalize_model_keys(model_id):
+                self._model_cooldown_until.pop((cred_id, m), None)
+                self._model_last_errors.pop((cred_id, m), None)
 
     def record_failure(
         self,
@@ -93,7 +107,7 @@ class CircuitBreaker:
     ):
         """Record failure and trip circuit breaker or cooldown if appropriate."""
         now = datetime.now(timezone.utc)
-        self._last_errors[cred_id] = error_message or category.value
+        self._last_errors[cred_id] = error_message or (category.value if hasattr(category, "value") else str(category))
 
         if category == ErrorCategory.AUTH_ERROR:
             self._statuses[cred_id] = CredentialStatus.INVALID
@@ -102,15 +116,19 @@ class CircuitBreaker:
 
         if category == ErrorCategory.RATE_LIMIT:
             duration = retry_after if retry_after and retry_after > 0 else self.default_cooldown_seconds
-            if self._is_model_specific_rate_limit(error_message, model_id):
-                clean_model = model_id.strip().lower()
-                self._model_cooldown_until[(cred_id, clean_model)] = now + timedelta(seconds=duration)
-                self._model_last_errors[(cred_id, clean_model)] = error_message
+            
+            # If no model is specified, or error message explicitly indicates account-wide billing/organization quota exhaustion:
+            if not model_id or self._is_account_wide_quota_exhaustion(error_message):
+                self._statuses[cred_id] = CredentialStatus.RATE_LIMITED
+                self._cooldown_until[cred_id] = now + timedelta(seconds=duration)
+                self._consecutive_failures[cred_id] = self._consecutive_failures.get(cred_id, 0) + 1
                 return
 
-            self._statuses[cred_id] = CredentialStatus.RATE_LIMITED
-            self._cooldown_until[cred_id] = now + timedelta(seconds=duration)
+            # Otherwise, rate limit is isolated to the specific model:
             self._consecutive_failures[cred_id] = self._consecutive_failures.get(cred_id, 0) + 1
+            for m in self._normalize_model_keys(model_id):
+                self._model_cooldown_until[(cred_id, m)] = now + timedelta(seconds=duration)
+                self._model_last_errors[(cred_id, m)] = error_message
             return
 
         if category.is_retryable:
@@ -149,16 +167,20 @@ class CircuitBreaker:
 
         status = self._statuses.get(cred_id, CredentialStatus.HEALTHY)
         if model_id:
-            clean_m = model_id.strip().lower()
-            if clean_m in model_cooldowns:
-                cooldown_remaining = model_cooldowns[clean_m]
-                if status == CredentialStatus.HEALTHY:
-                    status = CredentialStatus.RATE_LIMITED
+            for m in self._normalize_model_keys(model_id):
+                if m in model_cooldowns:
+                    cooldown_remaining = model_cooldowns[m]
+                    if status == CredentialStatus.HEALTHY:
+                        status = CredentialStatus.RATE_LIMITED
+                    break
+        elif model_cooldowns and status == CredentialStatus.HEALTHY:
+            status = CredentialStatus.DEGRADED
 
         return {
             "status": status,
             "consecutive_failures": self._consecutive_failures.get(cred_id, 0),
             "cooldown_remaining_seconds": cooldown_remaining,
+            "cooldown_until": cooldown if (cooldown and now < cooldown) else None,
             "last_error": self._last_errors.get(cred_id, None),
             "model_cooldowns": model_cooldowns,
         }

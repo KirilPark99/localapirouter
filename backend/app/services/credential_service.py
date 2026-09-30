@@ -27,42 +27,43 @@ class CredentialService:
 
         result = await db.execute(query)
         creds = result.scalars().all()
+        return [cls._build_credential_read(c) for c in creds]
 
-        output: List[CredentialRead] = []
-        for c in creds:
-            cb_status = circuit_breaker.get_status(c.id)
-            status = cb_status["status"] if cb_status["status"] != CredentialStatus.UNKNOWN else c.status
-            if not c.enabled:
-                status = CredentialStatus.DISABLED
+    @staticmethod
+    def _build_credential_read(c: ProviderCredential) -> CredentialRead:
+        cb_status = circuit_breaker.get_status(c.id)
+        status = cb_status["status"] if cb_status["status"] != CredentialStatus.UNKNOWN else c.status
+        if not c.enabled:
+            status = CredentialStatus.DISABLED
+        cooldown_until = cb_status.get("cooldown_until") or c.cooldown_until
+        model_cooldowns = cb_status.get("model_cooldowns") or None
 
-            output.append(
-                CredentialRead(
-                    id=c.id,
-                    provider_id=c.provider_id,
-                    provider_name=c.provider.name,
-                    name=c.name,
-                    group_name=c.group_name,
-                    masked_key=c.masked_key,
-                    key_fingerprint=c.key_fingerprint,
-                    enabled=c.enabled,
-                    proxy_id=c.proxy_id,
-                    proxy_name=c.proxy.name if c.proxy else None,
-                    status=status,
-                    last_checked_at=c.last_checked_at,
-                    last_success_at=c.last_success_at,
-                    last_error=c.last_error,
-                    consecutive_failures=c.consecutive_failures,
-                    cooldown_until=c.cooldown_until,
-                    priority=c.priority,
-                    weight=c.weight,
-                    rpm_limit=c.rpm_limit,
-                    tpm_limit=c.tpm_limit,
-                    max_concurrency=c.max_concurrency,
-                    discovered_models_count=len(c.discovered_models),
-                    created_at=c.created_at,
-                )
-            )
-        return output
+        return CredentialRead(
+            id=c.id,
+            provider_id=c.provider_id,
+            provider_name=c.provider.name,
+            name=c.name,
+            group_name=c.group_name,
+            masked_key=c.masked_key,
+            key_fingerprint=c.key_fingerprint,
+            enabled=c.enabled,
+            proxy_id=c.proxy_id,
+            proxy_name=c.proxy.name if c.proxy else None,
+            status=status,
+            last_checked_at=c.last_checked_at,
+            last_success_at=c.last_success_at,
+            last_error=c.last_error,
+            consecutive_failures=c.consecutive_failures,
+            cooldown_until=cooldown_until,
+            model_cooldowns=model_cooldowns,
+            priority=c.priority,
+            weight=c.weight,
+            rpm_limit=c.rpm_limit,
+            tpm_limit=c.tpm_limit,
+            max_concurrency=c.max_concurrency,
+            discovered_models_count=len(c.discovered_models) if c.discovered_models else 0,
+            created_at=c.created_at,
+        )
 
     @classmethod
     async def get_credential(cls, db: AsyncSession, credential_id: int) -> Optional[ProviderCredential]:
@@ -140,31 +141,7 @@ class CredentialService:
         full_cred = await cls.get_credential(db, cred.id)
         assert full_cred is not None
 
-        return CredentialRead(
-            id=full_cred.id,
-            provider_id=full_cred.provider_id,
-            provider_name=full_cred.provider.name,
-            name=full_cred.name,
-            group_name=full_cred.group_name,
-            masked_key=full_cred.masked_key,
-            key_fingerprint=full_cred.key_fingerprint,
-            enabled=full_cred.enabled,
-            proxy_id=full_cred.proxy_id,
-            proxy_name=full_cred.proxy.name if full_cred.proxy else None,
-            status=CredentialStatus.DISABLED if not full_cred.enabled else full_cred.status,
-            last_checked_at=full_cred.last_checked_at,
-            last_success_at=full_cred.last_success_at,
-            last_error=full_cred.last_error,
-            consecutive_failures=full_cred.consecutive_failures,
-            cooldown_until=full_cred.cooldown_until,
-            priority=full_cred.priority,
-            weight=full_cred.weight,
-            rpm_limit=full_cred.rpm_limit,
-            tpm_limit=full_cred.tpm_limit,
-            max_concurrency=full_cred.max_concurrency,
-            discovered_models_count=0,
-            created_at=full_cred.created_at,
-        )
+        return cls._build_credential_read(full_cred)
 
     @classmethod
     async def update_credential(cls, db: AsyncSession, credential_id: int, data: CredentialUpdate) -> Optional[CredentialRead]:
@@ -209,31 +186,7 @@ class CredentialService:
         await db.commit()
         full_cred = await cls.get_credential(db, credential_id)
         assert full_cred is not None
-        return CredentialRead(
-            id=full_cred.id,
-            provider_id=full_cred.provider_id,
-            provider_name=full_cred.provider.name,
-            name=full_cred.name,
-            group_name=full_cred.group_name,
-            masked_key=full_cred.masked_key,
-            key_fingerprint=full_cred.key_fingerprint,
-            enabled=full_cred.enabled,
-            proxy_id=full_cred.proxy_id,
-            proxy_name=full_cred.proxy.name if full_cred.proxy else None,
-            status=CredentialStatus.DISABLED if not full_cred.enabled else full_cred.status,
-            last_checked_at=full_cred.last_checked_at,
-            last_success_at=full_cred.last_success_at,
-            last_error=full_cred.last_error,
-            consecutive_failures=full_cred.consecutive_failures,
-            cooldown_until=full_cred.cooldown_until,
-            priority=full_cred.priority,
-            weight=full_cred.weight,
-            rpm_limit=full_cred.rpm_limit,
-            tpm_limit=full_cred.tpm_limit,
-            max_concurrency=full_cred.max_concurrency,
-            discovered_models_count=len(full_cred.discovered_models),
-            created_at=full_cred.created_at,
-        )
+        return cls._build_credential_read(full_cred)
 
     @classmethod
     async def bulk_assign_proxy(
@@ -267,34 +220,7 @@ class CredentialService:
             .order_by(ProviderCredential.id.asc())
         )
         creds = result.scalars().all()
-        return [
-            CredentialRead(
-                id=c.id,
-                provider_id=c.provider_id,
-                provider_name=c.provider.name,
-                name=c.name,
-                group_name=c.group_name,
-                masked_key=c.masked_key,
-                key_fingerprint=c.key_fingerprint,
-                enabled=c.enabled,
-                proxy_id=c.proxy_id,
-                proxy_name=c.proxy.name if c.proxy else None,
-                status=CredentialStatus.DISABLED if not c.enabled else c.status,
-                last_checked_at=c.last_checked_at,
-                last_success_at=c.last_success_at,
-                last_error=c.last_error,
-                consecutive_failures=c.consecutive_failures,
-                cooldown_until=c.cooldown_until,
-                priority=c.priority,
-                weight=c.weight,
-                rpm_limit=c.rpm_limit,
-                tpm_limit=c.tpm_limit,
-                max_concurrency=c.max_concurrency,
-                discovered_models_count=len(c.discovered_models),
-                created_at=c.created_at,
-            )
-            for c in creds
-        ]
+        return [cls._build_credential_read(c) for c in creds]
 
     @classmethod
     async def bulk_assign_group(
@@ -345,34 +271,7 @@ class CredentialService:
             .order_by(ProviderCredential.id.asc())
         )
         creds = result.scalars().all()
-        return [
-            CredentialRead(
-                id=c.id,
-                provider_id=c.provider_id,
-                provider_name=c.provider.name,
-                name=c.name,
-                group_name=c.group_name,
-                masked_key=c.masked_key,
-                key_fingerprint=c.key_fingerprint,
-                enabled=c.enabled,
-                proxy_id=c.proxy_id,
-                proxy_name=c.proxy.name if c.proxy else None,
-                status=CredentialStatus.DISABLED if not c.enabled else c.status,
-                last_checked_at=c.last_checked_at,
-                last_success_at=c.last_success_at,
-                last_error=c.last_error,
-                consecutive_failures=c.consecutive_failures,
-                cooldown_until=c.cooldown_until,
-                priority=c.priority,
-                weight=c.weight,
-                rpm_limit=c.rpm_limit,
-                tpm_limit=c.tpm_limit,
-                max_concurrency=c.max_concurrency,
-                discovered_models_count=len(c.discovered_models),
-                created_at=c.created_at,
-            )
-            for c in creds
-        ]
+        return [cls._build_credential_read(c) for c in creds]
 
     @classmethod
     async def delete_credential(cls, db: AsyncSession, credential_id: int) -> bool:

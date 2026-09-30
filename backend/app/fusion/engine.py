@@ -310,7 +310,12 @@ class FusionEngine:
                         j_query = j_query.where(ProviderCredential.group_name == profile.judge_credential_group)
                     j_query = j_query.order_by(ProviderCredential.priority.asc(), ProviderCredential.weight.desc())
                     j_res = await db.execute(j_query)
-                    judge_cred = j_res.scalars().first()
+                    judge_creds = j_res.scalars().all()
+                    avail_creds = [
+                        c for c in judge_creds
+                        if circuit_breaker.is_available(c.id, profile.judge_model.provider_model_id if profile.judge_model else None)[0]
+                    ]
+                    judge_cred = (avail_creds or judge_creds)[0] if judge_creds else None
 
                 if not judge_cred:
                     raise RouterException("Judge credential not found or disabled", ErrorCategory.AUTH_ERROR, request_id=req_id)
@@ -341,14 +346,14 @@ class FusionEngine:
                         ),
                         timeout=profile.timeout_seconds,
                     )
-                    circuit_breaker.record_success(judge_cred.id)
+                    circuit_breaker.record_success(judge_cred.id, profile.judge_model.provider_model_id if profile.judge_model else None)
                 except Exception as e:
                     re = e if isinstance(e, RouterException) else (
                         RouterException(f"Judge request timed out after {profile.timeout_seconds}s", ErrorCategory.UPSTREAM_TIMEOUT, request_id=req_id)
                         if isinstance(e, asyncio.TimeoutError) else
                         judge_adapter.normalize_error(exception=e)
                     )
-                    circuit_breaker.record_failure(judge_cred.id, re.category, re.retry_after, re.message)
+                    circuit_breaker.record_failure(judge_cred.id, re.category, re.retry_after, re.message, profile.judge_model.provider_model_id if profile.judge_model else None)
                     re.request_id = req_id
                     raise re
 
@@ -650,7 +655,8 @@ class FusionEngine:
         last_err = None
         last_status_code = 502
         for cred in creds_to_try:
-            is_avail, _ = circuit_breaker.is_available(cred.id)
+            cand_prov_model_id = model_obj.provider_model_id if model_obj else None
+            is_avail, _ = circuit_breaker.is_available(cred.id, cand_prov_model_id)
             if not is_avail and len(creds_to_try) > 1:
                 continue
 
@@ -675,7 +681,7 @@ class FusionEngine:
                 content = resp.choices[0].message.content if resp.choices else ""
                 p_toks = resp.usage.prompt_tokens if resp.usage else 0
                 c_toks = resp.usage.completion_tokens if resp.usage else 0
-                circuit_breaker.record_success(cred.id)
+                circuit_breaker.record_success(cred.id, cand_prov_model_id)
                 return {
                     "idx": idx,
                     "label": label,
@@ -693,7 +699,7 @@ class FusionEngine:
                 re = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
                 last_err = re.message
                 last_status_code = re.status_code
-                circuit_breaker.record_failure(cred.id, re.category, re.retry_after, re.message)
+                circuit_breaker.record_failure(cred.id, re.category, re.retry_after, re.message, cand_prov_model_id)
 
         latency = round((time.perf_counter() - p_t0) * 1000, 2)
         return {
@@ -729,11 +735,12 @@ class FusionEngine:
         judge_model_name: Optional[str] = None
         judge_provider_name: Optional[str] = None
         judge_credential_name: Optional[str] = None
+        judge_cred: Optional[ProviderCredential] = None
         resolved_provider_id: Optional[int] = None
         resolved_credential_id: Optional[int] = None
 
         async def _stream_runner(session: AsyncSession):
-            nonlocal profile, judge_model_name, judge_provider_name, judge_credential_name
+            nonlocal profile, judge_model_name, judge_provider_name, judge_credential_name, judge_cred
             nonlocal resolved_provider_id, resolved_credential_id
             total_cand_p_tokens = 0
             total_cand_c_tokens = 0
@@ -979,7 +986,12 @@ class FusionEngine:
                             j_query = j_query.where(ProviderCredential.group_name == profile.judge_credential_group)
                         j_query = j_query.order_by(ProviderCredential.priority.asc(), ProviderCredential.weight.desc())
                         j_res = await session.execute(j_query)
-                        judge_cred = j_res.scalars().first()
+                        judge_creds = j_res.scalars().all()
+                        avail_creds = [
+                            c for c in judge_creds
+                            if circuit_breaker.is_available(c.id, profile.judge_model.provider_model_id if profile.judge_model else None)[0]
+                        ]
+                        judge_cred = (avail_creds or judge_creds)[0] if judge_creds else None
 
                     if not judge_cred:
                         raise RouterException("Judge credential not found or disabled", ErrorCategory.AUTH_ERROR, request_id=req_id)
@@ -1015,6 +1027,9 @@ class FusionEngine:
                                 processed_lines.append(pl)
                         if processed_lines:
                             yield "\n".join(processed_lines) + "\n\n"
+
+                if judge_cred and profile and profile.judge_model:
+                    circuit_breaker.record_success(judge_cred.id, profile.judge_model.provider_model_id)
 
                 # Stream completed successfully
                 judge_latency = round((time.perf_counter() - judge_t0) * 1000, 2)
@@ -1139,6 +1154,9 @@ class FusionEngine:
                         "error_message": re.message,
                         "error_category": re.category.value if hasattr(re.category, "value") else str(re.category),
                     })
+
+                if judge_cred and profile and profile.judge_model:
+                    circuit_breaker.record_failure(judge_cred.id, re.category, re.retry_after, re.message, profile.judge_model.provider_model_id)
 
                 try:
                     await asyncio.shield(
