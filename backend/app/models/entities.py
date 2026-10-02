@@ -114,6 +114,7 @@ class DiscoveredModel(Base, TimestampMixin):
     is_visible: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     reasoning_effort: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     temperature: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    model_type: Mapped[str] = mapped_column(String(50), default="openai", nullable=False)  # "openai" or "jev"
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     provider: Mapped["Provider"] = relationship("Provider", back_populates="models")

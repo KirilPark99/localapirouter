@@ -139,6 +139,15 @@ export const ModelsPage: React.FC = () => {
   const [tempValidationError, setTempValidationError] = useState<string | null>(null);
   const [savingTemp, setSavingTemp] = useState(false);
 
+  // Model Type (Engine) state
+  const [modelTypeFilter, setModelTypeFilter] = useState<"all" | "openai" | "jev">("all");
+  const [modelTypeModalModel, setModelTypeModalModel] = useState<DiscoveredModel | null>(null);
+  const [isBatchModelTypeModalOpen, setIsBatchModelTypeModalOpen] = useState(false);
+  const [selectedModelType, setSelectedModelType] = useState<string>("openai");
+  const [batchSelectedModelType, setBatchSelectedModelType] = useState<string>("openai");
+  const [savingModelType, setSavingModelType] = useState(false);
+  const [manualModelType, setManualModelType] = useState<string>("openai");
+
   const loadModels = async (): Promise<DiscoveredModel[]> => {
     setLoading(true);
     try {
@@ -374,11 +383,13 @@ export const ModelsPage: React.FC = () => {
           provider_model_id: manualModelId,
           display_name: manualDisplayName || manualModelId,
           context_length: parseInt(manualContextLength) || null,
+          model_type: manualModelType,
         }),
       });
       setIsManualModalOpen(false);
       setManualModelId("");
       setManualDisplayName("");
+      setManualModelType("openai");
       const refreshed = await loadModels();
       if (created) {
         const found = (refreshed || []).find(
@@ -818,6 +829,83 @@ export const ModelsPage: React.FC = () => {
     }
   };
 
+  const openModelTypeModal = (model: DiscoveredModel) => {
+    setModelTypeModalModel(model);
+    setSelectedModelType(model.model_type || "openai");
+  };
+
+  const handleSaveModelType = async () => {
+    if (!modelTypeModalModel) return;
+    setSavingModelType(true);
+    try {
+      const res = await apiRequest<DiscoveredModel>(`/api/admin/models/${modelTypeModalModel.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ model_type: selectedModelType }),
+      });
+      setModels((prev) =>
+        prev.map((item) =>
+          item.id === modelTypeModalModel.id ? { ...item, model_type: res.model_type } : item
+        )
+      );
+      setNewlyDiscoveredModels((prev) =>
+        prev.map((item) =>
+          item.id === modelTypeModalModel.id ? { ...item, model_type: res.model_type } : item
+        )
+      );
+      setStatusMessage({
+        text: `Model ${modelTypeModalModel.canonical_slug} set to ${selectedModelType === "jev" ? "Jev (System One)" : "OpenAI Compatible"}.`,
+        ok: true,
+      });
+      setModelTypeModalModel(null);
+    } catch (err: any) {
+      alert("Failed to update model type: " + err.message);
+    } finally {
+      setSavingModelType(false);
+    }
+  };
+
+  const openBatchModelTypeModal = () => {
+    setIsBatchModelTypeModalOpen(true);
+    setBatchSelectedModelType("openai");
+  };
+
+  const handleSaveBatchModelType = async () => {
+    if (selectedModelIds.size === 0) return;
+    setSavingModelType(true);
+    try {
+      await apiRequest("/api/admin/models/batch-update", {
+        method: "POST",
+        body: JSON.stringify({
+          model_ids: Array.from(selectedModelIds),
+          model_type: batchSelectedModelType,
+        }),
+      });
+      setModels((prev) =>
+        prev.map((item) =>
+          selectedModelIds.has(item.id)
+            ? { ...item, model_type: batchSelectedModelType }
+            : item
+        )
+      );
+      setNewlyDiscoveredModels((prev) =>
+        prev.map((item) =>
+          selectedModelIds.has(item.id)
+            ? { ...item, model_type: batchSelectedModelType }
+            : item
+        )
+      );
+      setStatusMessage({
+        text: `Set ${selectedModelIds.size} models to ${batchSelectedModelType === "jev" ? "Jev (System One)" : "OpenAI Compatible"}.`,
+        ok: true,
+      });
+      setIsBatchModelTypeModalOpen(false);
+    } catch (err: any) {
+      alert("Batch model type update failed: " + err.message);
+    } finally {
+      setSavingModelType(false);
+    }
+  };
+
   const toggleGroup = (providerId: number) => {
     setCollapsedProviders((prev) => ({
       ...prev,
@@ -1002,6 +1090,11 @@ export const ModelsPage: React.FC = () => {
       if (visibilityFilter === "visible" && isHidden) return;
       if (visibilityFilter === "hidden" && !isHidden) return;
 
+      // Model type filter check
+      const mType = m.model_type || "openai";
+      if (modelTypeFilter === "openai" && mType !== "openai") return;
+      if (modelTypeFilter === "jev" && mType !== "jev") return;
+
       // Search filter check
       if (
         q &&
@@ -1087,7 +1180,7 @@ export const ModelsPage: React.FC = () => {
     });
 
     return groups;
-  }, [models, providers, search, visibilityFilter, ratingFilter, sortBy]);
+  }, [models, providers, search, visibilityFilter, ratingFilter, modelTypeFilter, sortBy]);
 
   const allVisibleModels = useMemo(() => {
     return providerGroups.flatMap((g) => g.models);
@@ -1348,6 +1441,7 @@ export const ModelsPage: React.FC = () => {
                     </th>
                     <th className="py-2.5 px-4">Provider</th>
                     <th className="py-2.5 px-4">Model / Canonical Slug</th>
+                    <th className="py-2.5 px-4 text-center w-24">Type</th>
                     <th className="py-2.5 px-4">
                       <div className="flex items-center gap-1">
                         <Brain size={12} className="text-indigo-400" />
@@ -1422,6 +1516,32 @@ export const ModelsPage: React.FC = () => {
                           <div className="text-[11px] text-slate-400 font-sans mt-0.5">
                             {m.display_name}
                           </div>
+                        </td>
+
+                        {/* Model Type */}
+                        <td className="py-2.5 px-4 text-center">
+                          <button
+                            type="button"
+                            onClick={() => openModelTypeModal(m)}
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
+                              m.model_type === "jev"
+                                ? "bg-violet-950/80 border-violet-500/60 text-violet-200 hover:bg-violet-900 shadow-xs"
+                                : "bg-slate-800/80 border-slate-700/60 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+                            }`}
+                            title={`Model Mode: ${m.model_type === "jev" ? "Jev (System One Decision Model)" : "OpenAI Compatible"}. Click to change.`}
+                          >
+                            {m.model_type === "jev" ? (
+                              <>
+                                <Sparkles size={10} className="text-violet-400" />
+                                <span>Jev</span>
+                              </>
+                            ) : (
+                              <>
+                                <Cpu size={10} className="text-slate-400" />
+                                <span>OpenAI</span>
+                              </>
+                            )}
+                          </button>
                         </td>
 
                         {/* Intelligence / Rating */}
@@ -1853,6 +1973,19 @@ export const ModelsPage: React.FC = () => {
                       <Thermometer size={14} className="text-rose-400" />
                       <span>Set Temperature...</span>
                     </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        openBatchModelTypeModal();
+                        setIsTopActionsOpen(false);
+                      }}
+                      disabled={batchProcessing}
+                      className="w-full text-left px-3 py-2 text-xs text-violet-200 hover:bg-slate-800/80 flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <Cpu size={14} className="text-violet-400" />
+                      <span>Set Model Type...</span>
+                    </button>
                   </div>
                 )}
               </div>
@@ -1922,6 +2055,51 @@ export const ModelsPage: React.FC = () => {
                 title="Models with agentic reasoning score 20+"
               >
                 🤖 Agents (20+)
+              </button>
+            </div>
+          </div>
+
+          {/* Model Type Filter Chips */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1 mr-1">
+              <Cpu size={12} className="text-violet-400" />
+              <span>Type:</span>
+            </span>
+            <div className="flex items-center bg-slate-950 p-0.5 rounded-lg border border-slate-800">
+              <button
+                type="button"
+                onClick={() => setModelTypeFilter("all")}
+                className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${
+                  modelTypeFilter === "all"
+                    ? "bg-slate-800 text-slate-100"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                All Types
+              </button>
+              <button
+                type="button"
+                onClick={() => setModelTypeFilter("openai")}
+                className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${
+                  modelTypeFilter === "openai"
+                    ? "bg-indigo-600/30 text-indigo-300 border border-indigo-500/40"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+                title="Only OpenAI compatible models (default)"
+              >
+                OpenAI
+              </button>
+              <button
+                type="button"
+                onClick={() => setModelTypeFilter("jev")}
+                className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${
+                  modelTypeFilter === "jev"
+                    ? "bg-violet-600/30 text-violet-300 border border-violet-500/40"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+                title="Only Jev / System One decision models"
+              >
+                ⚡ Jev
               </button>
             </div>
           </div>
@@ -2046,6 +2224,17 @@ export const ModelsPage: React.FC = () => {
             >
               <Thermometer size={14} />
               <span>Set Temperature ({selectedModelIds.size})</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={openBatchModelTypeModal}
+              disabled={batchProcessing}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-950/60 hover:bg-violet-900 disabled:opacity-50 text-violet-200 text-xs font-semibold rounded-lg border border-violet-700/70 shadow-xs transition-colors cursor-pointer whitespace-nowrap"
+              title="Set model type (OpenAI Compatible or Jev System One) for selected models"
+            >
+              <Cpu size={14} />
+              <span>Set Model Type ({selectedModelIds.size})</span>
             </button>
 
             <button
@@ -2200,6 +2389,7 @@ export const ModelsPage: React.FC = () => {
                                 </button>
                               </th>
                               <th className="py-2.5 px-4">Canonical Slug & Display Name</th>
+                              <th className="py-2.5 px-4 text-center w-24">Type</th>
                               <th className="py-2.5 px-4">
                                 <div className="flex items-center gap-1">
                                   <Brain size={12} className="text-indigo-400" />
@@ -2258,6 +2448,32 @@ export const ModelsPage: React.FC = () => {
                                   <div className="text-[11px] text-slate-400 font-sans mt-0.5">
                                     {m.display_name}
                                   </div>
+                                </td>
+
+                                {/* Model Type */}
+                                <td className="py-2.5 px-4 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => openModelTypeModal(m)}
+                                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
+                                      m.model_type === "jev"
+                                        ? "bg-violet-950/80 border-violet-500/60 text-violet-200 hover:bg-violet-900 shadow-xs"
+                                        : "bg-slate-800/80 border-slate-700/60 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+                                    }`}
+                                    title={`Model Mode: ${m.model_type === "jev" ? "Jev (System One Decision Model)" : "OpenAI Compatible"}. Click to change.`}
+                                  >
+                                    {m.model_type === "jev" ? (
+                                      <>
+                                        <Sparkles size={10} className="text-violet-400" />
+                                        <span>Jev</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Cpu size={10} className="text-slate-400" />
+                                        <span>OpenAI</span>
+                                      </>
+                                    )}
+                                  </button>
                                 </td>
 
                                 {/* Intelligence / Rating */}
@@ -2498,6 +2714,18 @@ export const ModelsPage: React.FC = () => {
               onChange={(e) => setManualContextLength(e.target.value)}
               className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:border-indigo-500 focus:outline-none font-mono"
             />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-300 mb-1">Model Type / Engine</label>
+            <select
+              value={manualModelType}
+              onChange={(e) => setManualModelType(e.target.value)}
+              className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:border-indigo-500 focus:outline-none cursor-pointer"
+            >
+              <option value="openai">OpenAI Compatible (Default - Chat, Completions, Tools)</option>
+              <option value="jev">Jev (System One Decision Model - Choice, Score, Noul)</option>
+            </select>
           </div>
 
           <div className="flex justify-end gap-2.5 pt-3 border-t border-slate-800">
@@ -3358,6 +3586,191 @@ export const ModelsPage: React.FC = () => {
                 <span>Apply to {selectedModelIds.size} models</span>
               </button>
             </div>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Modal: Single Model Type (Engine) Configuration */}
+      <Modal
+        isOpen={!!modelTypeModalModel}
+        onClose={() => setModelTypeModalModel(null)}
+        title="Configure Model Type / Engine"
+        maxWidth="lg"
+      >
+        {modelTypeModalModel && (
+          <div className="space-y-4">
+            <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-lg">
+              <div className="text-xs font-mono font-semibold text-violet-300 break-all">
+                {modelTypeModalModel.canonical_slug}
+              </div>
+              <div className="text-[11px] text-slate-400 mt-1 flex items-center justify-between flex-wrap gap-2">
+                <span>
+                  Provider: <span className="text-slate-200 font-medium">{modelTypeModalModel.provider_name}</span>
+                </span>
+                <span>
+                  Current type:{" "}
+                  <span className="text-violet-400 font-mono font-semibold">
+                    {modelTypeModalModel.model_type === "jev" ? "Jev (System One)" : "OpenAI Compatible"}
+                  </span>
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-xs font-medium text-slate-300">
+                Select Model Operational Mode:
+              </label>
+
+              {/* Option 1: OpenAI Compatible */}
+              <div
+                onClick={() => setSelectedModelType("openai")}
+                className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
+                  selectedModelType === "openai"
+                    ? "bg-indigo-950/50 border-indigo-500 text-indigo-100 ring-1 ring-indigo-500/50"
+                    : "bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-lg bg-indigo-600/30 flex items-center justify-center text-indigo-300">
+                      <Cpu size={14} />
+                    </div>
+                    <span className="font-semibold text-xs text-white">OpenAI Compatible (Default)</span>
+                  </div>
+                  {selectedModelType === "openai" && <CheckCircle2 size={16} className="text-indigo-400" />}
+                </div>
+                <p className="text-[11px] text-slate-400 mt-2 leading-relaxed pl-8">
+                  Standard completions, multi-turn chat, system prompting, streaming, tool calling, and structured outputs.
+                </p>
+              </div>
+
+              {/* Option 2: Jev (System One Decision Model) */}
+              <div
+                onClick={() => setSelectedModelType("jev")}
+                className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
+                  selectedModelType === "jev"
+                    ? "bg-violet-950/50 border-violet-500 text-violet-100 ring-1 ring-violet-500/50"
+                    : "bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-lg bg-violet-600/30 flex items-center justify-center text-violet-300">
+                      <Sparkles size={14} />
+                    </div>
+                    <span className="font-semibold text-xs text-white">Jev (System One Decision Model)</span>
+                  </div>
+                  {selectedModelType === "jev" && <CheckCircle2 size={16} className="text-violet-400" />}
+                </div>
+                <p className="text-[11px] text-slate-400 mt-2 leading-relaxed pl-8">
+                  Fast probabilistic decision engine evaluating input states against choice, score, and noul primitives with calibrated probabilities and confidence levels.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-slate-950/60 border border-slate-800/80 rounded-lg text-[11px] space-y-1.5 text-slate-300">
+              <div className="flex items-center gap-1.5 text-violet-400 font-medium">
+                <Sparkles size={13} />
+                <span>Automatic Routing & Emulation</span>
+              </div>
+              <p className="text-slate-400 leading-relaxed">
+                Native Jev providers (TypeSafe AI, OpenRouter) execute via native <code className="text-violet-300 font-mono">/v1/systemone</code> endpoints. Standard LLMs (Gemini, Llama, OpenAI) marked as Jev run high-precision structured decision emulation.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                disabled={savingModelType}
+                onClick={() => setModelTypeModalModel(null)}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={savingModelType}
+                onClick={handleSaveModelType}
+                className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                {savingModelType ? <RefreshCw size={13} className="animate-spin" /> : null}
+                <span>Save Model Type</span>
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Modal: Batch Models Type Configuration */}
+      <Modal
+        isOpen={isBatchModelTypeModalOpen}
+        onClose={() => setIsBatchModelTypeModalOpen(false)}
+        title={`Batch Model Type Configuration (${selectedModelIds.size} models)`}
+        maxWidth="lg"
+      >
+        <div className="space-y-4">
+          <div className="p-3 bg-violet-950/40 border border-violet-800/60 rounded-lg text-xs text-violet-200">
+            Selected models: <strong>{selectedModelIds.size}</strong>. Choose the mode/type to apply to all selected models.
+          </div>
+
+          <div className="space-y-2">
+            <div
+              onClick={() => setBatchSelectedModelType("openai")}
+              className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
+                batchSelectedModelType === "openai"
+                  ? "bg-indigo-950/50 border-indigo-500 text-indigo-100 ring-1 ring-indigo-500/50"
+                  : "bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-lg bg-indigo-600/30 flex items-center justify-center text-indigo-300">
+                    <Cpu size={14} />
+                  </div>
+                  <span className="font-semibold text-xs text-white">OpenAI Compatible (Default)</span>
+                </div>
+                {batchSelectedModelType === "openai" && <CheckCircle2 size={16} className="text-indigo-400" />}
+              </div>
+            </div>
+
+            <div
+              onClick={() => setBatchSelectedModelType("jev")}
+              className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
+                batchSelectedModelType === "jev"
+                  ? "bg-violet-950/50 border-violet-500 text-violet-100 ring-1 ring-violet-500/50"
+                  : "bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-lg bg-violet-600/30 flex items-center justify-center text-violet-300">
+                    <Sparkles size={14} />
+                  </div>
+                  <span className="font-semibold text-xs text-white">Jev (System One Decision Model)</span>
+                </div>
+                {batchSelectedModelType === "jev" && <CheckCircle2 size={16} className="text-violet-400" />}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+            <button
+              type="button"
+              disabled={savingModelType}
+              onClick={() => setIsBatchModelTypeModalOpen(false)}
+              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={savingModelType}
+              onClick={handleSaveBatchModelType}
+              className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              {savingModelType ? <RefreshCw size={13} className="animate-spin" /> : null}
+              <span>Apply to {selectedModelIds.size} models</span>
+            </button>
           </div>
         </div>
       </Modal>

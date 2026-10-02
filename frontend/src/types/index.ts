@@ -199,6 +199,7 @@ export interface DiscoveredModel {
   enabled: boolean;
   available: boolean;
   is_visible: boolean;
+  model_type?: "openai" | "jev" | string;
   reasoning_effort?: string;
   temperature?: number | null;
   discovered_at: string;
@@ -634,4 +635,64 @@ export interface BackupImportResponse {
   imported_proxies: number;
   errors: string[];
   discovery_triggered: boolean;
+}
+
+// Jev / System One Decision Interfaces
+export type JevModelType = "openai" | "jev";
+
+export interface JevChoiceQuestion {
+  criteria: Record<string, string>;
+}
+
+export interface JevScoreQuestion {
+  rubric: string[];
+}
+
+export interface JevNoulQuestion {
+  description?: string;
+}
+
+export type JevQuestion =
+  | { choice: JevChoiceQuestion }
+  | { score: JevScoreQuestion }
+  | { noul: JevNoulQuestion };
+
+export interface JevRequest {
+  model: string;
+  state: string;
+  questions: Record<string, JevQuestion>;
+}
+
+export interface JevChoiceAnswer {
+  decision: string;
+  probabilities: Record<string, number>;
+  confidence?: number;
+}
+
+export interface JevScoreAnswer {
+  level: string;
+  index: number;
+  distribution: Record<string, number>;
+  confidence?: number;
+}
+
+export interface JevNoulAnswer {
+  probability: number;
+  judgment: boolean;
+}
+
+export type JevAnswer = JevChoiceAnswer | JevScoreAnswer | JevNoulAnswer;
+
+export interface JevUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+}
+
+export interface JevResponse {
+  id: string;
+  model: string;
+  answers: Record<string, any>;
+  usage: JevUsage;
+  latency_ms?: number;
 }

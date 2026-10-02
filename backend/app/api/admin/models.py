@@ -77,6 +77,8 @@ async def batch_update_models(
     reasoning_effort = payload.get("reasoning_effort")
     set_temperature = "temperature" in payload
     temperature = payload.get("temperature")
+    set_model_type = "model_type" in payload
+    model_type = payload.get("model_type")
     try:
         updated_count = await ModelDiscoveryService.batch_update_models(
             db,
@@ -88,6 +90,8 @@ async def batch_update_models(
             set_reasoning_effort=set_reasoning_effort,
             temperature=temperature,
             set_temperature=set_temperature,
+            model_type=model_type,
+            set_model_type=set_model_type,
         )
         return {"updated_count": updated_count}
     except ValueError as ve:
@@ -126,6 +130,7 @@ async def add_model_manually(
     credential_id = payload.get("credential_id")
     context_length = payload.get("context_length")
     max_output = payload.get("max_output_tokens")
+    model_type = payload.get("model_type")
 
     if not provider_id or not provider_model_id:
         raise HTTPException(status_code=400, detail="provider_id and provider_model_id are required")
@@ -138,6 +143,7 @@ async def add_model_manually(
         display_name=display_name,
         context_length=context_length,
         max_output_tokens=max_output,
+        model_type=model_type,
     )
 
 @router.put("/{model_id}", response_model=DiscoveredModelRead)

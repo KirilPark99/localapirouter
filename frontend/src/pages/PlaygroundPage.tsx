@@ -26,14 +26,167 @@ import {
   X,
   Plus,
   Brain,
+  Cpu,
+  HelpCircle,
+  Layers,
+  BarChart3,
+  CheckSquare,
 } from "lucide-react";
 import { apiRequest } from "../api/client";
-import { DiscoveredModel, RoutingProfile, FusionProfile, RouterApiKey, Provider } from "../types";
+import {
+  DiscoveredModel,
+  RoutingProfile,
+  FusionProfile,
+  RouterApiKey,
+  Provider,
+  JevRequest,
+  JevResponse,
+  JevQuestion,
+} from "../types";
 import { getHiddenModelIds, groupModelsByProvider, getVisibleModels } from "../utils/models";
 import { useI18n } from "../i18n";
 
-type PlaygroundMode = "single" | "chat" | "compare";
+type PlaygroundMode = "single" | "chat" | "compare" | "jev";
 type ThinkingEffort = "auto" | "low" | "medium" | "high" | "off" | "custom";
+
+export interface JevPreset {
+  id: string;
+  name: string;
+  description: string;
+  state: string;
+  questions: Record<string, JevQuestion>;
+}
+
+export const JEV_PRESETS: JevPreset[] = [
+  {
+    id: "support-escalation",
+    name: "Support Escalation",
+    description: "Evaluates ticket urgency, intent classification, and customer churn risk.",
+    state: "Customer Message: 'My account has been locked without any prior notice and my sales team is blocked from closing deals! This is unacceptable and costing us thousands. Fix this in the next 30 minutes or we are cancelling our enterprise contract and issuing a chargeback!'\nCustomer Details: Tier: Enterprise VIP, MRR: $4,500/mo, Past escalations: 0.",
+    questions: {
+      intent: {
+        choice: {
+          criteria: {
+            executive_escalation: "Requires immediate human VIP manager intervention",
+            automated_reset: "Standard automated credential reset flow",
+            technical_support: "Standard tier-2 technical triage queue",
+          },
+        },
+      },
+      urgency_score: {
+        score: {
+          rubric: [
+            "Level 1 (Low): Casual inquiry or routine request",
+            "Level 2 (Medium): Standard issue with minor operational delay",
+            "Level 3 (High): Direct financial loss or team-wide blockage",
+            "Level 4 (Critical): Imminent churn threat or legal / chargeback action",
+          ],
+        },
+      },
+      is_churn_risk: {
+        noul: {
+          description: "Is this high-value customer at immediate risk of cancelling their subscription?",
+        },
+      },
+    },
+  },
+  {
+    id: "content-safety",
+    name: "Content Moderation",
+    description: "Classifies toxic comments, harassment level, and auto-flagging.",
+    state: "User Comment: 'Whoever developed this hideous trash update should be publicly fired and never allowed near a keyboard again. You all are complete frauds!'",
+    questions: {
+      action: {
+        choice: {
+          criteria: {
+            allow: "Harmless criticism, frustration, or venting without personal threats",
+            flag_warning: "Aggressive or borderline abusive language requiring warning",
+            delete_ban: "Severe targeted harassment or hateful conduct",
+          },
+        },
+      },
+      hostility_level: {
+        score: {
+          rubric: [
+            "Safe: Constructive or neutral",
+            "Mild: Emotional venting or sarcastic",
+            "Aggressive: Insulting or inflammatory language",
+            "Severe: Explicit threats or abusive hate speech",
+          ],
+        },
+      },
+      needs_human_moderator: {
+        noul: {
+          description: "Does this comment require review by a human safety moderator?",
+        },
+      },
+    },
+  },
+  {
+    id: "code-review",
+    name: "PR Code Review",
+    description: "Evaluates pull request readiness, risk score, and test coverage sufficiency.",
+    state: "Pull Request: #482 Add Redis distributed cache layer for user permissions.\nDiff summary: 14 files changed, +380 / -45 lines.\nNotes: Added caching on permission lookups with 60s TTL. Cache invalidation on role update not yet implemented in all admin paths. Test coverage for modified lines: 42%.",
+    questions: {
+      review_verdict: {
+        choice: {
+          criteria: {
+            approve: "Clean implementation, ready for production merge",
+            request_changes: "Functional gaps, stale cache risk, or missing tests require changes",
+            block_redesign: "Fundamental architecture flaw requiring complete redesign",
+          },
+        },
+      },
+      readiness_score: {
+        score: {
+          rubric: [
+            "Draft: Incomplete functionality",
+            "Needs Polish: Works in happy path but lacks edge case handling",
+            "Merge Candidate: Sound architecture with minor remarks",
+            "Production Grade: Fully tested, safe cache invalidation and rollback plan",
+          ],
+        },
+      },
+      security_leak_risk: {
+        noul: {
+          description: "Is there a potential security or privilege escalation risk due to stale permissions cache?",
+        },
+      },
+    },
+  },
+  {
+    id: "transaction-fraud",
+    name: "Financial Risk",
+    description: "Real-time payment fraud detection, risk scoring, and authorization gate.",
+    state: "Transaction ID: tx_99214\nAmount: $1,850.00 USD\nCard Origin: Germany | IP Location: Nigeria | Device Fingerprint: New Linux VM (User-Agent: curl/7.88)\nAccount Age: 2 hours | Shipping Address mismatch: Billing DE, Shipping NG.\nCardholder 3DS: Not enrolled.",
+    questions: {
+      decision: {
+        choice: {
+          criteria: {
+            approve: "Legitimate low-risk transaction",
+            challenge_2fa: "Suspicious factors requiring biometric or SMS step-up auth",
+            block_fraud: "High probability fraud, block and alert security team",
+          },
+        },
+      },
+      risk_tier: {
+        score: {
+          rubric: [
+            "Tier 1: Minimal risk, verified historical patterns",
+            "Tier 2: Elevated risk, minor geolocation mismatch",
+            "Tier 3: High risk, multiple red flags (IP mismatch, new device)",
+            "Tier 4: Critical fraud probability, automated bot or stolen credential pattern",
+          ],
+        },
+      },
+      is_stolen_card_signature: {
+        noul: {
+          description: "Does this transaction pattern strongly match stolen credential fraud?",
+        },
+      },
+    },
+  },
+];
 
 interface ChatMessageItem {
   id: string;
@@ -113,6 +266,17 @@ export const PlaygroundPage: React.FC = () => {
   const [showCodeModal, setShowCodeModal] = useState(false);
   const [codeTab, setCodeTab] = useState<"python" | "curl" | "node">("python");
   const [copiedCode, setCopiedCode] = useState(false);
+
+  // Jev (System One) Mode State
+  const [jevState, setJevState] = useState<string>(JEV_PRESETS[0].state);
+  const [jevQuestions, setJevQuestions] = useState<Record<string, JevQuestion>>(JEV_PRESETS[0].questions);
+  const [jevRawJson, setJevRawJson] = useState<string>(() => JSON.stringify(JEV_PRESETS[0].questions, null, 2));
+  const [jevEditorMode, setJevEditorMode] = useState<"visual" | "json">("visual");
+  const [jevLoading, setJevLoading] = useState(false);
+  const [jevResponse, setJevResponse] = useState<JevResponse | null>(null);
+  const [jevError, setJevError] = useState<string | null>(null);
+  const [jevActiveTab, setJevActiveTab] = useState<"results" | "json">("results");
+  const [copiedJevJson, setCopiedJevJson] = useState(false);
 
   // Quick prompt presets
   const presets = [
@@ -646,10 +810,267 @@ export const PlaygroundPage: React.FC = () => {
     }
   };
 
+  // Jev helper handlers
+  const handleLoadJevPreset = (preset: JevPreset) => {
+    setJevState(preset.state);
+    setJevQuestions(preset.questions);
+    setJevRawJson(JSON.stringify(preset.questions, null, 2));
+    setJevResponse(null);
+    setJevError(null);
+  };
+
+  const handleAddJevQuestion = (type: "choice" | "score" | "noul") => {
+    const baseKey = type === "choice" ? "choice_q" : type === "score" ? "score_q" : "noul_q";
+    let newKey = baseKey;
+    let counter = 1;
+    while (jevQuestions[newKey]) {
+      newKey = `${baseKey}_${counter++}`;
+    }
+
+    let qObj: JevQuestion;
+    if (type === "choice") {
+      qObj = {
+        choice: {
+          criteria: {
+            option_a: "First criterion description",
+            option_b: "Second criterion description",
+          },
+        },
+      };
+    } else if (type === "score") {
+      qObj = {
+        score: {
+          rubric: ["Level 1: Low", "Level 2: Medium", "Level 3: High"],
+        },
+      };
+    } else {
+      qObj = {
+        noul: {
+          description: "Binary True / False judgment criterion",
+        },
+      };
+    }
+
+    const updated = { ...jevQuestions, [newKey]: qObj };
+    setJevQuestions(updated);
+    setJevRawJson(JSON.stringify(updated, null, 2));
+  };
+
+  const handleRemoveJevQuestion = (qKey: string) => {
+    const updated = { ...jevQuestions };
+    delete updated[qKey];
+    setJevQuestions(updated);
+    setJevRawJson(JSON.stringify(updated, null, 2));
+  };
+
+  const handleUpdateJevQuestionKey = (oldKey: string, newKey: string) => {
+    if (!newKey.trim() || oldKey === newKey) return;
+    const entries = Object.entries(jevQuestions);
+    const updated: Record<string, JevQuestion> = {};
+    for (const [k, v] of entries) {
+      if (k === oldKey) {
+        updated[newKey.trim()] = v;
+      } else {
+        updated[k] = v;
+      }
+    }
+    setJevQuestions(updated);
+    setJevRawJson(JSON.stringify(updated, null, 2));
+  };
+
+  const handleAddChoiceCriterion = (qKey: string) => {
+    const q = jevQuestions[qKey];
+    if (!q || !("choice" in q)) return;
+    let newOptKey = "option";
+    let counter = 1;
+    while (q.choice.criteria[`${newOptKey}_${counter}`]) {
+      counter++;
+    }
+    const finalKey = `${newOptKey}_${counter}`;
+    const updatedCriteria = { ...q.choice.criteria, [finalKey]: "New criterion description" };
+    const updated = {
+      ...jevQuestions,
+      [qKey]: { choice: { ...q.choice, criteria: updatedCriteria } },
+    };
+    setJevQuestions(updated);
+    setJevRawJson(JSON.stringify(updated, null, 2));
+  };
+
+  const handleUpdateChoiceCriterion = (qKey: string, optKey: string, optVal: string) => {
+    const q = jevQuestions[qKey];
+    if (!q || !("choice" in q)) return;
+    const updatedCriteria = { ...q.choice.criteria, [optKey]: optVal };
+    const updated = {
+      ...jevQuestions,
+      [qKey]: { choice: { ...q.choice, criteria: updatedCriteria } },
+    };
+    setJevQuestions(updated);
+    setJevRawJson(JSON.stringify(updated, null, 2));
+  };
+
+  const handleRemoveChoiceCriterion = (qKey: string, optKey: string) => {
+    const q = jevQuestions[qKey];
+    if (!q || !("choice" in q)) return;
+    const updatedCriteria = { ...q.choice.criteria };
+    delete updatedCriteria[optKey];
+    const updated = {
+      ...jevQuestions,
+      [qKey]: { choice: { ...q.choice, criteria: updatedCriteria } },
+    };
+    setJevQuestions(updated);
+    setJevRawJson(JSON.stringify(updated, null, 2));
+  };
+
+  const handleAddScoreLevel = (qKey: string) => {
+    const q = jevQuestions[qKey];
+    if (!q || !("score" in q)) return;
+    const updatedRubric = [...q.score.rubric, `Level ${q.score.rubric.length + 1}: Description`];
+    const updated = {
+      ...jevQuestions,
+      [qKey]: { score: { ...q.score, rubric: updatedRubric } },
+    };
+    setJevQuestions(updated);
+    setJevRawJson(JSON.stringify(updated, null, 2));
+  };
+
+  const handleUpdateScoreLevel = (qKey: string, index: number, val: string) => {
+    const q = jevQuestions[qKey];
+    if (!q || !("score" in q)) return;
+    const updatedRubric = [...q.score.rubric];
+    updatedRubric[index] = val;
+    const updated = {
+      ...jevQuestions,
+      [qKey]: { score: { ...q.score, rubric: updatedRubric } },
+    };
+    setJevQuestions(updated);
+    setJevRawJson(JSON.stringify(updated, null, 2));
+  };
+
+  const handleRemoveScoreLevel = (qKey: string, index: number) => {
+    const q = jevQuestions[qKey];
+    if (!q || !("score" in q)) return;
+    const updatedRubric = q.score.rubric.filter((_, i) => i !== index);
+    const updated = {
+      ...jevQuestions,
+      [qKey]: { score: { ...q.score, rubric: updatedRubric } },
+    };
+    setJevQuestions(updated);
+    setJevRawJson(JSON.stringify(updated, null, 2));
+  };
+
+  const handleUpdateNoulDescription = (qKey: string, desc: string) => {
+    const q = jevQuestions[qKey];
+    if (!q || !("noul" in q)) return;
+    const updated = {
+      ...jevQuestions,
+      [qKey]: { noul: { ...q.noul, description: desc } },
+    };
+    setJevQuestions(updated);
+    setJevRawJson(JSON.stringify(updated, null, 2));
+  };
+
+  const handleRunJevDecision = async () => {
+    if (!targetA) {
+      setJevError("Please select a target model first.");
+      return;
+    }
+    setJevLoading(true);
+    setJevError(null);
+    const t0 = performance.now();
+    try {
+      let questionsPayload = jevQuestions;
+      if (jevEditorMode === "json") {
+        try {
+          questionsPayload = JSON.parse(jevRawJson);
+        } catch (jsonErr: any) {
+          setJevError("Invalid JSON in Questions editor: " + jsonErr.message);
+          setJevLoading(false);
+          return;
+        }
+      }
+
+      const payload: JevRequest = {
+        model: targetA,
+        state: jevState,
+        questions: questionsPayload,
+      };
+
+      const token = selectedKey || localStorage.getItem("myairouter_token") || "";
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+
+      const res = await apiRequest<JevResponse>("/v1/systemone", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+
+      const lat = Math.round(performance.now() - t0);
+      setJevResponse({
+        ...res,
+        latency_ms: res.latency_ms || lat,
+      });
+    } catch (err: any) {
+      setJevError(err.message || "Decision evaluation failed");
+    } finally {
+      setJevLoading(false);
+    }
+  };
+
   // Generate Export Code
   const getExportCode = () => {
     const token = selectedKey || "sk-router-YOUR-KEY";
     const target = targetA || "google-ai/gemini-2.5-flash";
+
+    if (mode === "jev") {
+      let questionsPayload = jevQuestions;
+      if (jevEditorMode === "json") {
+        try {
+          questionsPayload = JSON.parse(jevRawJson);
+        } catch {}
+      }
+      const jevBody = {
+        model: targetA || "typesafe/jev-latest",
+        state: jevState,
+        questions: questionsPayload,
+      };
+
+      if (codeTab === "curl") {
+        return `curl http://localhost:8000/v1/systemone \\
+  -H "Authorization: Bearer ${token}" \\
+  -H "Content-Type: application/json" \\
+  -d '${JSON.stringify(jevBody, null, 2)}'`;
+      }
+
+      if (codeTab === "python") {
+        return `import requests
+
+url = "http://localhost:8000/v1/systemone"
+headers = {
+    "Authorization": "Bearer ${token}",
+    "Content-Type": "application/json"
+}
+payload = ${JSON.stringify(jevBody, null, 4)}
+
+response = requests.post(url, json=payload, headers=headers)
+print(response.json())`;
+      }
+
+      return `import fetch from "node-fetch";
+
+const response = await fetch("http://localhost:8000/v1/systemone", {
+  method: "POST",
+  headers: {
+    "Authorization": "Bearer ${token}",
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify(${JSON.stringify(jevBody, null, 2)})
+});
+
+const data = await response.json();
+console.log(JSON.stringify(data, null, 2));`;
+    }
+
     const promptText = mode === "chat" ? (chatInput || "Hello!") : (userPrompt || "Hello!");
     const msgs = [];
     if (systemPrompt) msgs.push({ role: "system", content: systemPrompt });
@@ -795,6 +1216,17 @@ main();`;
             >
               <Columns size={13} />
               Compare (x2)
+            </button>
+            <button
+              onClick={() => setMode("jev")}
+              className={`btn-press flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all ${
+                mode === "jev"
+                  ? "bg-gradient-to-r from-violet-600 to-purple-600 text-white shadow-xs"
+                  : "text-slate-400 hover:text-slate-200 hover:bg-white/[0.04]"
+              }`}
+            >
+              <Zap size={13} className={mode === "jev" ? "text-amber-300" : "text-violet-400"} />
+              Jev (System One)
             </button>
           </div>
 
@@ -1163,102 +1595,174 @@ main();`;
             </p>
           </div>
 
-          {/* Generation Parameters Card */}
-          <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5 space-y-3.5 shadow-sm">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
-                <SlidersHorizontal size={14} className="text-indigo-400" />
-                Generation Parameters
-              </label>
-            </div>
-
-            {/* Temperature Slider */}
-            <div>
-              <div className="flex items-center justify-between text-xs text-slate-300 mb-1">
-                <span>{t.common.temperature}</span>
-                <span className="font-mono text-indigo-300 font-semibold">{temperature}</span>
+          {/* Mode-specific Left Sidebar Controls */}
+          {mode === "jev" ? (
+            <>
+              {/* Jev Decision Presets Card */}
+              <div className="bg-slate-900/90 border border-violet-500/30 rounded-xl p-3.5 space-y-2.5 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-violet-200 flex items-center gap-1.5">
+                    <Zap size={14} className="text-amber-400" />
+                    Jev Decision Presets
+                  </label>
+                  <span className="text-[10px] text-violet-400 font-mono">System One</span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  Select a pre-configured decision benchmark to test state evaluation against choice, score, and noul primitives:
+                </p>
+                <div className="space-y-1.5">
+                  {JEV_PRESETS.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => handleLoadJevPreset(p)}
+                      className="w-full text-left p-2.5 bg-slate-950/80 hover:bg-violet-950/40 border border-slate-800 hover:border-violet-500/40 rounded-lg transition-all group"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-slate-200 group-hover:text-violet-200">{p.name}</span>
+                        <span className="text-[10px] text-slate-500 font-mono group-hover:text-violet-400">
+                          {Object.keys(p.questions).length} questions
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-slate-400 group-hover:text-slate-300 line-clamp-1 mt-0.5">
+                        {p.description}
+                      </p>
+                    </button>
+                  ))}
+                </div>
               </div>
-              <input
-                type="range"
-                min={0}
-                max={2}
-                step={0.05}
-                value={temperature}
-                onChange={(e) => setTemperature(parseFloat(e.target.value))}
-                className="w-full accent-indigo-500"
-              />
-              <div className="flex justify-between text-[10px] text-slate-500 pt-0.5">
-                <span>0.0 Precise</span>
-                <span>0.7 Balanced</span>
-                <span>1.5+ Creative</span>
-              </div>
-            </div>
 
-            {/* Max Tokens & Top P */}
-            <div className="grid grid-cols-2 gap-2.5">
-              <div>
-                <label className="block text-[11px] text-slate-300 mb-1">Max Tokens</label>
-                <input
-                  type="number"
-                  value={maxTokens}
-                  onChange={(e) => setMaxTokens(parseInt(e.target.value) || 2048)}
-                  className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs font-mono focus:border-indigo-500 focus:outline-none"
-                />
+              {/* Jev Primitives Info Card */}
+              <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5 space-y-2.5 shadow-sm">
+                <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <HelpCircle size={13} className="text-indigo-400" />
+                  Jev Primitive Types
+                </label>
+                <div className="space-y-2 text-[11px] text-slate-400">
+                  <div className="p-2 bg-slate-950/80 border border-slate-800/80 rounded-lg">
+                    <div className="flex items-center gap-1.5 text-violet-300 font-semibold mb-0.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-violet-400" />
+                      Choice
+                    </div>
+                    Selects from discrete criteria and outputs full normalized probability distribution.
+                  </div>
+                  <div className="p-2 bg-slate-950/80 border border-slate-800/80 rounded-lg">
+                    <div className="flex items-center gap-1.5 text-emerald-300 font-semibold mb-0.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                      Score
+                    </div>
+                    Evaluates state against ordered rubric levels with expected continuous score.
+                  </div>
+                  <div className="p-2 bg-slate-950/80 border border-slate-800/80 rounded-lg">
+                    <div className="flex items-center gap-1.5 text-amber-300 font-semibold mb-0.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                      Noul
+                    </div>
+                    Fast binary True/False judgment on instructions with calibrated probability.
+                  </div>
+                </div>
               </div>
-              <div>
-                <label className="block text-[11px] text-slate-300 mb-1">Top P: {topP}</label>
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={topP}
-                  onChange={(e) => setTopP(parseFloat(e.target.value))}
-                  className="w-full accent-indigo-500 pt-1"
-                />
+            </>
+          ) : (
+            <>
+              {/* Generation Parameters Card */}
+              <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5 space-y-3.5 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                    <SlidersHorizontal size={14} className="text-indigo-400" />
+                    Generation Parameters
+                  </label>
+                </div>
+
+                {/* Temperature Slider */}
+                <div>
+                  <div className="flex items-center justify-between text-xs text-slate-300 mb-1">
+                    <span>{t.common.temperature}</span>
+                    <span className="font-mono text-indigo-300 font-semibold">{temperature}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={2}
+                    step={0.05}
+                    value={temperature}
+                    onChange={(e) => setTemperature(parseFloat(e.target.value))}
+                    className="w-full accent-indigo-500"
+                  />
+                  <div className="flex justify-between text-[10px] text-slate-500 pt-0.5">
+                    <span>0.0 Precise</span>
+                    <span>0.7 Balanced</span>
+                    <span>1.5+ Creative</span>
+                  </div>
+                </div>
+
+                {/* Max Tokens & Top P */}
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-[11px] text-slate-300 mb-1">Max Tokens</label>
+                    <input
+                      type="number"
+                      value={maxTokens}
+                      onChange={(e) => setMaxTokens(parseInt(e.target.value) || 2048)}
+                      className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs font-mono focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-300 mb-1">Top P: {topP}</label>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={topP}
+                      onChange={(e) => setTopP(parseFloat(e.target.value))}
+                      className="w-full accent-indigo-500 pt-1"
+                    />
+                  </div>
+                </div>
+
+                {/* Stream Toggle */}
+                <div className="pt-1 border-t border-slate-800 flex items-center justify-between">
+                  <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={isStream}
+                      onChange={(e) => setIsStream(e.target.checked)}
+                      className="rounded border-slate-800 text-indigo-600 focus:ring-0"
+                    />
+                    {t.playground.streaming}
+                  </label>
+                  <span className="text-[10px] text-slate-500 font-mono">{isStream ? "live stream" : "blocking"}</span>
+                </div>
               </div>
-            </div>
 
-            {/* Stream Toggle */}
-            <div className="pt-1 border-t border-slate-800 flex items-center justify-between">
-              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={isStream}
-                  onChange={(e) => setIsStream(e.target.checked)}
-                  className="rounded border-slate-800 text-indigo-600 focus:ring-0"
-                />
-                {t.playground.streaming}
-              </label>
-              <span className="text-[10px] text-slate-500 font-mono">{isStream ? "live stream" : "blocking"}</span>
-            </div>
-          </div>
-
-          {/* Quick Presets (Chips) */}
-          <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5 space-y-2 shadow-sm">
-            <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-              <Sparkles size={13} className="text-amber-400" />
-              Quick Presets
-            </label>
-            <div className="flex flex-wrap gap-1.5">
-              {presets.map((p, i) => (
-                <button
-                  key={i}
-                  type="button"
-                  onClick={() => {
-                    if (mode === "chat") {
-                      setChatInput(p.prompt);
-                    } else {
-                      setUserPrompt(p.prompt);
-                    }
-                  }}
-                  className="px-2 py-1 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-md text-[11px] text-slate-300 hover:text-slate-100 transition-colors"
-                >
-                  {p.label}
-                </button>
-              ))}
-            </div>
-          </div>
+              {/* Quick Presets (Chips) */}
+              <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5 space-y-2 shadow-sm">
+                <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <Sparkles size={13} className="text-amber-400" />
+                  Quick Presets
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {presets.map((p, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => {
+                        if (mode === "chat") {
+                          setChatInput(p.prompt);
+                        } else {
+                          setUserPrompt(p.prompt);
+                        }
+                      }}
+                      className="px-2 py-1 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-md text-[11px] text-slate-300 hover:text-slate-100 transition-colors"
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Right Output Area (8 Cols) */}
@@ -1816,6 +2320,604 @@ main();`;
                     <div className="pt-2 border-t border-slate-800 text-[10px] text-slate-400 flex justify-between">
                       <span>Mode: {responseMetaB.mode}</span>
                       <span>Tokens: {responseMetaB.usage?.total_tokens || responseMetaB.token_count || "—"}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ===================== MODE 4: JEV (SYSTEM ONE) ===================== */}
+          {mode === "jev" && (
+            <div className="space-y-4">
+              {/* Jev Studio Main Card */}
+              <div className="glass-panel card-specular rounded-2xl border border-white/[0.07] p-5 shadow-xl space-y-5">
+                {/* Header Bar */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-white/[0.06]">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="p-1.5 rounded-lg bg-violet-600/20 text-violet-400 border border-violet-500/30">
+                        <Zap size={16} />
+                      </span>
+                      <h2 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                        System One Decision Studio
+                        <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/30">
+                          Jev Engine
+                        </span>
+                      </h2>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-1">
+                      Fast, calibrated decision engine evaluating state against discrete criteria and rubrics.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 self-end sm:self-auto">
+                    {/* Visual vs JSON Toggle */}
+                    <div className="flex bg-slate-950/80 p-0.5 rounded-lg border border-white/[0.08] text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (jevEditorMode === "json") {
+                            try {
+                              setJevQuestions(JSON.parse(jevRawJson));
+                            } catch {}
+                          }
+                          setJevEditorMode("visual");
+                        }}
+                        className={`px-2.5 py-1 rounded-md font-semibold transition-all ${
+                          jevEditorMode === "visual"
+                            ? "bg-violet-600 text-white shadow-xs"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        Visual Builder
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setJevRawJson(JSON.stringify(jevQuestions, null, 2));
+                          setJevEditorMode("json");
+                        }}
+                        className={`px-2.5 py-1 rounded-md font-semibold transition-all ${
+                          jevEditorMode === "json"
+                            ? "bg-violet-600 text-white shadow-xs"
+                            : "text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        Raw JSON
+                      </button>
+                    </div>
+
+                    {/* Run Decision Button */}
+                    <button
+                      type="button"
+                      disabled={jevLoading || !targetA}
+                      onClick={handleRunJevDecision}
+                      className="btn-press px-4 py-1.5 bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-40 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-md shadow-violet-600/25 border border-violet-400/20"
+                    >
+                      {jevLoading ? (
+                        <>
+                          <RefreshCw size={13} className="animate-spin" />
+                          Evaluating...
+                        </>
+                      ) : (
+                        <>
+                          <Zap size={13} className="text-amber-300" />
+                          Evaluate Decision
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* State Input Section */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                      <Layers size={13} className="text-indigo-400" />
+                      State Context (Document, Log, Ticket, or Payload)
+                    </label>
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      {jevState.length} chars
+                    </span>
+                  </div>
+                  <textarea
+                    rows={4}
+                    value={jevState}
+                    onChange={(e) => setJevState(e.target.value)}
+                    placeholder="Enter the context / document / transaction state to evaluate..."
+                    className="w-full px-3.5 py-2.5 bg-slate-950/90 border border-white/[0.08] rounded-xl text-slate-100 text-xs font-mono placeholder-slate-500 focus:border-violet-500 focus:ring-1 focus:ring-violet-500/20 focus:outline-none resize-y transition-all"
+                  />
+                </div>
+
+                {/* Questions Section */}
+                <div className="space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <label className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                      <HelpCircle size={13} className="text-violet-400" />
+                      Questions Specification ({Object.keys(jevQuestions).length})
+                    </label>
+
+                    {jevEditorMode === "visual" && (
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleAddJevQuestion("choice")}
+                          className="btn-press flex items-center gap-1 px-2.5 py-1 bg-violet-600/15 hover:bg-violet-600/25 text-violet-300 border border-violet-500/30 rounded-lg text-[11px] font-semibold transition-all"
+                        >
+                          <Plus size={11} />
+                          + Choice
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAddJevQuestion("score")}
+                          className="btn-press flex items-center gap-1 px-2.5 py-1 bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-300 border border-emerald-500/30 rounded-lg text-[11px] font-semibold transition-all"
+                        >
+                          <Plus size={11} />
+                          + Score
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAddJevQuestion("noul")}
+                          className="btn-press flex items-center gap-1 px-2.5 py-1 bg-amber-600/15 hover:bg-amber-600/25 text-amber-300 border border-amber-500/30 rounded-lg text-[11px] font-semibold transition-all"
+                        >
+                          <Plus size={11} />
+                          + Noul
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {jevEditorMode === "visual" ? (
+                    <div className="space-y-3">
+                      {Object.keys(jevQuestions).length === 0 ? (
+                        <div className="p-8 text-center bg-slate-950/40 border border-dashed border-white/[0.08] rounded-xl text-slate-500 text-xs">
+                          No questions defined yet. Click + Choice, + Score, + Noul above or select a preset from the sidebar.
+                        </div>
+                      ) : (
+                        Object.entries(jevQuestions).map(([qKey, qVal]) => {
+                          const isChoice = "choice" in qVal || (qVal as any).type === "choice";
+                          const isScore = "score" in qVal || (qVal as any).type === "score";
+                          const isNoul = "noul" in qVal || (qVal as any).type === "noul";
+
+                          return (
+                            <div
+                              key={qKey}
+                              className={`p-3.5 rounded-xl border bg-slate-950/70 transition-all ${
+                                isChoice
+                                  ? "border-violet-500/30 hover:border-violet-500/50"
+                                  : isScore
+                                  ? "border-emerald-500/30 hover:border-emerald-500/50"
+                                  : "border-amber-500/30 hover:border-amber-500/50"
+                              }`}
+                            >
+                              {/* Question Card Header */}
+                              <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-white/[0.06] mb-3">
+                                <div className="flex items-center gap-2 flex-1">
+                                  <span
+                                    className={`text-[10px] uppercase font-mono font-bold px-2 py-0.5 rounded ${
+                                      isChoice
+                                        ? "bg-violet-500/20 text-violet-300"
+                                        : isScore
+                                        ? "bg-emerald-500/20 text-emerald-300"
+                                        : "bg-amber-500/20 text-amber-300"
+                                    }`}
+                                  >
+                                    {isChoice ? "Choice" : isScore ? "Score" : "Noul"}
+                                  </span>
+                                  <input
+                                    type="text"
+                                    defaultValue={qKey}
+                                    onBlur={(e) => handleUpdateJevQuestionKey(qKey, e.target.value)}
+                                    placeholder="question_id"
+                                    className="px-2 py-1 bg-slate-900 border border-white/[0.08] rounded text-xs font-mono text-slate-200 focus:border-violet-500 focus:outline-none w-48"
+                                  />
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveJevQuestion(qKey)}
+                                  className="text-slate-500 hover:text-rose-400 p-1 rounded transition-colors"
+                                  title="Delete question"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </div>
+
+                              {/* Question Card Body */}
+                              {isChoice && (
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between text-[11px] text-slate-400">
+                                    <span>Choice Criteria (mutually exclusive outcomes):</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleAddChoiceCriterion(qKey)}
+                                      className="text-violet-400 hover:text-violet-300 flex items-center gap-1 font-semibold"
+                                    >
+                                      <Plus size={11} /> Add Option
+                                    </button>
+                                  </div>
+                                  <div className="space-y-1.5">
+                                    {Object.entries((qVal as any).choice?.criteria || {}).map(([optKey, optDesc]) => (
+                                      <div key={optKey} className="flex items-center gap-2">
+                                        <input
+                                          type="text"
+                                          value={optKey}
+                                          readOnly
+                                          className="w-36 px-2 py-1 bg-slate-900 border border-white/[0.06] rounded text-[11px] font-mono text-violet-300 shrink-0"
+                                        />
+                                        <input
+                                          type="text"
+                                          value={optDesc as string}
+                                          onChange={(e) => handleUpdateChoiceCriterion(qKey, optKey, e.target.value)}
+                                          placeholder="Criterion description / meaning..."
+                                          className="flex-1 px-2.5 py-1 bg-slate-900 border border-white/[0.06] rounded text-[11px] text-slate-200 placeholder-slate-600 focus:border-violet-500 focus:outline-none"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => handleRemoveChoiceCriterion(qKey, optKey)}
+                                          className="text-slate-600 hover:text-rose-400 p-1 rounded"
+                                        >
+                                          <X size={12} />
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {isScore && (
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between text-[11px] text-slate-400">
+                                    <span>Ordered Rubric Levels (scale low to high):</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleAddScoreLevel(qKey)}
+                                      className="text-emerald-400 hover:text-emerald-300 flex items-center gap-1 font-semibold"
+                                    >
+                                      <Plus size={11} /> Add Level
+                                    </button>
+                                  </div>
+                                  <div className="space-y-1.5">
+                                    {((qVal as any).score?.rubric || []).map((lvl: string, idx: number) => (
+                                      <div key={idx} className="flex items-center gap-2">
+                                        <span className="w-16 px-2 py-1 bg-slate-900 border border-white/[0.06] rounded text-[10px] font-mono text-emerald-400 text-center shrink-0">
+                                          Lvl {idx + 1}
+                                        </span>
+                                        <input
+                                          type="text"
+                                          value={lvl}
+                                          onChange={(e) => handleUpdateScoreLevel(qKey, idx, e.target.value)}
+                                          placeholder="Level label and description..."
+                                          className="flex-1 px-2.5 py-1 bg-slate-900 border border-white/[0.06] rounded text-[11px] text-slate-200 placeholder-slate-600 focus:border-emerald-500 focus:outline-none"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => handleRemoveScoreLevel(qKey, idx)}
+                                          className="text-slate-600 hover:text-rose-400 p-1 rounded"
+                                        >
+                                          <X size={12} />
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {isNoul && (
+                                <div className="space-y-1">
+                                  <label className="text-[11px] text-slate-400">
+                                    Binary True / False Judgment Proposition:
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={(qVal as any).noul?.description || (qVal as any).instructions || ""}
+                                    onChange={(e) => handleUpdateNoulDescription(qKey, e.target.value)}
+                                    placeholder="Condition to judge as True or False..."
+                                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-white/[0.06] rounded text-[11px] text-slate-200 placeholder-slate-600 focus:border-amber-500 focus:outline-none"
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  ) : (
+                    <div>
+                      <textarea
+                        rows={10}
+                        value={jevRawJson}
+                        onChange={(e) => {
+                          setJevRawJson(e.target.value);
+                          try {
+                            setJevQuestions(JSON.parse(e.target.value));
+                          } catch {}
+                        }}
+                        className="w-full px-3.5 py-2.5 bg-slate-950/90 border border-white/[0.08] rounded-xl text-violet-200 text-xs font-mono focus:border-violet-500 focus:outline-none resize-y"
+                      />
+                      <p className="text-[10px] text-slate-500 mt-1">
+                        Directly edit the Jev questions dictionary schema. Changes sync automatically to Visual Builder.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Error Banner */}
+                {jevError && (
+                  <div className="p-3 bg-rose-950/60 border border-rose-800/80 rounded-xl text-rose-300 text-xs flex items-center gap-2">
+                    <AlertCircle size={15} className="shrink-0 text-rose-400" />
+                    <span>{jevError}</span>
+                  </div>
+                )}
+
+                {/* Results Section */}
+                <div className="pt-2 border-t border-white/[0.06] space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <BarChart3 size={14} className="text-violet-400" />
+                      <span className="text-xs font-bold text-slate-200">Decision Results & Probabilities</span>
+                    </div>
+
+                    {jevResponse && (
+                      <div className="flex items-center gap-2 text-[11px]">
+                        <span className="font-mono text-emerald-400 font-semibold">
+                          {jevResponse.latency_ms}ms
+                        </span>
+                        {jevResponse.usage && (
+                          <span className="text-slate-400 font-mono">
+                            {jevResponse.usage.total_tokens || (jevResponse.usage.input_tokens + jevResponse.usage.output_tokens)} tok
+                          </span>
+                        )}
+                        <div className="flex bg-slate-950/80 p-0.5 rounded-lg border border-white/[0.08] text-[10px] ml-2">
+                          <button
+                            type="button"
+                            onClick={() => setJevActiveTab("results")}
+                            className={`px-2 py-0.5 rounded ${
+                              jevActiveTab === "results"
+                                ? "bg-slate-800 text-slate-100 font-bold"
+                                : "text-slate-400 hover:text-slate-200"
+                            }`}
+                          >
+                            Visual
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setJevActiveTab("json")}
+                            className={`px-2 py-0.5 rounded ${
+                              jevActiveTab === "json"
+                                ? "bg-slate-800 text-slate-100 font-bold"
+                                : "text-slate-400 hover:text-slate-200"
+                            }`}
+                          >
+                            JSON
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {jevLoading ? (
+                    <div className="p-12 text-center bg-slate-950/50 border border-white/[0.06] rounded-xl space-y-3">
+                      <RefreshCw size={24} className="animate-spin mx-auto text-violet-400" />
+                      <p className="text-xs font-semibold text-violet-300">
+                        Evaluating System One Decision against {Object.keys(jevQuestions).length} questions...
+                      </p>
+                      <p className="text-[11px] text-slate-500 font-mono">
+                        Target model: {targetA}
+                      </p>
+                    </div>
+                  ) : jevResponse ? (
+                    jevActiveTab === "results" ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {Object.entries(jevResponse.answers || {}).map(([ansKey, ansVal]: [string, any]) => {
+                          const isChoiceAns =
+                            ansVal.type === "choice" ||
+                            ansVal.choice !== undefined ||
+                            ansVal.decision !== undefined;
+                          const isScoreAns =
+                            ansVal.type === "score" ||
+                            ansVal.score !== undefined ||
+                            ansVal.level !== undefined;
+                          const isNoulAns =
+                            ansVal.type === "noul" ||
+                            ansVal.answer !== undefined ||
+                            ansVal.judgment !== undefined;
+
+                          const chosen = ansVal.choice || ansVal.decision || "";
+                          const scoreVal = ansVal.score !== undefined ? ansVal.score : ansVal.level;
+                          const boolVal = ansVal.answer !== undefined ? ansVal.answer : ansVal.judgment;
+                          const probs: Record<string, number> = ansVal.probabilities || ansVal.distribution || {};
+                          const conf = ansVal.confidence !== undefined ? ansVal.confidence : null;
+
+                          return (
+                            <div
+                              key={ansKey}
+                              className="bg-slate-950/80 border border-white/[0.08] rounded-xl p-3.5 space-y-3 shadow-sm flex flex-col justify-between"
+                            >
+                              <div>
+                                {/* Answer Header */}
+                                <div className="flex items-center justify-between pb-2 border-b border-white/[0.06]">
+                                  <span className="text-xs font-mono font-bold text-slate-200">{ansKey}</span>
+                                  <span
+                                    className={`text-[9px] uppercase font-mono font-bold px-2 py-0.5 rounded ${
+                                      isChoiceAns
+                                        ? "bg-violet-500/20 text-violet-300"
+                                        : isScoreAns
+                                        ? "bg-emerald-500/20 text-emerald-300"
+                                        : "bg-amber-500/20 text-amber-300"
+                                    }`}
+                                  >
+                                    {isChoiceAns ? "Choice" : isScoreAns ? "Score" : "Noul"}
+                                  </span>
+                                </div>
+
+                                {/* Main Decision Outcome Callout */}
+                                <div className="py-2.5">
+                                  {isChoiceAns && (
+                                    <div className="flex items-center justify-between bg-violet-950/40 border border-violet-500/30 rounded-lg p-2.5">
+                                      <div>
+                                        <span className="text-[10px] text-violet-300/80 uppercase font-semibold block">
+                                          Decision
+                                        </span>
+                                        <span className="text-sm font-bold text-violet-100 font-mono">
+                                          {chosen || "—"}
+                                        </span>
+                                      </div>
+                                      {probs[chosen] !== undefined && (
+                                        <div className="text-right">
+                                          <span className="text-[10px] text-violet-300/80 uppercase font-semibold block">
+                                            Calibrated P
+                                          </span>
+                                          <span className="text-sm font-bold text-violet-300 font-mono">
+                                            {(Number(probs[chosen]) * 100).toFixed(1)}%
+                                          </span>
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  {isScoreAns && (
+                                    <div className="flex items-center justify-between bg-emerald-950/40 border border-emerald-500/30 rounded-lg p-2.5">
+                                      <div>
+                                        <span className="text-[10px] text-emerald-300/80 uppercase font-semibold block">
+                                          Score / Level
+                                        </span>
+                                        <span className="text-base font-bold text-emerald-100 font-mono">
+                                          {scoreVal}
+                                        </span>
+                                      </div>
+                                      {conf !== null && (
+                                        <div className="text-right">
+                                          <span className="text-[10px] text-emerald-300/80 uppercase font-semibold block">
+                                            Confidence
+                                          </span>
+                                          <span className="text-xs font-bold text-emerald-300 font-mono">
+                                            {(Number(conf) <= 1 ? Number(conf) * 100 : Number(conf)).toFixed(0)}%
+                                          </span>
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  {isNoulAns && (
+                                    <div
+                                      className={`flex items-center justify-between p-2.5 rounded-lg border ${
+                                        boolVal
+                                          ? "bg-emerald-950/40 border-emerald-500/30"
+                                          : "bg-rose-950/40 border-rose-500/30"
+                                      }`}
+                                    >
+                                      <div>
+                                        <span className="text-[10px] text-slate-400 uppercase font-semibold block">
+                                          Binary Judgment
+                                        </span>
+                                        <span
+                                          className={`text-base font-bold font-mono ${
+                                            boolVal ? "text-emerald-300" : "text-rose-300"
+                                          }`}
+                                        >
+                                          {boolVal ? "TRUE" : "FALSE"}
+                                        </span>
+                                      </div>
+                                      {ansVal.probability !== undefined && (
+                                        <div className="text-right">
+                                          <span className="text-[10px] text-slate-400 uppercase font-semibold block">
+                                            P(True)
+                                          </span>
+                                          <span className="text-sm font-bold text-slate-200 font-mono">
+                                            {(Number(ansVal.probability) * 100).toFixed(1)}%
+                                          </span>
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Probability Distribution Bars */}
+                                {Object.keys(probs).length > 0 && (
+                                  <div className="space-y-1.5 pt-1">
+                                    <span className="text-[10px] font-semibold text-slate-400 block">
+                                      Probability Distribution:
+                                    </span>
+                                    {Object.entries(probs).map(([k, p]) => {
+                                      const pNum = Number(p);
+                                      const pPercent = Math.min(Math.max(pNum * 100, 0), 100);
+                                      const isWinner = k === chosen;
+
+                                      return (
+                                        <div key={k} className="space-y-0.5">
+                                          <div className="flex items-center justify-between text-[10px] font-mono">
+                                            <span
+                                              className={
+                                                isWinner
+                                                  ? "font-bold text-violet-300 truncate mr-2"
+                                                  : "text-slate-400 truncate mr-2"
+                                              }
+                                            >
+                                              {k}
+                                            </span>
+                                            <span
+                                              className={
+                                                isWinner
+                                                  ? "font-bold text-violet-300 shrink-0"
+                                                  : "text-slate-400 shrink-0"
+                                              }
+                                            >
+                                              {pPercent.toFixed(1)}%
+                                            </span>
+                                          </div>
+                                          <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
+                                            <div
+                                              className={`h-full rounded-full transition-all duration-500 ${
+                                                isWinner
+                                                  ? "bg-gradient-to-r from-violet-500 to-indigo-500"
+                                                  : "bg-slate-700"
+                                              }`}
+                                              style={{ width: `${pPercent}%` }}
+                                            />
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Confidence footer */}
+                              {conf !== null && !isScoreAns && (
+                                <div className="pt-2 border-t border-white/[0.05] flex items-center justify-between text-[10px] text-slate-400">
+                                  <span>Confidence</span>
+                                  <span className="font-mono text-slate-200 font-semibold">
+                                    {(Number(conf) <= 1 ? Number(conf) * 100 : Number(conf)).toFixed(0)}%
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(JSON.stringify(jevResponse, null, 2));
+                            setCopiedJevJson(true);
+                            setTimeout(() => setCopiedJevJson(false), 2000);
+                          }}
+                          className="absolute top-2.5 right-2.5 p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs flex items-center gap-1 z-10"
+                        >
+                          {copiedJevJson ? <Check size={11} className="text-emerald-400" /> : <Copy size={11} />}
+                          {copiedJevJson ? "Copied" : "Copy"}
+                        </button>
+                        <pre className="p-3 bg-slate-950 border border-white/[0.08] rounded-xl text-xs font-mono text-violet-200 overflow-x-auto max-h-[380px]">
+                          {JSON.stringify(jevResponse, null, 2)}
+                        </pre>
+                      </div>
+                    )
+                  ) : (
+                    <div className="p-8 text-center bg-slate-950/40 border border-white/[0.06] rounded-xl text-slate-500 text-xs">
+                      Ready to evaluate. Configure State and Questions above, then click <strong className="text-slate-300">Evaluate Decision</strong>.
                     </div>
                   )}
                 </div>

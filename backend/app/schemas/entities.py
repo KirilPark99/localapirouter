@@ -242,6 +242,7 @@ class DiscoveredModelRead(BaseModel):
     is_visible: bool = True
     reasoning_effort: Optional[str] = None
     temperature: Optional[float] = None
+    model_type: str = "openai"
     discovered_at: datetime
     created_at: Optional[datetime] = None
     rating: Optional[ModelRatingInfo] = None
@@ -252,6 +253,7 @@ class DiscoveredModelUpdate(BaseModel):
     enabled: Optional[bool] = None
     is_visible: Optional[bool] = None
     display_name: Optional[str] = None
+    model_type: Optional[str] = None
     input_price_per_1m: Optional[float] = None
     output_price_per_1m: Optional[float] = None
     context_length: Optional[int] = None
@@ -289,6 +291,7 @@ class ModelCard(BaseModel):
     max_tokens: Optional[int] = None
     reasoning_effort: Optional[str] = None
     temperature: Optional[float] = None
+    model_type: Optional[str] = "openai"
 
 class ModelListResponse(BaseModel):
     object: str = "list"

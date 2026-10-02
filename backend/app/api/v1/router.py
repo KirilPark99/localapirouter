@@ -9,10 +9,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db, AsyncSessionLocal, _safe_close_session
 from app.api.deps import get_router_key_dep
 from app.models.entities import RouterApiKey, DiscoveredModel, RoutingProfile, FusionProfile, Provider
-from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse, ChatMessage, ResponsesRequest
+from app.schemas.chat import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatCompletionChoice,
+    ChatMessage,
+    ResponsesRequest,
+    UsageInfo,
+)
 from app.schemas.entities import ModelListResponse, ModelCard
+from app.schemas.jev import JevRequest, JevResponse
 from app.routing.engine import RoutingEngine
 from app.fusion.engine import FusionEngine
+from app.jev.engine import JevEngine
 from app.core.errors import RouterException
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible API"])
@@ -50,6 +59,7 @@ async def list_models(
                 max_tokens=m.max_output_tokens,
                 reasoning_effort=getattr(m, "reasoning_effort", None),
                 temperature=getattr(m, "temperature", None),
+                model_type=getattr(m, "model_type", "openai"),
             )
         )
 
@@ -152,6 +162,7 @@ async def retrieve_model(
             max_tokens=model_obj.max_output_tokens,
             reasoning_effort=getattr(model_obj, "reasoning_effort", None),
             temperature=getattr(model_obj, "temperature", None),
+            model_type=getattr(model_obj, "model_type", "openai"),
         )
 
     # 4. Check if bare slug matches a route
@@ -231,6 +242,91 @@ async def chat_completions(
                     finally:
                         await _safe_close_session(session)
         else:
+            # Check if caller passed a JEV decision structure or model is configured as JEV
+            parsed_jev_payload = None
+            if payload.messages and len(payload.messages) > 0:
+                last_content = payload.messages[-1].content
+                if isinstance(last_content, str) and ("\"questions\"" in last_content or "'questions'" in last_content):
+                    try:
+                        raw_data = json.loads(last_content)
+                        if isinstance(raw_data, dict) and "questions" in raw_data:
+                            parsed_jev_payload = JevRequest(
+                                model=model_str,
+                                state=raw_data.get("state", ""),
+                                questions=raw_data["questions"],
+                            )
+                    except Exception:
+                        pass
+
+            is_jev_model = False
+            if not model_str.startswith("route/"):
+                session_to_use = db if db is not None else AsyncSessionLocal()
+                try:
+                    m_check = (await session_to_use.execute(
+                        select(DiscoveredModel.model_type).where(
+                            (DiscoveredModel.canonical_slug == model_str) | (DiscoveredModel.provider_model_id == model_str)
+                        )
+                    )).scalars().first()
+                    if m_check == "jev":
+                        is_jev_model = True
+                except Exception:
+                    pass
+                finally:
+                    if db is None:
+                        await _safe_close_session(session_to_use)
+
+            if parsed_jev_payload or is_jev_model:
+                jev_req = parsed_jev_payload
+                if not jev_req:
+                    prompt_text = "\n".join(f"{m.role}: {m.content}" for m in payload.messages if m.content)
+                    jev_req = JevRequest(
+                        model=model_str,
+                        state=prompt_text,
+                        questions={
+                            "evaluation": {
+                                "choice": {
+                                    "criteria": {
+                                        "appropriate": "The prompt is valid and actionable",
+                                        "inappropriate": "The prompt cannot be processed"
+                                    }
+                                }
+                            }
+                        }
+                    )
+
+                session = db if db is not None else AsyncSessionLocal()
+                try:
+                    jev_res = await JevEngine.execute_decision(
+                        db=session,
+                        request=jev_req,
+                        router_key=router_key,
+                        request_id=req_id,
+                        record_log=True,
+                    )
+                finally:
+                    if db is None:
+                        await _safe_close_session(session)
+
+                content_text = json.dumps(jev_res.answers, ensure_ascii=False, indent=2)
+                return ChatCompletionResponse(
+                    id=req_id,
+                    object="chat.completion",
+                    created=int(time.time()),
+                    model=model_str,
+                    choices=[
+                        ChatCompletionChoice(
+                            index=0,
+                            message=ChatMessage(role="assistant", content=content_text),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=UsageInfo(
+                        prompt_tokens=jev_res.usage.input_tokens,
+                        completion_tokens=jev_res.usage.output_tokens,
+                        total_tokens=jev_res.usage.total_tokens,
+                    ),
+                )
+
             if payload.stream:
                 stream_gen = RoutingEngine.route_stream_chat(
                     db=None, request=payload, router_key=router_key, request_id=req_id
@@ -266,6 +362,44 @@ async def chat_completions(
                 }
             },
         )
+
+@router.post("/systemone", response_model=JevResponse)
+@router.post("/decisions", response_model=JevResponse)
+async def systemone_decision(
+    payload: JevRequest,
+    db: Optional[AsyncSession] = Depends(lambda: None),
+    router_key: Optional[RouterApiKey] = Depends(get_router_key_dep),
+):
+    req_id = f"dec_{uuid.uuid4().hex[:16]}"
+    session = db if db is not None else AsyncSessionLocal()
+    try:
+        return await JevEngine.execute_decision(
+            db=session,
+            request=payload,
+            router_key=router_key,
+            request_id=req_id,
+            record_log=True,
+        )
+    except RouterException as re:
+        return JSONResponse(
+            status_code=re.status_code,
+            content=re.to_openai_dict(request_id=req_id),
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "message": str(e),
+                    "type": "jev_engine_error",
+                    "code": "internal_error",
+                    "request_id": req_id,
+                }
+            },
+        )
+    finally:
+        if db is None:
+            await _safe_close_session(session)
 
 def _responses_payload(response: ChatCompletionResponse, response_id: str) -> dict:
     text = response.choices[0].message.content if response.choices else ""

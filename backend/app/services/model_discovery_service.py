@@ -96,6 +96,8 @@ class ModelDiscoveryService:
                 m.discovered_at = now
             else:
                 # Insert new model
+                low_id = item.provider_model_id.lower()
+                auto_type = "jev" if ("jev" in low_id or "typesafe" in low_id) and ("router" not in low_id) else "openai"
                 new_model = DiscoveredModel(
                     provider_id=provider.id,
                     credential_id=credential_id,
@@ -108,6 +110,7 @@ class ModelDiscoveryService:
                     max_output_tokens=item.max_output_tokens,
                     input_price_per_1m=0.0,
                     output_price_per_1m=0.0,
+                    model_type=auto_type,
                     enabled=True,
                     available=True,
                     is_visible=True,
@@ -199,6 +202,8 @@ class ModelDiscoveryService:
         set_reasoning_effort: bool = False,
         temperature: Optional[float] = None,
         set_temperature: bool = False,
+        model_type: Optional[str] = None,
+        set_model_type: bool = False,
     ) -> int:
         if not model_ids:
             return 0
@@ -213,6 +218,8 @@ class ModelDiscoveryService:
             values["reasoning_effort"] = cls._validate_reasoning_effort(reasoning_effort)
         if set_temperature:
             values["temperature"] = temperature if (temperature is not None and 0.0 <= temperature <= 2.0) else None
+        if set_model_type and model_type:
+            values["model_type"] = model_type.lower().strip()
         if values:
             await db.execute(
                 update(DiscoveredModel)
@@ -258,6 +265,7 @@ class ModelDiscoveryService:
         display_name: str,
         context_length: Optional[int] = None,
         max_output_tokens: Optional[int] = None,
+        model_type: Optional[str] = None,
     ) -> DiscoveredModelRead:
         p_res = await db.execute(select(Provider).where(Provider.id == provider_id))
         provider = p_res.scalar_one_or_none()
@@ -266,6 +274,18 @@ class ModelDiscoveryService:
 
         canonical_slug = cls.compute_canonical_slug(provider.slug, provider_model_id)
         now = datetime.now(timezone.utc)
+
+        clean_mid = provider_model_id.lower()
+        if model_type:
+            resolved_type = model_type.lower().strip()
+        elif ("jev" in clean_mid or "typesafe" in clean_mid) and ("router" not in clean_mid):
+            resolved_type = "jev"
+        else:
+            resolved_type = "openai"
+
+        endpoints = ["/chat/completions"]
+        if resolved_type == "jev":
+            endpoints.append("/v1/systemone")
 
         model = DiscoveredModel(
             provider_id=provider_id,
@@ -283,12 +303,14 @@ class ModelDiscoveryService:
                 "embeddings": "unknown",
                 "structured_output": "unknown",
                 "reasoning": "unknown",
+                "system_one": resolved_type == "jev",
             },
-            supported_endpoints=["/chat/completions"],
+            supported_endpoints=endpoints,
             context_length=context_length,
             max_output_tokens=max_output_tokens,
             input_price_per_1m=0.0,
             output_price_per_1m=0.0,
+            model_type=resolved_type,
             enabled=True,
             available=True,
             discovered_at=now,
@@ -328,6 +350,7 @@ class ModelDiscoveryService:
             is_visible=getattr(m, "is_visible", True),
             reasoning_effort=getattr(m, "reasoning_effort", None),
             temperature=getattr(m, "temperature", None),
+            model_type=getattr(m, "model_type", "openai") or "openai",
             discovered_at=m.discovered_at,
             created_at=getattr(m, "created_at", None),
             rating=rating,
@@ -399,6 +422,8 @@ class ModelDiscoveryService:
             m.reasoning_effort = cls._validate_reasoning_effort(data.reasoning_effort)
         if "temperature" in data.model_fields_set:
             m.temperature = data.temperature if (data.temperature is not None and 0.0 <= data.temperature <= 2.0) else None
+        if "model_type" in data.model_fields_set and data.model_type is not None:
+            m.model_type = data.model_type.lower().strip()
 
         await db.commit()
         return await cls.get_model_read(db, model_id)
