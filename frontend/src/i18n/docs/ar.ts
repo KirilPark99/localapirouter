@@ -16,7 +16,7 @@ export const ar: DocContent = {
       "id": "overview",
       "title": "نظرة عامة على النظام",
       "group": "intro",
-      "description": "بوابة نماذج لغوية ذاتية الاستضافة مع محركات التوجيه المباشر والاحتياطي والدمج، وتجمع المفاتيح وتوافق Ollama.",
+      "description": "بوابة نماذج لغوية ذاتية الاستضافة مع 4 محركات توجيه (المباشر، الاحتياطي، الدمج، وقرارات Jev System One)، وتجمع المفاتيح وتوافق Ollama.",
       "subsections": [
         {
           "title": "مقارنة أوضاع التوجيه",
@@ -49,6 +49,13 @@ export const ar: DocContent = {
                 "Multi-Model Ensemble + Judge",
                 "Parallel execution with consensus synthesis",
                 "Higher (multi-model + judge deliberation)"
+              ],
+              [
+                "Jev System One",
+                "direct, /v1/systemone, jev/*",
+                "Discrete Decision Primitives",
+                "Fast rubric & choice evaluation with calibrated probabilities",
+                "Ultra-low / Instant"
               ]
             ]
           }
@@ -56,7 +63,7 @@ export const ar: DocContent = {
       ],
       "badge": "Core Architecture",
       "highlights": [
-        "3 محركات توجيه: المباشر، والاحتياطي ذو الأولوية (المتداخل)، ودمج النماذج",
+        "4 محركات توجيه: المباشر، والاحتياطي ذو الأولوية (المتداخل)، ودمج النماذج، وقرارات Jev System One السريعة",
         "توافق فوري مع واجهات OpenAI (/v1/chat/completions) وOllama (/api/tags)",
         "تشفير عالي الأمان: AES-128-CBC Fernet محمي بمفتاح ROUTER_MASTER_KEY",
         "قاطع الدائرة الكهربائية (Circuit Breaker) لعزل الأعطال مع دعم البروكسي الجغرافي"
@@ -132,6 +139,17 @@ export const ar: DocContent = {
               ]
             ]
           }
+        },
+        {
+          "title": "أنواع النماذج: متوافقة مع OpenAI مقابل ⚡ Jev (System One)",
+          "description": "يتيح MyAIrouter تحديد وضع التشغيل لكل نموذج في الدليل: الوضع الافتراضي المتوافق مع OpenAI أو محرك اتخاذ القرارات السريع Jev System One.",
+          "bullets": [
+            "نوع النموذج الافتراضي ('openai'): التوليد النصي التحاوري القياسي، وتفكير CoT، والبث المباشر (OpenAI, Gemini, Anthropic, Ollama وغيرها).",
+            "وضع Jev ('jev'): تقييم سريع للقرارات (System One) بناءً على معايير محددة (choice, score, noul) مع احتمالات معايرة دقيقة.",
+            "التنفيذ الأصلي مقابل المحاكاة: المزودون الأصليون (drex.nace, experientiallabs) يتلقون الحمولات مباشرة دون تأخير؛ النماذج العامة (GPT, Claude, Gemini, Groq) تُحاكى تلقائياً عبر JSON المنظم.",
+            "إدارة الدليل: تصفية سريعة بالوسوم ('All Types', 'OpenAI', '⚡ Jev')، وتعديل فردي، وتحديث جماعي ('Set Model Type') في واجهة الويب.",
+            "واجهة API: يُرجع حقل model_type ('openai' | 'jev') في طلبات GET /v1/models وGET /v1/models/{id}."
+          ]
         }
       ],
       "badge": "Addressing"
@@ -410,6 +428,80 @@ export const ar: DocContent = {
         }
       ],
       "badge": "AI Ensembles"
+    },
+    {
+      "id": "jev-systemone",
+      "title": "محرك اتخاذ القرار السريع Jev (System One)",
+      "group": "routing",
+      "description": "محرك قرارات فائق السرعة (System One) للوكلاء المستقلين والتصنيف وحواجز الأمان والتقييم المعياري مع توزيعات احتمالية معايرة.",
+      "subsections": [
+        {
+          "title": "أوليات القرار والمعايير",
+          "table": {
+            "headers": [
+              "Primitive / Примитив",
+              "Type / Тип",
+              "Output Structure",
+              "Description & Usage / Назначение"
+            ],
+            "rows": [
+              [
+                "choice",
+                "Categorical / Категориальный",
+                "probabilities: {option: float}, choice: string",
+                "Calculates calibrated probability distribution across discrete options (e.g. intent routing, priority triage, sentiment)."
+              ],
+              [
+                "score",
+                "Quantitative / Числовой",
+                "score: float, confidence: float",
+                "Computes a numerical score within a defined rubric range (e.g. risk score 0.0-1.0, quality rating 1-5)."
+              ],
+              [
+                "noul",
+                "Binary / Булево",
+                "value: bool, confidence: float",
+                "Evaluates a strict boolean assertion or safety guardrail condition with associated confidence."
+              ]
+            ]
+          }
+        },
+        {
+          "title": "مواصفات واجهة REST API (POST /v1/systemone)",
+          "code": {
+            "title": "System One Decision Request",
+            "lang": "bash",
+            "content": "curl http://localhost:8000/v1/systemone \\\n  -H \"Content-Type: application/json\" \\\n  -H \"Authorization: Bearer sk-router-YOUR_KEY\" \\\n  -d '{\n    \"model\": \"experientiallabs/jev-latest\",\n    \"state\": \"User transaction: $4,990 from IP 198.51.100.4 (New Device, Location: Kyiv, Previous: New York 10m ago).\",\n    \"questions\": [\n      {\n        \"id\": \"fraud_risk\",\n        \"text\": \"What is the fraud probability category?\",\n        \"type\": \"choice\",\n        \"options\": [\"low\", \"suspicious\", \"critical_fraud\"]\n      },\n      {\n        \"id\": \"require_2fa\",\n        \"text\": \"Should step-up 2FA verification be enforced immediately?\",\n        \"type\": \"noul\"\n      }\n    ]\n  }'\n\n# Response format:\n# {\n#   \"id\": \"jev-9b2f4c1e\",\n#   \"model\": \"experientiallabs/jev-latest\",\n#   \"decisions\": {\n#     \"fraud_risk\": {\n#       \"choice\": \"critical_fraud\",\n#       \"probabilities\": {\"low\": 0.02, \"suspicious\": 0.11, \"critical_fraud\": 0.87},\n#       \"confidence\": 0.87\n#     },\n#     \"require_2fa\": {\n#       \"value\": true,\n#       \"confidence\": 0.96\n#     }\n#   }\n# }"
+          }
+        },
+        {
+          "title": "التنفيذ الأصلي مقابل المحاكاة الذكية",
+          "bullets": [
+            "توجيه أصلي بدون تأخير: يتلقى المزودون المتخصصون (مثل drex.nace وexperientiallabs وtypesafe.ai) الطلبات مباشرة إلى محرك System One بأدنى زمن استجابة ممكن.",
+            "محاكاة JSON المنظمة لجميع النماذج: عند ضبط model_type='jev' لأي نموذج محادثة عام (مثل gemini-2.5-flash أو gpt-4o-mini أو claude-3-5-haiku أو ollama)، يقوم النظام تلقائياً بإنشاء موجه JSON صارم ومعايرة الاحتمالات.",
+            "توافق شفاف مع Chat API: تقبل نقطة النهاية القياسية POST /v1/chat/completions حمولات Jev وتعيد استجابة القرارات المعتمدة.",
+            "دعم الأسماء المستعارة: كل من POST /v1/systemone وPOST /v1/decisions يقدمان نفس الوظيفة تماماً."
+          ]
+        },
+        {
+          "title": "استوديو Playground والقوالب المرئية الجاهزة",
+          "bullets": [
+            "وضع استوديو مخصص: تبويب '⚡ Jev (System One)' في واجهة الويب (/playground) لاختبار نماذج اتخاذ القرارات السريعة بشكل تفاعلي.",
+            "محرر سياق الحالة State: إدخال السياق المطلوب تقييمه (سجلات الأمان، محادثات العملاء، الفروقات البرمجية، أو المعاملات المالية).",
+            "منشئ الأسئلة المرئي: إضافة الأسئلة واختيار نوع الأولية (choice, score, noul) وضبط الخيارات مع إمكانية التبديل إلى JSON الخام.",
+            "4 قوالب مدمجة: سيناريوهات جاهزة لتصعيد دعم العملاء، وإشراف المحتوى، ومراجعة الأكواد البرمجية، ومخاطر الاحتيال المالي.",
+            "مخططات احتمالية وتصدير الكود: رسوم بيانية للتوزيع الاحتمالي ومؤشرات الثقة مع تصدير الأكواد بضغطة زر لـ cURL وPython وNode.js."
+          ]
+        }
+      ],
+      "badge": "⚡ System One Decisions",
+      "highlights": [
+        "محرك قرارات System One: تقييم فائق السرعة للمعايير والتصنيف مع توزيعات احتمالية معايرة بدقة",
+        "3 أوليات للقرار: الاختيار Choice (توزيع فئوي)، والدرجة Score (مقياس كمي)، والإثبات Noul (قرار ثنائي/منطقي)",
+        "نقاط نهاية مخصصة: POST /v1/systemone وPOST /v1/decisions، مع توافق شفاف مع POST /v1/chat/completions",
+        "توجيه أصلي بدون تأخير لمزودي Jev + محاكاة ذكية بـ JSON المنظم لأي نموذج LLM عام",
+        "استوديو Playground التفاعلي: سياق الحالة State، ومنشئ بصري، و4 قوالب جاهزة، ورسوم بيانية للاحتمالات، وتصدير الأكواد"
+      ]
     },
     {
       "id": "providers",
@@ -792,6 +884,18 @@ export const ar: DocContent = {
                 "OpenAI-compatible text & vision chat completion (streaming supported)"
               ],
               [
+                "POST",
+                "/v1/systemone",
+                "Bearer sk-router-...",
+                "Jev System One decision engine: evaluate state against discrete criteria (choice, score, noul)"
+              ],
+              [
+                "POST",
+                "/v1/decisions",
+                "Bearer sk-router-...",
+                "Alias for /v1/systemone decision evaluation endpoint"
+              ],
+              [
                 "GET",
                 "/v1/models",
                 "Bearer sk-router-...",
@@ -852,6 +956,7 @@ export const ar: DocContent = {
       "badge": "REST Reference",
       "highlights": [
         "واجهة OpenAI المتوافقة: /v1/chat/completions و/v1/models (إحلال مباشر لجميع التطبيقات)",
+        "قرارات Jev System One: /v1/systemone و/v1/decisions (تقييم المعايير المنفصلة والاحتمالات المعايرة)",
         "بروتوكول Ollama: /api/tags و/api/show و/api/version و/api/chat",
         "الإدارة المركزية: /api/v1/credentials و/api/v1/models و/api/v1/routes و/api/v1/fusion",
         "النظام والسلامة: /health و/api/v1/system/backup و/api/v1/system/restore و/api/v1/system/stats"

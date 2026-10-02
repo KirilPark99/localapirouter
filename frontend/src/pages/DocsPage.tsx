@@ -37,6 +37,7 @@ const sectionIcons: Record<string, React.ReactNode> = {
   "direct-routing": <Terminal size={15} />,
   "priority-fallback": <GitFork size={15} />,
   fusion: <Merge size={15} />,
+  "jev-systemone": <Zap size={15} />,
   providers: <Cpu size={15} />,
   credentials: <KeyRound size={15} />,
   "api-keys": <ShieldCheck size={15} />,

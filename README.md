@@ -55,32 +55,31 @@ Supported upstream ecosystems include **Google AI Studio (Gemini)**, **OpenAI (G
 - **Unlimited Keyless Credentials**: Add multiple zero-key credentials for public or local endpoints (Kilo AI Gateway, Ollama, vLLM, LocalAI) without duplicate HMAC collisions.
 - **Proxy Routing for Public Gateways**: Route different keyless endpoints through different geographic proxies (e.g. Kilo Direct, Kilo via US SOCKS5, Kilo via EU SOCKS5).
 
-### 7. Three Intelligent Routing Modes
+### 7. Four Intelligent Routing Modes
 
 ```
                               CLIENT REQUEST
                                     │
-           ┌────────────────────────┼────────────────────────┐
-           ▼                        ▼                        ▼
-     DIRECT ROUTING          PRIORITY FALLBACK         MODEL FUSION
-  (google/gemini-2.5-flash)    (route/coding)      (fusion/best-of-3)
-           │                        │                        │
-  Round-robin keys with     Waterfall candidate     Parallel async fan-out
-  instant auto-failover    chain + nested profiles   to multiple models/keys
-  on 429/5xx/network err   with CoT budget control           │
-           │                        │               AI Judge synthesis/vote
-           └────────────────────────┼─────────────── (streamed via SSE)
-                                    │
+       ┌──────────────────┬─────────┴─────────┬──────────────────┐
+       ▼                  ▼                   ▼                  ▼
+ DIRECT ROUTING    PRIORITY FALLBACK    MODEL FUSION      JEV SYSTEM ONE
+(google/gemini)     (route/coding)    (fusion/best-of-3)  (experientiallabs/jev)
+       │                  │                   │                  │
+Round-robin keys  Waterfall candidate  Parallel async      Discrete Decision
+instant failover  chain + CoT budget   fan-out + Judge     Primitives (choice,
+on 429/5xx error  fallback control     deliberation & SSE  score, noul) & Calibrated
+       │                  │                   │            Probabilities
+       └──────────────────┴─────────┬─────────┴──────────────────┘
                                     ▼
                           CIRCUIT BREAKER CHECK
                                     │
                                     ▼
                          UPSTREAM ADAPTER LAYER
-                      (OpenAI / Google / Anthropic)
+                   (OpenAI / Google / Anthropic / Jev)
                                     │
                                     ▼
-                      INDIVIDUAL PROXY TRANSPORTS
-                    (Direct / SOCKS5H / HTTP / HTTPS)
+                        INDIVIDUAL PROXY TRANSPORTS
+                      (Direct / SOCKS5H / HTTP / HTTPS)
 ```
 
 1. **DIRECT ROUTING with Multi-Key Auto-Failover** (`openai/gpt-4o`, `google/gemini-2.5-flash`):
@@ -100,24 +99,54 @@ Supported upstream ecosystems include **Google AI Studio (Gemini)**, **OpenAI (G
      - `consensus`: Identifies agreements across models and clarifies discrepancies.
      - `critique_and_rewrite`: Critiques each answer, eliminates errors, and outputs a revised synthesis.
    - Real-time Server-Sent Events (SSE) streaming of the judge synthesis.
+4. **JEV (SYSTEM ONE) DECISION ENGINE** (`/v1/systemone`, `/v1/decisions`):
+   - Fast intuitive System One evaluation against discrete rubrics and structured criteria.
+   - **3 Decision Primitives**:
+     - `choice`: Discrete multi-class selection with calibrated softmax probability distribution.
+     - `score`: Numeric evaluation against defined criteria (e.g. 0.0 - 1.0 or 1 - 5) with confidence metrics.
+     - `noul`: Binary / boolean decision predicate with confidence score.
+   - **Native Zero-Delay Routing**: Direct pass-through dispatch to providers with native System One support (`drex.nace`, `experientiallabs`, `typesafe.ai`).
+   - **Universal Structured LLM Emulation**: Any general LLM (Gemini 2.5, GPT-4o, Claude 3.5, Groq, Ollama) marked with `model_type: "jev"` is automatically emulated via strict JSON schema prompting.
+   - **Transparent Chat Compatibility**: `POST /v1/chat/completions` transparently accepts Jev decision payloads and returns compliant structured responses.
 
-### 8. Circuit Breaker & Health Tracking
+### 8. Model Catalog Types & Batch Management (`openai` vs `jev`)
+- **Default Mode (`openai`)**: All registered models default to OpenAI-compatible conversational chat and vision generation.
+- **System One Mode (`jev`)**: Models toggled to `jev` serve as discrete decision engines for fast classification and guardrails.
+- **Catalog Filter Chips**: Filter models instantly by `All Types`, `OpenAI`, or `⚡ Jev`.
+- **Batch Update Modal**: Easily change model execution types in bulk via the "Set Model Type" modal or individual edit dialog in `/models`.
+- **API Visibility**: Model type metadata is returned in `GET /v1/models` and `GET /v1/models/{id}` (`model_type: "openai" | "jev"`).
+
+### 9. Interactive Playground Decision Studio
+- **Dedicated ⚡ Jev Tab**: Interactive workspace alongside Chat, Single, and Compare modes in `/playground`.
+- **State Context Editor**: Define the exact conversation, code diff, transaction, or security log being evaluated.
+- **Visual Question Builder**: Add question primitives (`choice`, `score`, `noul`) with options and live schema validation, or edit raw JSON.
+- **4 Built-in Presets**:
+  - *Customer Support Escalation* (urgency triage and department routing)
+  - *Content Moderation Guardrail* (toxicity, PII, and safety enforcement)
+  - *PR Code Review* (quality score, regression risk, and approval assertion)
+  - *Financial Fraud Risk* (transaction risk category and step-up 2FA trigger)
+- **Calibrated Probability Charts & Export**: Real-time distribution graphs, confidence gauges, and instant code generation (cURL, Python, Node.js).
+
+### 10. Circuit Breaker & Health Tracking
 - **Automated Failure Quarantine**: Tracks consecutive failures per credential. After threshold failures (default: 3), the key transitions to `COOLDOWN` (default: 60s).
 - **HTTP 429 Awareness**: Honors upstream `Retry-After` headers for dynamic cooldown durations.
 - **State Progression**: `HEALTHY` ➔ `DEGRADED` ➔ `COOLDOWN` / `RATE_LIMITED` ➔ automatic half-open probe ➔ `HEALTHY`.
 - **Manual Reset**: One-click circuit breaker reset from the web console.
 
-### 9. Dynamic Activity Timeline & Analytics
+### 11. Dynamic Activity Timeline & Analytics
 - **Continuous 24-Bucket Hourly Timeline**: Gap-free time series visualization in the Analytics Dashboard.
 - **Flexible Time Horizons**: Toggle between 24 Hours (hourly buckets), 7 Days (daily), 30 Days (daily), or All Time.
 - **Tracked Operational Metrics**: Request volume, Success rate (%), Total prompt/completion tokens, Estimated cost in USD, and Average latency (ms).
 - **Breakdown Tables**: Detailed usage tables by Router Key, Provider, Model, Credential, and Routing Profile.
 
-### 10. Unified Multi-Protocol Endpoints
+### 12. Unified Multi-Protocol Endpoints
 - **OpenAI Compatible**:
-  - `GET /v1/models`: Standard model list exposing direct models, routes, and fusions based on client key permissions.
-  - `POST /v1/chat/completions`: Full non-streaming JSON and real-time SSE streaming (`stream: true`).
+  - `GET /v1/models`: Standard model list exposing direct models, routes, fusions, and model types (`openai` / `jev`).
+  - `POST /v1/chat/completions`: Full non-streaming JSON and real-time SSE streaming (`stream: true`), plus transparent Jev decision routing.
   - `POST /v1/responses`: OpenAI Responses API alias.
+- **Jev System One Decisions**:
+  - `POST /v1/systemone`: Dedicated discrete decision engine evaluation endpoint.
+  - `POST /v1/decisions`: Alias for `/v1/systemone`.
 - **Anthropic Native Messages Protocol**:
   - `POST /v1/messages`: Translates native Anthropic messages payloads, allowing tools like Claude Code to connect directly to MyAIrouter.
 
@@ -316,6 +345,47 @@ for chunk in stream:
 print()
 ```
 
+#### Jev System One Decision Engine (`/v1/systemone` or native provider)
+```python
+import requests
+
+# Query high-speed System One decision engine with discrete question primitives
+response = requests.post(
+    "http://localhost:8000/v1/systemone",
+    headers={
+        "Authorization": "Bearer sk-router-YOUR_CLIENT_KEY",
+        "Content-Type": "application/json",
+    },
+    json={
+        "model": "experientiallabs/jev-latest",
+        "state": "Customer support ticket: 'Urgent: Payment charged twice, please refund ASAP.'",
+        "questions": [
+            {
+                "id": "triage_priority",
+                "text": "What is the priority level of this ticket?",
+                "type": "choice",
+                "options": ["low", "normal", "high", "critical"]
+            },
+            {
+                "id": "sentiment_score",
+                "text": "Customer sentiment score (0.0=furious to 1.0=delighted)",
+                "type": "score"
+            },
+            {
+                "id": "requires_immediate_escalation",
+                "text": "Does this require supervisor tier-2 escalation?",
+                "type": "noul"
+            }
+        ]
+    }
+)
+
+decisions = response.json().get("decisions", {})
+print("Priority:", decisions["triage_priority"]["choice"])
+print("Probabilities:", decisions["triage_priority"]["probabilities"])
+print("Escalate:", decisions["requires_immediate_escalation"]["value"])
+```
+
 ---
 
 ### 3. Node.js / TypeScript SDK Example
@@ -356,7 +426,31 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-#### B. Anthropic Native Messages Endpoint (`/v1/messages`)
+#### B. Jev System One Decision Primitive API (`/v1/systemone`)
+```bash
+curl -X POST http://localhost:8000/v1/systemone \
+  -H "Authorization: Bearer sk-router-YOUR_CLIENT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "experientiallabs/jev-latest",
+    "state": "Security audit: 12 failed SSH logins from IP 203.0.113.19 within 30 seconds.",
+    "questions": [
+      {
+        "id": "threat_level",
+        "text": "Assess the intrusion threat level",
+        "type": "choice",
+        "options": ["benign", "suspicious", "severe_bruteforce"]
+      },
+      {
+        "id": "block_ip",
+        "text": "Should IP address be automatically added to firewall blocklist?",
+        "type": "noul"
+      }
+    ]
+  }'
+```
+
+#### C. Anthropic Native Messages Endpoint (`/v1/messages`)
 ```bash
 curl -X POST http://localhost:8000/v1/messages \
   -H "x-api-key: sk-router-YOUR_CLIENT_KEY" \
@@ -392,11 +486,13 @@ Every upstream error is normalized into a strict taxonomy determining whether fa
 
 ## 📊 Complete API Reference
 
-### OpenAI-Compatible Public Routes (`/v1`)
+### OpenAI-Compatible & Decision Public Routes (`/v1`)
 | Method | Path | Description |
 | :--- | :--- | :--- |
-| `GET` | `/v1/models` | List available models, routes (`route/*`), and fusions (`fusion/*`) filtered by key permissions |
-| `POST` | `/v1/chat/completions` | Create chat completion (Direct, Fallback Route, or Fusion; supports JSON & SSE streaming) |
+| `GET` | `/v1/models` | List available models, routes (`route/*`), fusions (`fusion/*`), and model types (`openai`, `jev`) |
+| `POST` | `/v1/chat/completions` | Create chat completion (Direct, Fallback Route, or Fusion; supports JSON, SSE streaming, and Jev decisions) |
+| `POST` | `/v1/systemone` | Jev System One discrete decision engine evaluation (`choice`, `score`, `noul`) |
+| `POST` | `/v1/decisions` | Alias for `/v1/systemone` |
 | `POST` | `/v1/responses` | Alias for `/v1/chat/completions` (OpenAI Responses API compatibility) |
 | `POST` | `/v1/messages` | Native Anthropic Messages API inbound endpoint |
 

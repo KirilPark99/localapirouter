@@ -16,7 +16,7 @@ export const zh: DocContent = {
       "id": "overview",
       "title": "系统架构概述",
       "group": "intro",
-      "description": "自托管通用大模型网关，内置直连、优先级回退与模型融合三大引擎，支持多提供商密钥池和 Ollama 协议兼容。",
+      "description": "自托管通用大模型网关，内置直连、优先级回退、模型融合与 Jev 快决策四大引擎，支持多提供商密钥池和 Ollama 协议兼容。",
       "subsections": [
         {
           "title": "路由模式特性对比",
@@ -49,6 +49,13 @@ export const zh: DocContent = {
                 "Multi-Model Ensemble + Judge",
                 "Parallel execution with consensus synthesis",
                 "Higher (multi-model + judge deliberation)"
+              ],
+              [
+                "Jev System One",
+                "direct, /v1/systemone, jev/*",
+                "Discrete Decision Primitives",
+                "Fast rubric & choice evaluation with calibrated probabilities",
+                "Ultra-low / Instant"
               ]
             ]
           }
@@ -56,7 +63,7 @@ export const zh: DocContent = {
       ],
       "badge": "Core Architecture",
       "highlights": [
-        "三大路由引擎：直连路由、优先级回退（支持嵌套）、模型融合评审团",
+        "四大路由引擎：直连路由、优先级回退（支持嵌套）、模型融合评审团与 Jev 快决策 (System One)",
         "完美兼容 OpenAI API (/v1/chat/completions) 与 Ollama (/api/tags, /api/show)",
         "企业级安全：基于 ROUTER_MASTER_KEY 的 AES-128-CBC Fernet 密钥加密存储",
         "断路器自动隔离故障节点，支持健康检测自愈与独立代理绑定"
@@ -132,6 +139,17 @@ export const zh: DocContent = {
               ]
             ]
           }
+        },
+        {
+          "title": "模型执行类型：OpenAI 兼容模式 vs ⚡ Jev 快决策",
+          "description": "MyAIrouter 支持为模型目录中的每一款模型独立配置执行模式：默认的 OpenAI 兼容模式或高并发 Jev System One 快速决策引擎。",
+          "bullets": [
+            "默认模型类型 ('openai')：支持标准的多轮对话、思维链推理与流式响应（涵盖 OpenAI、Gemini、Anthropic、Ollama 等）。",
+            "Jev 决策模式 ('jev')：专用于 System One 快速离散评估（choice 选项、score 评分、noul 判定）并输出校准概率分布。",
+            "原生执行与智能模拟：原生 Jev 服务商（drex.nace、experientiallabs）享受零延迟直传；通用大模型（GPT、Claude、Gemini、Groq）自动通过结构化 JSON 提示词无缝模拟。",
+            "目录快捷管理：支持筛选标签（'All Types'、'OpenAI'、'⚡ Jev'）、单模型弹窗编辑与批量批量切换（'Set Model Type'）。",
+            "API 字段支持：GET /v1/models 与 GET /v1/models/{id} 接口均完整返回 model_type 属性。"
+          ]
         }
       ],
       "badge": "Addressing"
@@ -410,6 +428,80 @@ export const zh: DocContent = {
         }
       ],
       "badge": "AI Ensembles"
+    },
+    {
+      "id": "jev-systemone",
+      "title": "Jev 快决策 (System One) 引擎",
+      "group": "routing",
+      "description": "超高速 System One 快速决策引擎，面向自主智能体、意图分类、安全护栏与结构化规则评分，输出精确校准的概率分布。",
+      "subsections": [
+        {
+          "title": "决策原语与评估规则",
+          "table": {
+            "headers": [
+              "Primitive / Примитив",
+              "Type / Тип",
+              "Output Structure",
+              "Description & Usage / Назначение"
+            ],
+            "rows": [
+              [
+                "choice",
+                "Categorical / Категориальный",
+                "probabilities: {option: float}, choice: string",
+                "Calculates calibrated probability distribution across discrete options (e.g. intent routing, priority triage, sentiment)."
+              ],
+              [
+                "score",
+                "Quantitative / Числовой",
+                "score: float, confidence: float",
+                "Computes a numerical score within a defined rubric range (e.g. risk score 0.0-1.0, quality rating 1-5)."
+              ],
+              [
+                "noul",
+                "Binary / Булево",
+                "value: bool, confidence: float",
+                "Evaluates a strict boolean assertion or safety guardrail condition with associated confidence."
+              ]
+            ]
+          }
+        },
+        {
+          "title": "REST 接口规范 (POST /v1/systemone)",
+          "code": {
+            "title": "System One Decision Request",
+            "lang": "bash",
+            "content": "curl http://localhost:8000/v1/systemone \\\n  -H \"Content-Type: application/json\" \\\n  -H \"Authorization: Bearer sk-router-YOUR_KEY\" \\\n  -d '{\n    \"model\": \"experientiallabs/jev-latest\",\n    \"state\": \"User transaction: $4,990 from IP 198.51.100.4 (New Device, Location: Kyiv, Previous: New York 10m ago).\",\n    \"questions\": [\n      {\n        \"id\": \"fraud_risk\",\n        \"text\": \"What is the fraud probability category?\",\n        \"type\": \"choice\",\n        \"options\": [\"low\", \"suspicious\", \"critical_fraud\"]\n      },\n      {\n        \"id\": \"require_2fa\",\n        \"text\": \"Should step-up 2FA verification be enforced immediately?\",\n        \"type\": \"noul\"\n      }\n    ]\n  }'\n\n# Response format:\n# {\n#   \"id\": \"jev-9b2f4c1e\",\n#   \"model\": \"experientiallabs/jev-latest\",\n#   \"decisions\": {\n#     \"fraud_risk\": {\n#       \"choice\": \"critical_fraud\",\n#       \"probabilities\": {\"low\": 0.02, \"suspicious\": 0.11, \"critical_fraud\": 0.87},\n#       \"confidence\": 0.87\n#     },\n#     \"require_2fa\": {\n#       \"value\": true,\n#       \"confidence\": 0.96\n#     }\n#   }\n# }"
+          }
+        },
+        {
+          "title": "原生执行与智能模拟回退机制",
+          "bullets": [
+            "原生零延迟直通：针对原生支持 System One 决策架构的服务商（如 drex.nace、experientiallabs、typesafe.ai），网关直接透传专属协议，确保极致响应速度。",
+            "通用大模型结构化模拟：当将普通模型（如 gemini-2.5-flash、gpt-4o-mini、claude-3-5-haiku 或本地 ollama）标记为 model_type='jev' 时，网关自动注入严密的结构化 JSON Prompt，校准概率分布并封装为标准决策对象。",
+            "兼容 OpenAI Chat 端点：标准 POST /v1/chat/completions 接口可无缝接收 Jev 负载并自动按决策格式返回，现有 SDK 无需任何修改即可平滑接入。",
+            "双路由别名支持：POST /v1/systemone 与 POST /v1/decisions 完全等价，均可作为决策接口的主入口。"
+          ]
+        },
+        {
+          "title": "Playground 可视化决策工作室与场景预设",
+          "bullets": [
+            "专属工作室模式：在 Web 控制台的 /playground 页面直接切换至 '⚡ Jev (System One)' 模式进行离散决策交互调试。",
+            "State 上下文编辑器：输入待评估的完整上下文信息（如客户会话、审计日志、代码审查 Diff、支付交易详情或合规准则）。",
+            "可视化原语构建器：轻松增删评估项，一键切换 choice、score、noul 原语类型并配置离散标签，支持无缝切换至底层 Raw JSON 编辑。",
+            "内置4大场景预设：提供客服工单流转、内容安全审核、PR 代码合规审查、金融交易欺诈拦截等开箱即用的工业级预设。",
+            "实时概率图表与多语言代码导出：提供校准概率条形图、置信度指标盘与 cURL、Python、Node.js 快速接入代码生成。"
+          ]
+        }
+      ],
+      "badge": "⚡ System One Decisions",
+      "highlights": [
+        "System One 极速决策引擎：面向分类、安全与合规审计的高并发评估，输出高精度校准概率",
+        "三大决策原语：Choice（多选类别概率分布）、Score（量化规则评分）与 Noul（布尔断言决策）",
+        "专用 REST 接口：POST /v1/systemone、POST /v1/decisions，并无缝兼容标准 POST /v1/chat/completions",
+        "原生直连零延迟：原生 Jev 平台直通透传，通用 LLM 自动激活高质量结构化 JSON 提示词模拟回退",
+        "Playground 可视化决策工作室：支持 State 上下文编辑、可视化问题构建器、4大场景预设及多语言代码导出"
+      ]
     },
     {
       "id": "providers",
@@ -792,6 +884,18 @@ export const zh: DocContent = {
                 "OpenAI-compatible text & vision chat completion (streaming supported)"
               ],
               [
+                "POST",
+                "/v1/systemone",
+                "Bearer sk-router-...",
+                "Jev System One decision engine: evaluate state against discrete criteria (choice, score, noul)"
+              ],
+              [
+                "POST",
+                "/v1/decisions",
+                "Bearer sk-router-...",
+                "Alias for /v1/systemone decision evaluation endpoint"
+              ],
+              [
                 "GET",
                 "/v1/models",
                 "Bearer sk-router-...",
@@ -852,6 +956,7 @@ export const zh: DocContent = {
       "badge": "REST Reference",
       "highlights": [
         "OpenAI 标准推理接口：/v1/chat/completions, /v1/models（主流客户端无缝无感替换）",
+        "Jev System One 决策端点：/v1/systemone, /v1/decisions（离散评估与校准概率）",
         "Ollama 原生协议接口：/api/tags, /api/show, /api/version, /api/chat（兼容各类本地工具）",
         "核心配置控制面：/api/v1/credentials, /api/v1/models, /api/v1/routes, /api/v1/fusion",
         "系统运维与探针：/health, /api/v1/system/backup, /api/v1/system/restore, /api/v1/system/stats"

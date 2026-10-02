@@ -16,7 +16,7 @@ export const ja: DocContent = {
       "id": "overview",
       "title": "システム概要",
       "group": "intro",
-      "description": "Direct、Priority Fallback、Model Fusionの3つのルーティングエンジンとOllama互換性を備えたセルフホスト型LLMゲートウェイ。",
+      "description": "Direct、Priority Fallback、Model Fusion、Jev System Oneの4つのルーティングエンジンとOllama互換性を備えたセルフホスト型LLMゲートウェイ。",
       "subsections": [
         {
           "title": "ルーティングモードの比較",
@@ -49,6 +49,13 @@ export const ja: DocContent = {
                 "Multi-Model Ensemble + Judge",
                 "Parallel execution with consensus synthesis",
                 "Higher (multi-model + judge deliberation)"
+              ],
+              [
+                "Jev System One",
+                "direct, /v1/systemone, jev/*",
+                "Discrete Decision Primitives",
+                "Fast rubric & choice evaluation with calibrated probabilities",
+                "Ultra-low / Instant"
               ]
             ]
           }
@@ -56,7 +63,7 @@ export const ja: DocContent = {
       ],
       "badge": "Core Architecture",
       "highlights": [
-        "3つのルーティングエンジン：ダイレクト、優先度フォールバック（入れ子対応）、モデル融合",
+        "4つのルーティングエンジン：ダイレクト、優先度フォールバック（入れ子対応）、モデル融合、およびJev System One意思決定",
         "OpenAI API (/v1/chat/completions) および Ollama (/api/tags) との完全互換",
         "強固なセキュリティ：ROUTER_MASTER_KEY による AES-128-CBC 暗号化",
         "サーキットブレーカーによる障害自動隔離とジオプロキシ連携"
@@ -132,6 +139,17 @@ export const ja: DocContent = {
               ]
             ]
           }
+        },
+        {
+          "title": "モデルタイプ：OpenAI互換 vs ⚡ Jev（System One意思決定）",
+          "description": "MyAIrouter ではカタログ内の各モデルに対して、デフォルトのOpenAI互換モードまたは高速なJev System One意思決定エンジンモードを設定できます。",
+          "bullets": [
+            "デフォルトモデルタイプ（'openai'）：通常のテキスト対話生成、推論トークン、ストリーミングに対応（OpenAI、Gemini、Anthropic、Ollama等）。",
+            "Jevモード（'jev'）：離散ルーブリック（choice、score、noul）に対する校正済み確率を算出する高速System One意思決定エンジン。",
+            "ネイティブ実行 vs エミュレーション：ネイティブ事業者（drex.nace、experientiallabs）には遅延ゼロで直結。汎用LLM（GPT、Claude、Gemini、Groq）は構造化JSONプロンプトで自動エミュレート。",
+            "カタログ管理機能：クイックフィルター（'All Types'、'OpenAI'、'⚡ Jev'）、個別編集ダイアログ、一括変更モーダル（'Set Model Type'）を搭載。",
+            "APIレスポンス：GET /v1/models および GET /v1/models/{id} で model_type（'openai' | 'jev'）を返却。"
+          ]
         }
       ],
       "badge": "Addressing"
@@ -410,6 +428,80 @@ export const ja: DocContent = {
         }
       ],
       "badge": "AI Ensembles"
+    },
+    {
+      "id": "jev-systemone",
+      "title": "Jev（System One）意思決定エンジン",
+      "group": "routing",
+      "description": "自律型エージェント、分類、ガードレール、離散ルーブリック評価向けの高精度確率分布を出力する超高速System One意思決定エンジン。",
+      "subsections": [
+        {
+          "title": "意思決定プリミティブと評価ルーブリック",
+          "table": {
+            "headers": [
+              "Primitive / Примитив",
+              "Type / Тип",
+              "Output Structure",
+              "Description & Usage / Назначение"
+            ],
+            "rows": [
+              [
+                "choice",
+                "Categorical / Категориальный",
+                "probabilities: {option: float}, choice: string",
+                "Calculates calibrated probability distribution across discrete options (e.g. intent routing, priority triage, sentiment)."
+              ],
+              [
+                "score",
+                "Quantitative / Числовой",
+                "score: float, confidence: float",
+                "Computes a numerical score within a defined rubric range (e.g. risk score 0.0-1.0, quality rating 1-5)."
+              ],
+              [
+                "noul",
+                "Binary / Булево",
+                "value: bool, confidence: float",
+                "Evaluates a strict boolean assertion or safety guardrail condition with associated confidence."
+              ]
+            ]
+          }
+        },
+        {
+          "title": "REST API 仕様 (POST /v1/systemone)",
+          "code": {
+            "title": "System One Decision Request",
+            "lang": "bash",
+            "content": "curl http://localhost:8000/v1/systemone \\\n  -H \"Content-Type: application/json\" \\\n  -H \"Authorization: Bearer sk-router-YOUR_KEY\" \\\n  -d '{\n    \"model\": \"experientiallabs/jev-latest\",\n    \"state\": \"User transaction: $4,990 from IP 198.51.100.4 (New Device, Location: Kyiv, Previous: New York 10m ago).\",\n    \"questions\": [\n      {\n        \"id\": \"fraud_risk\",\n        \"text\": \"What is the fraud probability category?\",\n        \"type\": \"choice\",\n        \"options\": [\"low\", \"suspicious\", \"critical_fraud\"]\n      },\n      {\n        \"id\": \"require_2fa\",\n        \"text\": \"Should step-up 2FA verification be enforced immediately?\",\n        \"type\": \"noul\"\n      }\n    ]\n  }'\n\n# Response format:\n# {\n#   \"id\": \"jev-9b2f4c1e\",\n#   \"model\": \"experientiallabs/jev-latest\",\n#   \"decisions\": {\n#     \"fraud_risk\": {\n#       \"choice\": \"critical_fraud\",\n#       \"probabilities\": {\"low\": 0.02, \"suspicious\": 0.11, \"critical_fraud\": 0.87},\n#       \"confidence\": 0.87\n#     },\n#     \"require_2fa\": {\n#       \"value\": true,\n#       \"confidence\": 0.96\n#     }\n#   }\n# }"
+          }
+        },
+        {
+          "title": "ネイティブ実行 vs インテリジェントエミュレーション",
+          "bullets": [
+            "ネイティブゼロ遅延転送：System One意思決定に対応した事業者（drex.nace、experientiallabs、typesafe.ai等）へのリクエストは変換なしで高速直結されます。",
+            "汎用LLM向け構造化JSON自動エミュレーション：通常モデル（gemini-2.5-flash、gpt-4o-mini、claude-3-5-haiku、ローカルollama等）に model_type='jev' を指定した場合、厳格なJSONスキーマプロンプトを自動生成し出力を正規化します。",
+            "Chat APIとの透過的互換性：標準の POST /v1/chat/completions でもJevペイロードを受け付け、意思決定レスポンスを返却可能です。",
+            "エイリアス対応：POST /v1/systemone と POST /v1/decisions は完全に等価であり、同一の機能を提供します。"
+          ]
+        },
+        {
+          "title": "Playground スタジオとプリセット機能",
+          "bullets": [
+            "専用スタジオモード：Webコンソールの /playground 内にある「⚡ Jev（System One）」タブから対話形式で意思決定テストが可能。",
+            "Stateコンテキスト入力：ユーザー履歴、監査ログ、コード差分、金融取引情報、セキュリティ規約などの文脈を柔軟に入力。",
+            "ビジュアル質問ビルダー：質問項目の追加、プリミティブ型（choice、score、noul）の選択、選択肢の設定をGUIで行え、Raw JSONの直接編集も可能。",
+            "4つの実用プリセット：カスタマーサポート対応、コンテンツ審査、PRコードレビュー、金融不正検知のテンプレートを即座に呼び出し可能。",
+            "リアルタイム確率可視化とコード出力：確率分布バーグラフ、信頼度メーター、cURL・Python・Node.js 向けの接続コード自動生成。"
+          ]
+        }
+      ],
+      "badge": "⚡ System One Decisions",
+      "highlights": [
+        "System One意思決定エンジン：校正済み確率を出力するミリ秒級のルーブリック評価および分類機能",
+        "3つの意思決定プリミティブ：Choice（カテゴリカル確率分布）、Score（定量的評価点）、Noul（ブール判定）",
+        "専用RESTエンドポイント：POST /v1/systemone、POST /v1/decisions、および透過的なPOST /v1/chat/completions対応",
+        "Jev事業者向けのネイティブゼロ遅延転送＋汎用LLM向けの高度な構造化JSONエミュレーションフォールバック",
+        "Playground判定スタジオ：Stateコンテキスト入力、ビジュアルビルダー、4つの実用プリセット、確率グラフ、コード生成"
+      ]
     },
     {
       "id": "providers",
@@ -792,6 +884,18 @@ export const ja: DocContent = {
                 "OpenAI-compatible text & vision chat completion (streaming supported)"
               ],
               [
+                "POST",
+                "/v1/systemone",
+                "Bearer sk-router-...",
+                "Jev System One decision engine: evaluate state against discrete criteria (choice, score, noul)"
+              ],
+              [
+                "POST",
+                "/v1/decisions",
+                "Bearer sk-router-...",
+                "Alias for /v1/systemone decision evaluation endpoint"
+              ],
+              [
                 "GET",
                 "/v1/models",
                 "Bearer sk-router-...",
@@ -852,6 +956,7 @@ export const ja: DocContent = {
       "badge": "REST Reference",
       "highlights": [
         "OpenAI互換：/v1/chat/completions、/v1/models（各社SDKをそのまま差し替え可能）",
+        "Jev System One意思決定：/v1/systemone、/v1/decisions（離散ルーブリック判定・校正済み確率）",
         "Ollamaプロトコル：/api/tags、/api/show、/api/version、/api/chat",
         "構成管理：/api/v1/credentials、/api/v1/models、/api/v1/routes、/api/v1/fusion",
         "システム＆死活監視：/health、/api/v1/system/backup、/api/v1/system/restore、/api/v1/system/stats"

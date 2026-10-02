@@ -16,7 +16,7 @@ export const uk: DocContent = {
       "id": "overview",
       "title": "Огляд системи",
       "group": "intro",
-      "description": "Універсальний self-hosted ШІ-шлюз із 3 механізмами маршрутизації (Direct, Priority Fallback, Fusion), пулом ключів та підтримкою протоколів OpenAI й Ollama.",
+      "description": "Універсальний self-hosted ШІ-шлюз із 4 механізмами маршрутизації (Direct, Priority Fallback, Fusion, Jev System One), пулом ключів та підтримкою протоколів OpenAI й Ollama.",
       "subsections": [
         {
           "title": "Порівняння рушіїв маршрутизації",
@@ -49,6 +49,13 @@ export const uk: DocContent = {
                 "Multi-Model Ensemble + Judge",
                 "Parallel execution with consensus synthesis",
                 "Higher (multi-model + judge deliberation)"
+              ],
+              [
+                "Jev System One",
+                "direct, /v1/systemone, jev/*",
+                "Discrete Decision Primitives",
+                "Fast rubric & choice evaluation with calibrated probabilities",
+                "Ultra-low / Instant"
               ]
             ]
           }
@@ -56,7 +63,7 @@ export const uk: DocContent = {
       ],
       "badge": "Core Architecture",
       "highlights": [
-        "3 рушії маршрутизації: Прямий, Пріоритетний Fallback (вкладений), Ансамбль Model Fusion",
+        "4 рушії маршрутизації: Прямий, Пріоритетний Fallback (вкладений), Ансамбль Model Fusion та Рішення Jev System One",
         "Повна сумісність з OpenAI API (/v1/chat/completions) та Ollama (/api/tags, /api/show)",
         "Надійне шифрування ключів: AES-128-CBC Fernet під контролем ROUTER_MASTER_KEY",
         "Автоматичний Circuit Breaker із самовідновленням та прив'язкою гео-проксі"
@@ -132,6 +139,17 @@ export const uk: DocContent = {
               ]
             ]
           }
+        },
+        {
+          "title": "Типи моделей: OpenAI-сумісні vs ⚡ Jev (System One)",
+          "description": "MyAIrouter дозволяє налаштовувати режим роботи для кожної моделі в каталозі: стандартний OpenAI-сумісний за замовчуванням або високошвидкісний рушій рішень Jev System One.",
+          "bullets": [
+            "Тип моделі за замовчуванням ('openai'): Стандартна генерація тексту, міркування CoT та стрімінг (OpenAI, Gemini, Anthropic, Ollama тощо).",
+            "Режим Jev ('jev'): Швидкі рішення System One за дискретними критеріями (choice, score, noul) із каліброваними ймовірностями.",
+            "Нативний запуск vs Емуляція: Нативні провайдери (drex.nace, experientiallabs) отримують прямий запит без затримок; універсальні LLM (GPT, Claude, Gemini, Groq) емулюються через структурований JSON.",
+            "Керування каталогом: Швидкі фільтри ('Всі типи', 'OpenAI', '⚡ Jev'), редагування моделі та масове оновлення ('Set Model Type') в інтерфейсі.",
+            "Підтримка API: Поле model_type ('openai' | 'jev') повертається в GET /v1/models та GET /v1/models/{id}."
+          ]
         }
       ],
       "badge": "Addressing"
@@ -410,6 +428,80 @@ export const uk: DocContent = {
         }
       ],
       "badge": "AI Ensembles"
+    },
+    {
+      "id": "jev-systemone",
+      "title": "Рушій швидких рішень Jev (System One)",
+      "group": "routing",
+      "description": "Надшвидкий рушій рішень System One для автономних агентів, класифікації, гардрейлів та оцінювання за дискретними рубриками з каліброваним розподілом ймовірностей.",
+      "subsections": [
+        {
+          "title": "Примітиви рішень та рубрики",
+          "table": {
+            "headers": [
+              "Primitive / Примитив",
+              "Type / Тип",
+              "Output Structure",
+              "Description & Usage / Назначение"
+            ],
+            "rows": [
+              [
+                "choice",
+                "Categorical / Категориальный",
+                "probabilities: {option: float}, choice: string",
+                "Calculates calibrated probability distribution across discrete options (e.g. intent routing, priority triage, sentiment)."
+              ],
+              [
+                "score",
+                "Quantitative / Числовой",
+                "score: float, confidence: float",
+                "Computes a numerical score within a defined rubric range (e.g. risk score 0.0-1.0, quality rating 1-5)."
+              ],
+              [
+                "noul",
+                "Binary / Булево",
+                "value: bool, confidence: float",
+                "Evaluates a strict boolean assertion or safety guardrail condition with associated confidence."
+              ]
+            ]
+          }
+        },
+        {
+          "title": "Специфікація REST API (POST /v1/systemone)",
+          "code": {
+            "title": "System One Decision Request",
+            "lang": "bash",
+            "content": "curl http://localhost:8000/v1/systemone \\\n  -H \"Content-Type: application/json\" \\\n  -H \"Authorization: Bearer sk-router-YOUR_KEY\" \\\n  -d '{\n    \"model\": \"experientiallabs/jev-latest\",\n    \"state\": \"User transaction: $4,990 from IP 198.51.100.4 (New Device, Location: Kyiv, Previous: New York 10m ago).\",\n    \"questions\": [\n      {\n        \"id\": \"fraud_risk\",\n        \"text\": \"What is the fraud probability category?\",\n        \"type\": \"choice\",\n        \"options\": [\"low\", \"suspicious\", \"critical_fraud\"]\n      },\n      {\n        \"id\": \"require_2fa\",\n        \"text\": \"Should step-up 2FA verification be enforced immediately?\",\n        \"type\": \"noul\"\n      }\n    ]\n  }'\n\n# Response format:\n# {\n#   \"id\": \"jev-9b2f4c1e\",\n#   \"model\": \"experientiallabs/jev-latest\",\n#   \"decisions\": {\n#     \"fraud_risk\": {\n#       \"choice\": \"critical_fraud\",\n#       \"probabilities\": {\"low\": 0.02, \"suspicious\": 0.11, \"critical_fraud\": 0.87},\n#       \"confidence\": 0.87\n#     },\n#     \"require_2fa\": {\n#       \"value\": true,\n#       \"confidence\": 0.96\n#     }\n#   }\n# }"
+          }
+        },
+        {
+          "title": "Нативне виконання vs Розумна емуляція",
+          "bullets": [
+            "Нативний роутинг без затримок: Спеціалізовані провайдери (drex.nace, experientiallabs, typesafe.ai) отримують прямий запит до System One із мінімальним часом відгуку.",
+            "Універсальна структурована JSON-емуляція: Якщо у звичайної моделі (наприклад, gemini-2.5-flash, gpt-4o-mini, claude-3-5-haiku або локальної ollama) встановлено model_type='jev', шлюз автоматично генерує суворий JSON-промпт, валідує ймовірності та нормалізує відповідь у формат Jev.",
+            "Прозора сумісність із Chat API: Ендпоінт POST /v1/chat/completions прозоро обробляє запити рішень, дозволяючи працювати через стандартні OpenAI SDK.",
+            "Підтримка аліасів: Ендпоінти POST /v1/systemone та POST /v1/decisions взаємозамінні та мають ідентичну функціональність."
+          ]
+        },
+        {
+          "title": "Студія в Playground та готові пресети",
+          "bullets": [
+            "Виділений режим студії: Вкладка '⚡ Jev (System One)' у веб-консолі (/playground) для інтерактивного тестування моделей швидких рішень.",
+            "Редактор контексту State: Зручне введення контексту (профіль користувача, лог аудиту, дифи коду, транзакції або текст політик).",
+            "Візуальний конструктор питань: Додавання питань, вибір примітивів (choice, score, noul) та налаштування опцій із миттєвою валідацією або перемиканням у JSON.",
+            "4 вбудовані пресети: Готові сценарії для ескалації підтримки, модерації контенту, рев'ю коду в PR та оцінки фінансових ризиків.",
+            "Аналітика та експорт: Наочні гістограми розподілу ймовірностей, датчики впевненості та експорт готового коду для cURL, Python і Node.js."
+          ]
+        }
+      ],
+      "badge": "⚡ System One Decisions",
+      "highlights": [
+        "Рушій рішень System One: Миттєва класифікація та оцінювання за рубриками з каліброваними ймовірностями",
+        "3 примітиви рішень: Choice (категоріальний вибір), Score (числовий бал) та Noul (булеве твердження)",
+        "Виділені ендпоінти: POST /v1/systemone, POST /v1/decisions та прозора підтримка POST /v1/chat/completions",
+        "Нативний роутинг без затримок для Jev-провайдерів + структурована JSON-емуляція для будь-яких LLM",
+        "Інтерактивна студія в Playground: контекст State, Visual Builder, 4 пресети, графіки ймовірностей та експорт коду"
+      ]
     },
     {
       "id": "providers",
@@ -792,6 +884,18 @@ export const uk: DocContent = {
                 "OpenAI-compatible text & vision chat completion (streaming supported)"
               ],
               [
+                "POST",
+                "/v1/systemone",
+                "Bearer sk-router-...",
+                "Jev System One decision engine: evaluate state against discrete criteria (choice, score, noul)"
+              ],
+              [
+                "POST",
+                "/v1/decisions",
+                "Bearer sk-router-...",
+                "Alias for /v1/systemone decision evaluation endpoint"
+              ],
+              [
                 "GET",
                 "/v1/models",
                 "Bearer sk-router-...",
@@ -852,6 +956,7 @@ export const uk: DocContent = {
       "badge": "REST Reference",
       "highlights": [
         "Сумісність з OpenAI: /v1/chat/completions, /v1/models (пряма заміна у будь-яких SDK)",
+        "Рішення Jev System One: /v1/systemone, /v1/decisions (швидка дискретна класифікація)",
         "Протокол Ollama: /api/tags, /api/show, /api/version, /api/chat",
         "Керування конфігурацією: /api/v1/credentials, /api/v1/models, /api/v1/routes, /api/v1/fusion",
         "Система та моніторинг: /health, /api/v1/system/backup, /api/v1/system/restore, /api/v1/system/stats"

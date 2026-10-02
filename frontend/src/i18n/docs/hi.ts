@@ -16,7 +16,7 @@ export const hi: DocContent = {
       "id": "overview",
       "title": "सिस्टम अवलोकन",
       "group": "intro",
-      "description": "यूनिवर्सल सेल्फ-होस्टेड एलएलएम गेटवे: डायरेक्ट, प्रायोरिटी फॉलबैक और मॉडल फ्यूजन इंजन, मल्टी-प्रोवाइडर की-पूलिंग और ओलामा कम्पैटिबिलिटी।",
+      "description": "यूनिवर्सल सेल्फ-होस्टेड एलएलएम गेटवे: डायरेक्ट, प्रायोरिटी फॉलबैक, मॉडल फ्यूजन और जेव (Jev) सिस्टम वन डिसीजन इंजन, मल्टी-प्रोवाइडर की-पूलिंग और ओलामा कम्पैटिबिलिटी।",
       "subsections": [
         {
           "title": "रूटिंग मोड की तुलना",
@@ -49,6 +49,13 @@ export const hi: DocContent = {
                 "Multi-Model Ensemble + Judge",
                 "Parallel execution with consensus synthesis",
                 "Higher (multi-model + judge deliberation)"
+              ],
+              [
+                "Jev System One",
+                "direct, /v1/systemone, jev/*",
+                "Discrete Decision Primitives",
+                "Fast rubric & choice evaluation with calibrated probabilities",
+                "Ultra-low / Instant"
               ]
             ]
           }
@@ -56,7 +63,7 @@ export const hi: DocContent = {
       ],
       "badge": "Core Architecture",
       "highlights": [
-        "3 रूटिंग इंजन: डायरेक्ट, प्रायोरिटी फॉलबैक (नेस्टेड), और मॉडल फ्यूजन",
+        "4 रूटिंग इंजन: डायरेक्ट, प्रायोरिटी फॉलबैक (नेस्टेड), मॉडल फ्यूजन और जेव (Jev) सिस्टम वन डिसीजन",
         "ओपनएआई एपीआई (/v1/chat/completions) और ओलामा (/api/tags) के साथ पूर्ण कम्पैटिबिलिटी",
         "एंटरप्राइज सुरक्षा: ROUTER_MASTER_KEY द्वारा प्रबंधित AES-128-CBC फ़र्नेट एन्क्रिप्शन",
         "सर्किट ब्रेकर द्वारा स्वचालित विफलता अलगाव और प्रॉक्सी कनेक्टिविटी"
@@ -132,6 +139,17 @@ export const hi: DocContent = {
               ]
             ]
           }
+        },
+        {
+          "title": "मॉडल प्रकार: ओपनएआई (OpenAI) संगत बनाम ⚡ जेव (Jev System One)",
+          "description": "MyAIrouter कैटलॉग में प्रत्येक मॉडल के लिए निष्पादन मोड कॉन्फ़िगर करने की अनुमति देता है: डिफ़ॉल्ट ओपनएआई कम्पैटिबल या हाई-स्पीड जेव (Jev) सिस्टम वन डिसीजन इंजन।",
+          "bullets": [
+            "डिफ़ॉल्ट मॉडल प्रकार ('openai'): मानक टेक्स्ट जनरेशन, रीज़निंग टोकन और स्ट्रीमिंग (OpenAI, Gemini, Anthropic, Ollama आदि)।",
+            "जेव मोड ('jev'): कैलिब्रेटेड प्रायिकताओं के साथ असतत मानदंडों (choice, score, noul) पर त्वरित सिस्टम वन निर्णय मूल्यांकन।",
+            "नेटिव बनाम एमुलेशन: नेटिव प्रदाताओं (drex.nace, experientiallabs) को शून्य विलंबता के साथ सीधे पेलोड मिलते हैं; सामान्य LLM (GPT, Claude, Gemini, Groq) स्वचालित संरचित JSON द्वारा एमुलेट होते हैं।",
+            "कैटलॉग प्रबंधन: क्विक फिल्टर ('All Types', 'OpenAI', '⚡ Jev'), एकल मॉडल संपादन, और वेब यूआई में बैच अपडेट ('Set Model Type')।",
+            "एपीआई समर्थन: model_type फ़ील्ड ('openai' | 'jev') GET /v1/models और GET /v1/models/{id} में लौटाया जाता है।"
+          ]
         }
       ],
       "badge": "Addressing"
@@ -410,6 +428,80 @@ export const hi: DocContent = {
         }
       ],
       "badge": "AI Ensembles"
+    },
+    {
+      "id": "jev-systemone",
+      "title": "जेव (Jev) सिस्टम वन डिसीजन इंजन",
+      "group": "routing",
+      "description": "स्वायत्त एजेंटों, वर्गीकरण, सुरक्षा गार्डरेल्स और कैलिब्रेटेड प्रायिकता वितरण के साथ त्वरित सिस्टम वन डिसीजन इंजन।",
+      "subsections": [
+        {
+          "title": "निर्णय प्रिमिटिव और मूल्यांकन रूब्रिक्स",
+          "table": {
+            "headers": [
+              "Primitive / Примитив",
+              "Type / Тип",
+              "Output Structure",
+              "Description & Usage / Назначение"
+            ],
+            "rows": [
+              [
+                "choice",
+                "Categorical / Категориальный",
+                "probabilities: {option: float}, choice: string",
+                "Calculates calibrated probability distribution across discrete options (e.g. intent routing, priority triage, sentiment)."
+              ],
+              [
+                "score",
+                "Quantitative / Числовой",
+                "score: float, confidence: float",
+                "Computes a numerical score within a defined rubric range (e.g. risk score 0.0-1.0, quality rating 1-5)."
+              ],
+              [
+                "noul",
+                "Binary / Булево",
+                "value: bool, confidence: float",
+                "Evaluates a strict boolean assertion or safety guardrail condition with associated confidence."
+              ]
+            ]
+          }
+        },
+        {
+          "title": "REST एपीआई विशिष्टता (POST /v1/systemone)",
+          "code": {
+            "title": "System One Decision Request",
+            "lang": "bash",
+            "content": "curl http://localhost:8000/v1/systemone \\\n  -H \"Content-Type: application/json\" \\\n  -H \"Authorization: Bearer sk-router-YOUR_KEY\" \\\n  -d '{\n    \"model\": \"experientiallabs/jev-latest\",\n    \"state\": \"User transaction: $4,990 from IP 198.51.100.4 (New Device, Location: Kyiv, Previous: New York 10m ago).\",\n    \"questions\": [\n      {\n        \"id\": \"fraud_risk\",\n        \"text\": \"What is the fraud probability category?\",\n        \"type\": \"choice\",\n        \"options\": [\"low\", \"suspicious\", \"critical_fraud\"]\n      },\n      {\n        \"id\": \"require_2fa\",\n        \"text\": \"Should step-up 2FA verification be enforced immediately?\",\n        \"type\": \"noul\"\n      }\n    ]\n  }'\n\n# Response format:\n# {\n#   \"id\": \"jev-9b2f4c1e\",\n#   \"model\": \"experientiallabs/jev-latest\",\n#   \"decisions\": {\n#     \"fraud_risk\": {\n#       \"choice\": \"critical_fraud\",\n#       \"probabilities\": {\"low\": 0.02, \"suspicious\": 0.11, \"critical_fraud\": 0.87},\n#       \"confidence\": 0.87\n#     },\n#     \"require_2fa\": {\n#       \"value\": true,\n#       \"confidence\": 0.96\n#     }\n#   }\n# }"
+          }
+        },
+        {
+          "title": "नेटिव निष्पादन बनाम इंटेलिजेंट एमुलेशन",
+          "bullets": [
+            "नेटिव जीरो-डिले रूटिंग: सिस्टम वन में विशेषज्ञता रखने वाले प्रदाता (drex.nace, experientiallabs, typesafe.ai) बिना किसी विलंबता के सीधे अनुरोध प्राप्त करते हैं।",
+            "सार्वभौमिक एलएलएम स्ट्रक्चर्ड एमुलेशन: यदि किसी सामान्य मॉडल (उदा. gemini-2.5-flash, gpt-4o-mini, claude-3-5-haiku, ollama) में model_type='jev' सेट है, तो MyAIrouter स्वचालित रूप से एक सख्त JSON प्रॉम्प्ट बनाकर आउटपुट को सामान्य करता है।",
+            "पारदर्शी चैट कम्पैटिबिलिटी: मानक POST /v1/chat/completions जेव पेलोड को पारदर्शी रूप से स्वीकार करता है और निर्णय परिणाम देता है।",
+            "उपनाम (Alias) समर्थन: POST /v1/systemone और POST /v1/decisions दोनों समान कार्यक्षमता प्रदान करते हैं।"
+          ]
+        },
+        {
+          "title": "प्लेग्राउंड स्टूडियो और विज़ुअल प्रीसेट",
+          "bullets": [
+            "समर्पित स्टूडियो मोड: त्वरित निर्णय मॉडल का परीक्षण करने के लिए वेब कंसोल (/playground) में '⚡ Jev (System One)' टैब।",
+            "State संदर्भ संपादक: मूल्यांकन के लिए समृद्ध संदर्भ (उपयोगकर्ता प्रोफ़ाइल, ऑडिट लॉग, कोड डिफ, वित्तीय लेनदेन) दर्ज करें।",
+            "विज़ुअल प्रश्न निर्माता: प्रश्न जोड़ें, प्रिमिटिव प्रकार (choice, score, noul) चुनें और सीधे JSON में टॉगल करें।",
+            "4 अंतर्निहित प्रीसेट: ग्राहक सहायता एस्केलेशन, सामग्री मॉडरेशन, पीआर कोड समीक्षा, और वित्तीय धोखाधड़ी जोखिम के लिए रेडीमेड टेम्पलेट।",
+            "लाइव एनालिटिक्स और कोड निर्यात: वास्तविक समय प्रायिकता बार चार्ट, विश्वास गेज और cURL, Python, Node.js के लिए त्वरित कोड जनरेशन।"
+          ]
+        }
+      ],
+      "badge": "⚡ System One Decisions",
+      "highlights": [
+        "सिस्टम वन डिसीजन इंजन: कैलिब्रेटेड प्रायिकताओं के साथ त्वरित वर्गीकरण और मानक मूल्यांकन",
+        "3 निर्णय प्रिमिटिव: Choice (श्रेणीबद्ध वितरण), Score (मात्रात्मक स्कोर) और Noul (बूलियन निर्णय)",
+        "समर्पित एंडपॉइंट्स: POST /v1/systemone, POST /v1/decisions और POST /v1/chat/completions के साथ पारदर्शी कम्पैटिबिलिटी",
+        "जेव प्रदाताओं के लिए नेटिव जीरो-डिले रूटिंग + किसी भी एलएलएम के लिए इंटेलिजेंट स्ट्रक्चर्ड JSON एमुलेशन फॉलबैक",
+        "इंटरएक्टिव प्लेग्राउंड स्टूडियो: State संदर्भ संपादक, विज़ुअल बिल्डर, 4 प्रीसेट, प्रायिकता चार्ट और कोड निर्यात"
+      ]
     },
     {
       "id": "providers",
@@ -792,6 +884,18 @@ export const hi: DocContent = {
                 "OpenAI-compatible text & vision chat completion (streaming supported)"
               ],
               [
+                "POST",
+                "/v1/systemone",
+                "Bearer sk-router-...",
+                "Jev System One decision engine: evaluate state against discrete criteria (choice, score, noul)"
+              ],
+              [
+                "POST",
+                "/v1/decisions",
+                "Bearer sk-router-...",
+                "Alias for /v1/systemone decision evaluation endpoint"
+              ],
+              [
                 "GET",
                 "/v1/models",
                 "Bearer sk-router-...",
@@ -852,6 +956,7 @@ export const hi: DocContent = {
       "badge": "REST Reference",
       "highlights": [
         "OpenAI इनपुट: /v1/chat/completions, /v1/models (पूर्ण क्लाइंट संगतता)",
+        "Jev System One डिसीजन: /v1/systemone, /v1/decisions (असतत निर्णय मूल्यांकन)",
         "Ollama प्रोटोकॉल: /api/tags, /api/show, /api/version, /api/chat",
         "कोर प्रबंधन: /api/v1/credentials, /api/v1/models, /api/v1/routes, /api/v1/fusion",
         "सिस्टम और स्वास्थ्य: /health, /api/v1/system/backup, /api/v1/system/restore"
