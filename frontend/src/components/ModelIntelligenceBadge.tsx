@@ -1,5 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
-import { createPortal } from "react-dom";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Brain, ExternalLink, Code2, Zap, Bot, Sparkles, CheckCircle2, Gauge, RefreshCw } from "lucide-react";
 import { ModelRatingInfo, ModelLimitsInfo } from "../types";
 import { apiRequest } from "../api/client";
@@ -15,15 +14,15 @@ interface ModelIntelligenceBadgeProps {
   onLimitsFetched?: (limits: ModelLimitsInfo) => void;
 }
 
-function formatTokens(tokens?: number): string {
+function formatTokensCompact(tokens?: number): string {
   if (!tokens) return "—";
   if (tokens >= 1_000_000) {
     const m = (tokens / 1_000_000).toFixed(1).replace(/\.0$/, "");
-    return `${m}M (${tokens.toLocaleString()})`;
+    return `${m}M tokens`;
   }
   if (tokens >= 1_000) {
     const k = Math.round(tokens / 1_000);
-    return `${k}k (${tokens.toLocaleString()})`;
+    return `${k}k tokens`;
   }
   return `${tokens.toLocaleString()} tokens`;
 }
@@ -40,6 +39,7 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
 }) => {
   const [showTooltip, setShowTooltip] = useState(false);
   const badgeRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
   const closeTimerRef = useRef<number | null>(null);
 
   // Live limits state (loaded immediately from initialLimits provided by backend)
@@ -50,12 +50,9 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
   const [coords, setCoords] = useState<{
     top: number;
     left: number;
+    maxHeight: number;
     placeAbove: boolean;
-  }>({
-    top: 0,
-    left: 0,
-    placeAbove: false,
-  });
+  } | null>(null);
 
   const isReasoning =
     rating?.is_reasoning ||
@@ -83,14 +80,16 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
 
   const hasAnyLimits = hasContext || hasMaxOutput || hasRateLimits;
 
-  const updatePosition = () => {
-    if (!badgeRef.current) return;
+  const computePosition = useCallback(() => {
+    if (!badgeRef.current) return null;
     const rect = badgeRef.current.getBoundingClientRect();
-    const tooltipWidth = 310;
-    const tooltipHeight = hasAnyLimits ? 420 : 280;
+    const tooltipWidth = 320;
+    const gap = 8;
+    const estimatedHeight = hasAnyLimits ? 380 : 260;
 
+    const spaceAbove = rect.top;
     const spaceBelow = window.innerHeight - rect.bottom;
-    const placeAbove = spaceBelow < tooltipHeight && rect.top > tooltipHeight;
+    const placeAbove = spaceBelow < estimatedHeight + 20 && spaceAbove > spaceBelow;
 
     let left = rect.left;
     if (left + tooltipWidth > window.innerWidth - 16) {
@@ -100,12 +99,17 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
       left = 16;
     }
 
-    setCoords({
-      top: placeAbove ? rect.top - 8 : rect.bottom + 8,
+    const top = placeAbove ? rect.top - gap : rect.bottom + gap;
+    const availableHeight = placeAbove ? rect.top - gap - 16 : window.innerHeight - top - 16;
+    const maxHeight = Math.max(160, Math.min(500, availableHeight));
+
+    return {
+      top,
       left,
+      maxHeight,
       placeAbove,
-    });
-  };
+    };
+  }, [hasAnyLimits]);
 
   const fetchLiveLimits = async () => {
     if (!modelId || loadingLimits) return;
@@ -128,8 +132,11 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
       clearTimeout(closeTimerRef.current);
       closeTimerRef.current = null;
     }
-    updatePosition();
-    setShowTooltip(true);
+    const nextCoords = computePosition();
+    if (nextCoords) {
+      setCoords(nextCoords);
+      setShowTooltip(true);
+    }
 
     // Only auto-probe if model had zero limits initially
     if (modelId && !hasAttemptedFetch.current && !limits && !hasAnyLimits) {
@@ -138,10 +145,37 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
     }
   };
 
+  const keepTooltip = () => {
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  };
+
   const handleMouseLeave = () => {
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+    }
     closeTimerRef.current = window.setTimeout(() => {
       setShowTooltip(false);
-    }, 150);
+    }, 250);
+  };
+
+  const handleToggleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    if (!showTooltip) {
+      const nextCoords = computePosition();
+      if (nextCoords) {
+        setCoords(nextCoords);
+        setShowTooltip(true);
+      }
+    } else {
+      setShowTooltip(false);
+    }
   };
 
   useEffect(() => {
@@ -157,6 +191,36 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
       }
     };
   }, []);
+
+  // Dismiss immediately on page/table scroll or window resize (matching ProxiesPage pattern)
+  useEffect(() => {
+    if (!showTooltip) return;
+
+    const handleDismiss = () => {
+      setShowTooltip(false);
+    };
+
+    const handleClickOutside = (e: MouseEvent) => {
+      if (
+        badgeRef.current &&
+        !badgeRef.current.contains(e.target as Node) &&
+        tooltipRef.current &&
+        !tooltipRef.current.contains(e.target as Node)
+      ) {
+        setShowTooltip(false);
+      }
+    };
+
+    window.addEventListener("scroll", handleDismiss, true);
+    window.addEventListener("resize", handleDismiss);
+    document.addEventListener("mousedown", handleClickOutside);
+
+    return () => {
+      window.removeEventListener("scroll", handleDismiss, true);
+      window.removeEventListener("resize", handleDismiss);
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [showTooltip]);
 
   if (!rating || intel === undefined || intel === null) {
     if (isReasoning) {
@@ -203,6 +267,7 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
         className="inline-flex items-center gap-1.5 cursor-pointer select-none"
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
+        onClick={handleToggleClick}
       >
         {/* Intelligence index pill */}
         <span
@@ -247,23 +312,37 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
         )}
       </div>
 
-      {/* Portal Tooltip: Rendered directly into document.body to avoid overflow-hidden clipping */}
-      {showTooltip &&
-        createPortal(
+      {/* Floating Tooltip: Fixed position in viewport, immune to table overflow clipping, zero lag */}
+      {showTooltip && coords && (
+        <div
+          ref={tooltipRef}
+          className="w-[320px] max-w-[calc(100vw-24px)] pointer-events-auto"
+          style={{
+            position: "fixed",
+            top: `${coords.top}px`,
+            left: `${coords.left}px`,
+            transform: coords.placeAbove ? "translateY(-100%)" : "none",
+            zIndex: 99999,
+          }}
+          onMouseEnter={keepTooltip}
+          onMouseLeave={handleMouseLeave}
+        >
+          {/* Hover bridge spanning gap between badge and tooltip */}
           <div
-            className="w-76 p-3.5 rounded-xl bg-slate-900/95 backdrop-blur-md border border-slate-700 shadow-2xl text-xs text-slate-200 pointer-events-auto transition-all animate-in fade-in duration-150"
+            className={`absolute left-0 right-0 h-3 pointer-events-auto ${
+              coords.placeAbove ? "top-full" : "-top-3"
+            }`}
+          />
+
+          {/* Inner scrollable card */}
+          <div
+            className="w-full p-3.5 rounded-xl bg-slate-900/98 backdrop-blur-md border border-slate-700/80 shadow-2xl text-xs text-slate-200 overflow-y-auto overscroll-contain custom-scrollbar relative"
             style={{
-              position: "fixed",
-              top: coords.placeAbove ? undefined : `${coords.top}px`,
-              bottom: coords.placeAbove ? `${window.innerHeight - coords.top}px` : undefined,
-              left: `${coords.left}px`,
-              zIndex: 99999,
+              maxHeight: `${coords.maxHeight}px`,
             }}
-            onMouseEnter={handleMouseEnter}
-            onMouseLeave={handleMouseLeave}
           >
             {/* Header */}
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-2.5">
+            <div className="sticky top-0 bg-slate-900/95 backdrop-blur-md -mx-3.5 -mt-3.5 px-3.5 pt-3.5 pb-2 mb-2.5 border-b border-slate-800/80 flex items-center justify-between z-10">
               <div className="flex items-center gap-2">
                 <div className={`w-2.5 h-2.5 rounded-full ${dotColor} shadow-xs`} />
                 <span className="font-semibold text-slate-100 text-sm">Artificial Analysis</span>
@@ -287,7 +366,7 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
                 <div className="w-full bg-slate-800/80 rounded-full h-1.5 overflow-hidden">
                   <div
                     className="bg-indigo-500 h-full rounded-full transition-all"
-                    style={{ width: `${Math.min(100, Math.max(0, (intel / 70) * 100))}%` }}
+                    style={{ width: `${Math.min(100, Math.max(0, intel))}%` }}
                   />
                 </div>
               </div>
@@ -305,7 +384,7 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
                   <div className="w-full bg-slate-800/80 rounded-full h-1.5 overflow-hidden">
                     <div
                       className="bg-emerald-500 h-full rounded-full transition-all"
-                      style={{ width: `${Math.min(100, Math.max(0, (coding / 100) * 100))}%` }}
+                      style={{ width: `${Math.min(100, Math.max(0, coding))}%` }}
                     />
                   </div>
                 </div>
@@ -324,7 +403,7 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
                   <div className="w-full bg-slate-800/80 rounded-full h-1.5 overflow-hidden">
                     <div
                       className="bg-purple-500 h-full rounded-full transition-all"
-                      style={{ width: `${Math.min(100, Math.max(0, (agentic / 70) * 100))}%` }}
+                      style={{ width: `${Math.min(100, Math.max(0, agentic))}%` }}
                     />
                   </div>
                 </div>
@@ -357,7 +436,7 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
 
             {/* Model Limits Section: ONLY displayed if at least one limit is available */}
             {hasAnyLimits && (
-              <div className="mt-3 pt-2.5 border-t border-slate-800 space-y-2">
+              <div className="mt-3 pt-2.5 border-t border-slate-800/80 space-y-2">
                 <div className="flex items-center justify-between text-[11px]">
                   <span className="text-slate-300 font-semibold flex items-center gap-1.5">
                     <Gauge size={12} className="text-indigo-400" />
@@ -376,11 +455,12 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
                       </span>
                     ) : modelId ? (
                       <button
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           fetchLiveLimits();
                         }}
-                        className="text-[10px] text-slate-400 hover:text-indigo-300 transition-colors flex items-center gap-0.5"
+                        className="text-[10px] text-slate-400 hover:text-indigo-300 transition-colors flex items-center gap-0.5 cursor-pointer"
                         title="Query live limits from API"
                       >
                         <RefreshCw size={9} />
@@ -395,22 +475,32 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
                   <div
                     className={`grid ${
                       hasContext && hasMaxOutput ? "grid-cols-2" : "grid-cols-1"
-                    } gap-1.5 bg-slate-950/60 p-2 rounded-lg border border-slate-800/80 text-[11px]`}
+                    } gap-2 bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/80 text-[11px]`}
                   >
                     {hasContext && (
                       <div>
-                        <span className="text-slate-500 block text-[10px]">Context (Input)</span>
-                        <span className="font-mono font-medium text-slate-200">
-                          {formatTokens(effContext)}
+                        <span className="text-slate-500 block text-[10px] mb-0.5">Context (Input)</span>
+                        <span className="font-mono font-medium text-slate-200 block text-[11px]">
+                          {formatTokensCompact(effContext)}
                         </span>
+                        {effContext && effContext >= 1_000 && (
+                          <span className="text-[9px] text-slate-400 font-mono block">
+                            {effContext.toLocaleString()}
+                          </span>
+                        )}
                       </div>
                     )}
                     {hasMaxOutput && (
                       <div>
-                        <span className="text-slate-500 block text-[10px]">Max Output</span>
-                        <span className="font-mono font-medium text-slate-200">
-                          {formatTokens(effMaxOutput)}
+                        <span className="text-slate-500 block text-[10px] mb-0.5">Max Output</span>
+                        <span className="font-mono font-medium text-slate-200 block text-[11px]">
+                          {formatTokensCompact(effMaxOutput)}
                         </span>
+                        {effMaxOutput && effMaxOutput >= 1_000 && (
+                          <span className="text-[9px] text-slate-400 font-mono block">
+                            {effMaxOutput.toLocaleString()}
+                          </span>
+                        )}
                       </div>
                     )}
                   </div>
@@ -479,7 +569,7 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
             )}
 
             {/* Model Creator & External Link */}
-            <div className="mt-2.5 pt-2 border-t border-slate-800 flex items-center justify-between text-[10px]">
+            <div className="sticky bottom-0 bg-slate-900/95 backdrop-blur-md -mx-3.5 -mb-3.5 px-3.5 pb-3.5 pt-2 mt-2.5 border-t border-slate-800/80 flex items-center justify-between text-[10px]">
               {rating.model_creator ? (
                 <span className="text-slate-400">
                   Provider: <span className="text-slate-200 font-medium">{rating.model_creator}</span>
@@ -500,9 +590,9 @@ export const ModelIntelligenceBadge: React.FC<ModelIntelligenceBadgeProps> = ({
                 </a>
               )}
             </div>
-          </div>,
-          document.body
-        )}
+          </div>
+        </div>
+      )}
     </>
   );
 };
