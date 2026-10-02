@@ -59,6 +59,7 @@ export const en: TranslationSchema = {
     models: "Model Catalog",
     routing: "Routing & Fallback",
     fusion: "Model Fusion",
+    modules: "Modules",
     keys: "API Keys",
     proxies: "Proxy Servers",
     playground: "Playground",

@@ -1,0 +1,34 @@
+{
+  "id": "my_custom_module",
+  "name": "My Custom Module Template",
+  "version": "1.0.0",
+  "description": "Template demonstrating how to build custom OpenAI-compatible modules (OAuth, Web Chat scrapers, etc.).",
+  "author": "Your Name",
+  "icon": "Puzzle",
+  "auth_type": "custom_fields",
+  "fields": [
+    {
+      "key": "user_token",
+      "label": "Session Token / API Key",
+      "type": "password",
+      "required": true,
+      "placeholder": "Enter your session token, bearer key, or cookie..."
+    },
+    {
+      "key": "custom_endpoint",
+      "label": "Custom Upstream URL",
+      "type": "text",
+      "required": false,
+      "default": "https://api.example.com",
+      "placeholder": "https://api.example.com"
+    }
+  ],
+  "default_models": [
+    {
+      "id": "custom-chat",
+      "name": "Custom Model (Default)",
+      "context_length": 32768,
+      "max_output_tokens": 4096
+    }
+  ]
+}

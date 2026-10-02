@@ -164,6 +164,14 @@ _adapters: Dict[str, BaseProviderAdapter] = {
     "generic_openai": GenericOpenAIAdapter(),
 }
 
+_custom_module_adapter_instance = None
+
 def get_adapter(adapter_type: str) -> BaseProviderAdapter:
+    global _custom_module_adapter_instance
     clean_type = adapter_type.lower().strip()
+    if clean_type == "custom_module":
+        if _custom_module_adapter_instance is None:
+            from app.adapters.module_adapter import CustomModuleAdapter
+            _custom_module_adapter_instance = CustomModuleAdapter()
+        return _custom_module_adapter_instance
     return _adapters.get(clean_type, _adapters["generic_openai"])

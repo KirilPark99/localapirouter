@@ -232,7 +232,7 @@ class RoutingEngine:
                     model_id=model_obj.provider_model_id,
                     request=cand_request,
                     extra_headers=provider.extra_headers,
-                    configuration=provider.adapter_configuration,
+                    configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
                     proxy_url=proxy_url,
                     timeout=60.0,
                 )
@@ -381,7 +381,7 @@ class RoutingEngine:
                     model_id=model_obj.provider_model_id,
                     request=cand_request,
                     extra_headers=provider.extra_headers,
-                    configuration=provider.adapter_configuration,
+                    configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
                     proxy_url=proxy_url,
                     timeout=60.0,
                 ):
@@ -816,7 +816,7 @@ class RoutingEngine:
                         model_id=model_obj.provider_model_id,
                         request=cand_request,
                         extra_headers=provider.extra_headers,
-                        configuration=provider.adapter_configuration,
+                        configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
                         proxy_url=proxy_url,
                         timeout=candidate_timeout,
                     )
@@ -1183,7 +1183,7 @@ class RoutingEngine:
                         model_id=model_obj.provider_model_id,
                         request=cand_request,
                         extra_headers=provider.extra_headers,
-                        configuration=provider.adapter_configuration,
+                        configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
                         proxy_url=proxy_url,
                         timeout=candidate_timeout,
                     ):

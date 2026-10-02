@@ -96,6 +96,7 @@ export interface TranslationSchema {
     models: string;
     routing: string;
     fusion: string;
+    modules?: string;
     keys: string;
     proxies: string;
     playground: string;

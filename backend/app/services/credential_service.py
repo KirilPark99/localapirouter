@@ -304,7 +304,7 @@ class CredentialService:
                 base_url=provider.base_url,
                 api_key=api_key,
                 extra_headers=provider.extra_headers,
-                configuration=provider.adapter_configuration,
+                configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
                 proxy_url=proxy_url,
                 timeout=15.0,
             )

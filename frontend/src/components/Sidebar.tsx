@@ -15,6 +15,7 @@ import {
   LogOut,
   Sparkles,
   BookOpen,
+  Puzzle,
 } from "lucide-react";
 import { useI18n } from "../i18n/context";
 
@@ -22,6 +23,7 @@ export type PageId =
   | "dashboard"
   | "analytics"
   | "providers"
+  | "modules"
   | "credentials"
   | "models"
   | "routing"
@@ -75,6 +77,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       title: t.nav.groups.securityAccess,
       items: [
         { id: "providers", label: t.nav.providers, icon: <Cpu size={16} /> },
+        { id: "modules", label: t.nav.modules || "Modules", icon: <Puzzle size={16} /> },
         { id: "credentials", label: t.nav.credentials, icon: <KeyRound size={16} /> },
         { id: "keys", label: t.nav.keys, icon: <ShieldCheck size={16} /> },
         { id: "proxies", label: t.nav.proxies, icon: <Network size={16} /> },

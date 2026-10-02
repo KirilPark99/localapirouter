@@ -14,6 +14,7 @@ import { PlaygroundPage } from "./pages/PlaygroundPage";
 import { LogsPage } from "./pages/LogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { DocsPage } from "./pages/DocsPage";
+import { ModulesPage } from "./pages/ModulesPage";
 import { apiRequest } from "./api/client";
 import { TerminalSquare } from "lucide-react";
 import { useI18n } from "./i18n/context";
@@ -130,6 +131,7 @@ export const App: React.FC = () => {
           {activePage === "dashboard" && <DashboardPage />}
           {activePage === "analytics" && <AnalyticsPage />}
           {activePage === "providers" && <ProvidersPage />}
+          {activePage === "modules" && <ModulesPage />}
           {activePage === "credentials" && <CredentialsPage />}
           {activePage === "models" && <ModelsPage />}
           {activePage === "routing" && <RoutingPage />}

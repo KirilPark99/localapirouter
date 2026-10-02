@@ -59,6 +59,7 @@ export const ru: TranslationSchema = {
     models: "Каталог моделей",
     routing: "Маршрутизация",
     fusion: "Model Fusion",
+    modules: "Модули",
     keys: "Ключи доступа",
     proxies: "Прокси-серверы",
     playground: "Playground",
