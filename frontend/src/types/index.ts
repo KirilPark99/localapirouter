@@ -77,6 +77,7 @@ export interface Provider {
   auth_header: string;
   extra_headers: Record<string, any>;
   configuration: Record<string, any>;
+  notes?: string | null;
   credentials_count: number;
   models_count: number;
   healthy_credentials_count: number;
@@ -97,6 +98,7 @@ export interface ProviderCreate {
   auth_header?: string;
   extra_headers?: Record<string, any>;
   configuration?: Record<string, any>;
+  notes?: string | null;
 }
 
 export interface Credential {

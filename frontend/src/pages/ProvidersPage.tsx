@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from "react";
-import { Plus, Edit2, Trash2, Cpu, Globe, KeyRound, Boxes, CheckCircle2, Download, Upload } from "lucide-react";
+import { Plus, Edit2, Trash2, Cpu, Globe, KeyRound, Boxes, CheckCircle2, Download, Upload, StickyNote } from "lucide-react";
 import { apiRequest } from "../api/client";
 import { Provider, ProviderCreate } from "../types";
 import { StatusBadge } from "../components/StatusBadge";
 import { Modal } from "../components/Modal";
+import { NotesModal } from "../components/NotesModal";
 import { BackupExportModal, BackupImportModal } from "../components/BackupModals";
 import { useI18n } from "../i18n/context";
 
@@ -16,6 +17,10 @@ export const ProvidersPage: React.FC = () => {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
 
+  // Quick Notes modal
+  const [notesModalOpen, setNotesModalOpen] = useState(false);
+  const [notesProvider, setNotesProvider] = useState<Provider | null>(null);
+
   const [formName, setFormName] = useState("");
   const [formSlug, setFormSlug] = useState("");
   const [formAdapterType, setFormAdapterType] = useState("generic_openai");
@@ -24,6 +29,7 @@ export const ProvidersPage: React.FC = () => {
   const [formChatEndpoint, setFormChatEndpoint] = useState("/chat/completions");
   const [formAuthType, setFormAuthType] = useState<"bearer" | "x-api-key" | "custom_header" | "query_param" | "none">("bearer");
   const [formAuthHeader, setFormAuthHeader] = useState("Authorization");
+  const [formNotes, setFormNotes] = useState("");
 
   const loadProviders = async () => {
     setLoading(true);
@@ -51,6 +57,7 @@ export const ProvidersPage: React.FC = () => {
     setFormChatEndpoint("/chat/completions");
     setFormAuthType("bearer");
     setFormAuthHeader("Authorization");
+    setFormNotes("");
     setIsModalOpen(true);
   };
 
@@ -84,7 +91,44 @@ export const ProvidersPage: React.FC = () => {
     setFormChatEndpoint(provider.chat_endpoint || "/chat/completions");
     setFormAuthType(provider.auth_type as any);
     setFormAuthHeader(provider.auth_header || "Authorization");
+    setFormNotes(provider.notes || "");
     setIsModalOpen(true);
+  };
+
+  const openNotesModal = (p: Provider) => {
+    setNotesProvider(p);
+    setNotesModalOpen(true);
+  };
+
+  const handleSaveNotes = async (notes: string) => {
+    if (!notesProvider) return;
+    const trimmed = notes.trim();
+    await apiRequest(`/api/admin/providers/${notesProvider.id}/notes`, {
+      method: "PUT",
+      body: JSON.stringify({ notes: trimmed }),
+    });
+    setProviders((prev) =>
+      prev.map((p) => (p.id === notesProvider.id ? { ...p, notes: trimmed || null } : p))
+    );
+    if (editingProvider && editingProvider.id === notesProvider.id) {
+      setEditingProvider({ ...editingProvider, notes: trimmed || null });
+      setFormNotes(trimmed);
+    }
+  };
+
+  const handleClearNotes = async () => {
+    if (!notesProvider) return;
+    await apiRequest(`/api/admin/providers/${notesProvider.id}/notes`, {
+      method: "PUT",
+      body: JSON.stringify({ notes: "" }),
+    });
+    setProviders((prev) =>
+      prev.map((p) => (p.id === notesProvider.id ? { ...p, notes: null } : p))
+    );
+    if (editingProvider && editingProvider.id === notesProvider.id) {
+      setEditingProvider({ ...editingProvider, notes: null });
+      setFormNotes("");
+    }
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -99,6 +143,7 @@ export const ProvidersPage: React.FC = () => {
         chat_endpoint: formChatEndpoint,
         auth_type: formAuthType,
         auth_header: formAuthHeader,
+        notes: formNotes.trim() || undefined,
       };
 
       if (editingProvider) {
@@ -180,10 +225,21 @@ export const ProvidersPage: React.FC = () => {
             {providers.map((p) => (
               <tr key={p.id} className="hover:bg-white/[0.03] transition-colors">
                 <td className="py-3 px-4 font-medium text-slate-100 flex items-center gap-2">
-                  <Cpu size={15} className="text-indigo-400 shrink-0" />
-                  <div>
+                  <Cpu size={15} className="text-indigo-400 shrink-0 self-start mt-1" />
+                  <div className="min-w-0">
                     <div className="font-semibold">{p.name}</div>
                     <div className="text-[10px] text-slate-400 font-mono">{p.slug}</div>
+                    {p.notes && (
+                      <button
+                        type="button"
+                        onClick={() => openNotesModal(p)}
+                        className="mt-1 flex items-center gap-1 text-[11px] text-amber-300/90 hover:text-amber-200 cursor-pointer max-w-xs text-left group/note"
+                        title={p.notes}
+                      >
+                        <StickyNote size={11} className="shrink-0 text-amber-400 group-hover/note:scale-110 transition-transform" />
+                        <span className="truncate">{p.notes}</span>
+                      </button>
+                    )}
                   </div>
                 </td>
                 <td className="py-3 px-4 font-mono text-[11px] text-indigo-300 font-medium">{p.adapter_type}</td>
@@ -211,6 +267,18 @@ export const ProvidersPage: React.FC = () => {
                   />
                 </td>
                 <td className="py-3 px-4 text-right space-x-1 whitespace-nowrap">
+                  <button
+                    type="button"
+                    onClick={() => openNotesModal(p)}
+                    className={`btn-press p-1.5 rounded-lg transition-colors cursor-pointer ${
+                      p.notes
+                        ? "text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20"
+                        : "text-slate-400 hover:text-slate-200 hover:bg-white/[0.06]"
+                    }`}
+                    title={p.notes ? "Заметка" : "Добавить заметку"}
+                  >
+                    <StickyNote size={14} />
+                  </button>
                   <button
                     onClick={() => openEditModal(p)}
                     className="btn-press text-slate-400 hover:text-slate-200 p-1.5 hover:bg-white/[0.06] rounded-lg transition-colors cursor-pointer"
@@ -433,6 +501,20 @@ export const ProvidersPage: React.FC = () => {
             </div>
           </div>
 
+          <div>
+            <label className="block text-xs font-medium text-slate-300 mb-1 flex items-center gap-1.5">
+              <StickyNote size={13} className="text-amber-400" />
+              <span>Заметка (опционально)</span>
+            </label>
+            <textarea
+              value={formNotes}
+              onChange={(e) => setFormNotes(e.target.value)}
+              placeholder="Текстовая заметка к провайдеру (назначение, особенности, лимиты)..."
+              rows={2}
+              className="w-full px-3 py-2 bg-slate-950/70 border border-white/10 rounded-xl text-slate-100 text-xs focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/40 focus:outline-none transition-all resize-y"
+            />
+          </div>
+
           <div className="flex justify-end gap-2.5 pt-4 border-t border-white/[0.08]">
             <button
               type="button"
@@ -450,6 +532,20 @@ export const ProvidersPage: React.FC = () => {
           </div>
         </form>
       </Modal>
+
+      <NotesModal
+        isOpen={notesModalOpen}
+        onClose={() => {
+          setNotesModalOpen(false);
+          setNotesProvider(null);
+        }}
+        title={`Заметка: ${notesProvider?.name || ""}`}
+        subtitle={`Провайдер: ${notesProvider?.slug || ""}`}
+        entityType="provider"
+        initialNotes={notesProvider?.notes || ""}
+        onSave={handleSaveNotes}
+        onClear={handleClearNotes}
+      />
 
       <BackupExportModal
         isOpen={isExportModalOpen}

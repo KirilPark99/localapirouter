@@ -17,10 +17,12 @@ import {
   Shield,
   HelpCircle,
   RotateCcw,
+  StickyNote,
 } from "lucide-react";
 import { apiRequest } from "../api/client";
 import { Proxy } from "../types";
 import { Modal } from "../components/Modal";
+import { NotesModal } from "../components/NotesModal";
 import { StatusBadge } from "../components/StatusBadge";
 import { getCountryFlag } from "../utils/country";
 import { useI18n } from "../i18n";
@@ -64,6 +66,7 @@ interface LoadedModule {
   profiles_count: number;
   models_count: number;
   provider_id?: number;
+  notes?: string | null;
 }
 
 interface ModuleProfile {
@@ -127,6 +130,48 @@ export const ModulesPage: React.FC = () => {
     latency?: number;
     modelsFound?: number;
   } | null>(null);
+
+  // Quick Notes modal
+  const [notesModalOpen, setNotesModalOpen] = useState(false);
+  const [notesModule, setNotesModule] = useState<LoadedModule | null>(null);
+
+  const openNotesModal = (mod: LoadedModule) => {
+    setNotesModule(mod);
+    setNotesModalOpen(true);
+  };
+
+  const handleSaveNotes = async (notes: string) => {
+    if (!notesModule) return;
+    const trimmed = notes.trim();
+    await apiRequest(`/api/admin/modules/${notesModule.manifest.id}/notes`, {
+      method: "PUT",
+      body: JSON.stringify({ notes: trimmed }),
+    });
+    setModules((prev) =>
+      prev.map((m) =>
+        m.manifest.id === notesModule.manifest.id ? { ...m, notes: trimmed || null } : m
+      )
+    );
+    if (selectedModule && selectedModule.manifest.id === notesModule.manifest.id) {
+      setSelectedModule({ ...selectedModule, notes: trimmed || null });
+    }
+  };
+
+  const handleClearNotes = async () => {
+    if (!notesModule) return;
+    await apiRequest(`/api/admin/modules/${notesModule.manifest.id}/notes`, {
+      method: "PUT",
+      body: JSON.stringify({ notes: "" }),
+    });
+    setModules((prev) =>
+      prev.map((m) =>
+        m.manifest.id === notesModule.manifest.id ? { ...m, notes: null } : m
+      )
+    );
+    if (selectedModule && selectedModule.manifest.id === notesModule.manifest.id) {
+      setSelectedModule({ ...selectedModule, notes: null });
+    }
+  };
 
   const fetchModules = async () => {
     try {
@@ -459,9 +504,26 @@ export const ModulesPage: React.FC = () => {
                   )}
                 </div>
 
-                <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed mb-4">
+                <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed mb-3">
                   {mod.manifest.description || "Модуль интеграции с внешним источником."}
                 </p>
+
+                {/* Notes Snippet on Card */}
+                {mod.notes && (
+                  <div
+                    onClick={() => openNotesModal(mod)}
+                    className="mb-3 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200/90 cursor-pointer hover:bg-amber-500/15 transition-all group/note"
+                    title="Нажмите, чтобы просмотреть или изменить заметку"
+                  >
+                    <div className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-400 mb-0.5">
+                      <StickyNote size={12} className="group-hover/note:scale-110 transition-transform" />
+                      <span>Заметка</span>
+                    </div>
+                    <p className="line-clamp-2 text-[11px] text-amber-100/80 whitespace-pre-wrap">
+                      {mod.notes}
+                    </p>
+                  </div>
+                )}
 
                 {mod.error && (
                   <div className="mb-4 p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-[11px] text-rose-300 font-mono break-all">
@@ -490,6 +552,18 @@ export const ModulesPage: React.FC = () => {
                 >
                   <Layers size={13} className="text-indigo-400" />
                   <span>Профили ({mod.profiles_count})</span>
+                </button>
+                <button
+                  onClick={() => openNotesModal(mod)}
+                  className={`btn-press flex items-center justify-center gap-1 px-2.5 py-2 rounded-xl text-xs font-medium border transition-all cursor-pointer ${
+                    mod.notes
+                      ? "bg-amber-500/15 text-amber-300 border-amber-500/30 hover:bg-amber-500/25"
+                      : "bg-slate-800/80 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border-white/[0.06]"
+                  }`}
+                  title={mod.notes ? "Редактировать заметку" : "Добавить заметку"}
+                >
+                  <StickyNote size={13} className={mod.notes ? "text-amber-400" : "text-slate-400"} />
+                  <span>{mod.notes ? "Заметка" : "+ Заметка"}</span>
                 </button>
                 <button
                   onClick={() => openCreateModal(mod)}
@@ -521,13 +595,28 @@ export const ModulesPage: React.FC = () => {
                   Учетные записи и сессии для модуля <code className="text-indigo-300 font-mono">{selectedModule.manifest.id}</code>. Каждому профилю можно назначить собственный прокси.
                 </p>
               </div>
-              <button
-                onClick={() => openCreateModal(selectedModule)}
-                className="btn-press flex items-center gap-1 px-3 py-1.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-xl text-xs font-semibold shadow-xs transition-all"
-              >
-                <Plus size={13} />
-                <span>Новый профиль</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => openNotesModal(selectedModule)}
+                  className={`btn-press flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-all cursor-pointer ${
+                    selectedModule.notes
+                      ? "bg-amber-500/15 text-amber-300 border-amber-500/30 hover:bg-amber-500/25"
+                      : "bg-slate-800/80 hover:bg-slate-800 text-slate-300 border-white/[0.08]"
+                  }`}
+                  title="Заметка к этому модулю"
+                >
+                  <StickyNote size={13} className={selectedModule.notes ? "text-amber-400" : "text-slate-400"} />
+                  <span>{selectedModule.notes ? "Заметка" : "+ Заметка"}</span>
+                </button>
+                <button
+                  onClick={() => openCreateModal(selectedModule)}
+                  className="btn-press flex items-center gap-1 px-3 py-1.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-xl text-xs font-semibold shadow-xs transition-all"
+                >
+                  <Plus size={13} />
+                  <span>Новый профиль</span>
+                </button>
+              </div>
             </div>
 
             {/* Git Isolation Notice */}
@@ -860,6 +949,21 @@ export const ModulesPage: React.FC = () => {
           </form>
         </Modal>
       )}
+
+      {/* Quick Notes Modal for Module */}
+      <NotesModal
+        isOpen={notesModalOpen}
+        onClose={() => {
+          setNotesModalOpen(false);
+          setNotesModule(null);
+        }}
+        title={`Заметка: ${notesModule?.manifest.name || "Модуль"}`}
+        subtitle={`Модуль ID: ${notesModule?.manifest.id || ""}`}
+        entityType="module"
+        initialNotes={notesModule?.notes || ""}
+        onSave={handleSaveNotes}
+        onClear={handleClearNotes}
+      />
     </div>
   );
 };

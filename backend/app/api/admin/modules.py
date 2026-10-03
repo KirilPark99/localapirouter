@@ -69,6 +69,7 @@ async def list_modules(db: AsyncSession = Depends(get_db)):
         mod_dict["profiles_count"] = profiles_count
         mod_dict["models_count"] = models_count
         mod_dict["provider_id"] = provider_id
+        mod_dict["notes"] = prov.notes if prov else None
         results.append(mod_dict)
 
     return results
@@ -98,13 +99,49 @@ async def get_module(module_id: str, db: AsyncSession = Depends(get_db)):
     mod_dict = loaded.model_dump()
     if prov:
         mod_dict["provider_id"] = prov.id
+        mod_dict["notes"] = prov.notes
         mod_dict["profiles_count"] = (await db.scalar(
             select(func.count(ProviderCredential.id)).where(ProviderCredential.provider_id == prov.id)
         )) or 0
         mod_dict["models_count"] = (await db.scalar(
             select(func.count(DiscoveredModel.id)).where(DiscoveredModel.provider_id == prov.id)
         )) or 0
+    else:
+        mod_dict["notes"] = None
     return mod_dict
+
+
+class ModuleNotesUpdate(BaseModel):
+    notes: Optional[str] = None
+
+
+@router.put("/{module_id}/notes")
+async def update_module_notes(
+    module_id: str,
+    data: ModuleNotesUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update plain text notes for a module.
+    """
+    loaded = ModuleLoader.get_module(module_id)
+    if not loaded:
+        raise HTTPException(status_code=404, detail=f"Module '{module_id}' not found")
+
+    provider_slug = f"module_{loaded.manifest.id}"
+    prov = (await db.execute(select(Provider).where(Provider.slug == provider_slug))).scalar_one_or_none()
+    if not prov:
+        await ModuleLoader.sync_with_db(db)
+        prov = (await db.execute(select(Provider).where(Provider.slug == provider_slug))).scalar_one_or_none()
+
+    if not prov:
+        raise HTTPException(status_code=404, detail=f"Provider record for module '{module_id}' not found")
+
+    clean_notes = data.notes.strip() if data.notes and data.notes.strip() else None
+    prov.notes = clean_notes
+    await db.commit()
+    await db.refresh(prov)
+    return {"module_id": module_id, "notes": prov.notes}
 
 
 @router.get("/{module_id}/profiles", response_model=List[Dict[str, Any]])

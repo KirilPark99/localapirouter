@@ -49,6 +49,7 @@ class Provider(Base, TimestampMixin):
     auth_header: Mapped[str] = mapped_column(String(100), default="Authorization", nullable=False)
     extra_headers: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     configuration: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     credentials: Mapped[List["ProviderCredential"]] = relationship("ProviderCredential", back_populates="provider", cascade="all, delete-orphan")
     models: Mapped[List["DiscoveredModel"]] = relationship("DiscoveredModel", back_populates="provider", cascade="all, delete-orphan")

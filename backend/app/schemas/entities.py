@@ -96,6 +96,7 @@ class ProviderBase(BaseModel):
     auth_header: str = "Authorization"
     extra_headers: Dict[str, Any] = Field(default_factory=dict)
     configuration: Dict[str, Any] = Field(default_factory=dict)
+    notes: Optional[str] = None
 
 class ProviderCreate(ProviderBase):
     pass
@@ -112,6 +113,10 @@ class ProviderUpdate(BaseModel):
     auth_header: Optional[str] = None
     extra_headers: Optional[Dict[str, Any]] = None
     configuration: Optional[Dict[str, Any]] = None
+    notes: Optional[str] = None
+
+class NotesUpdate(BaseModel):
+    notes: Optional[str] = None
 
 class ProviderRead(ProviderBase):
     id: int

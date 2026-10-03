@@ -63,6 +63,7 @@ class ProviderService:
                 auth_header=p.auth_header,
                 extra_headers=p.extra_headers,
                 configuration=p.configuration,
+                notes=p.notes,
                 credentials_count=len(p.credentials),
                 models_count=len(p.models),
                 healthy_credentials_count=sum(1 for c in p.credentials if c.status == "HEALTHY" and c.enabled),
@@ -97,6 +98,7 @@ class ProviderService:
             auth_header=p.auth_header,
             extra_headers=p.extra_headers,
             configuration=p.configuration,
+            notes=p.notes,
             credentials_count=len(p.credentials),
             models_count=len(p.models),
             healthy_credentials_count=sum(1 for c in p.credentials if c.status == "HEALTHY" and c.enabled),
@@ -119,6 +121,7 @@ class ProviderService:
             auth_header=data.auth_header,
             extra_headers=data.extra_headers,
             configuration=data.configuration,
+            notes=data.notes.strip() if data.notes else None,
         )
         db.add(provider)
         await db.commit()
@@ -156,6 +159,7 @@ class ProviderService:
             auth_header=provider.auth_header,
             extra_headers=provider.extra_headers,
             configuration=provider.configuration,
+            notes=provider.notes,
             credentials_count=0,
             models_count=0,
             healthy_credentials_count=0,
@@ -192,9 +196,22 @@ class ProviderService:
             provider.extra_headers = data.extra_headers
         if data.configuration is not None:
             provider.configuration = data.configuration
+        if data.notes is not None:
+            provider.notes = data.notes.strip() if data.notes else None
 
         await db.commit()
         return await cls.get_provider(db, provider_id)
+
+    @classmethod
+    async def update_provider_notes(cls, db: AsyncSession, provider_id: int, notes: Optional[str]) -> Optional[str]:
+        result = await db.execute(select(Provider).where(Provider.id == provider_id))
+        provider = result.scalar_one_or_none()
+        if not provider:
+            return None
+        provider.notes = notes.strip() if notes else None
+        await db.commit()
+        await db.refresh(provider)
+        return provider.notes
 
     @classmethod
     async def delete_provider(cls, db: AsyncSession, provider_id: int) -> bool:
