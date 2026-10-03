@@ -5,6 +5,7 @@ export interface DashboardStats {
   total_models: number;
   total_routes: number;
   total_fusions: number;
+  total_judges?: number;
   requests_24h: number;
   fallbacks_24h: number;
   success_rate_24h: number;
@@ -299,6 +300,74 @@ export interface FusionProfile {
   updated_at: string;
 }
 
+export interface JudgeCandidate {
+  id?: number;
+  candidate_type: "model" | "profile";
+  target_profile_id?: number | null;
+  target_profile_name?: string | null;
+  target_profile_slug?: string | null;
+  provider_id?: number | null;
+  provider_name?: string | null;
+  credential_id?: number | null;
+  credential_name?: string | null;
+  credential_group?: string | null;
+  model_id?: number | null;
+  model_name?: string | null;
+  canonical_slug?: string | null;
+  label: string;
+  task_types: string[];
+  complexity_level: "low" | "medium" | "high" | "all" | string;
+  description?: string | null;
+  thinking_effort?: string | null;
+  temperature?: number | null;
+  priority_order?: number;
+  is_active: boolean;
+}
+
+export interface JudgeProfile {
+  id: number;
+  name: string;
+  slug: string;
+  description?: string;
+  strategy: "auto" | "complexity" | "task_type" | string;
+  judge_type?: "model" | "profile";
+  judge_routing_profile_id?: number | null;
+  judge_routing_profile_name?: string | null;
+  judge_routing_profile_slug?: string | null;
+  judge_provider_id?: number | null;
+  judge_provider_name?: string | null;
+  judge_credential_id?: number | null;
+  judge_credential_name?: string | null;
+  judge_credential_group?: string | null;
+  judge_model_id?: number | null;
+  judge_model_name?: string | null;
+  judge_canonical_slug?: string | null;
+  judge_model_type?: string | null;
+  judge_thinking_effort?: string | null;
+  judge_temperature?: number | null;
+  system_prompt?: string;
+  fallback_candidate_id?: number | null;
+  timeout_seconds: number;
+  enabled: boolean;
+  candidates: JudgeCandidate[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface JudgeTestResponse {
+  selected_candidate_id?: number | null;
+  selected_candidate_label: string;
+  selected_target: string;
+  strategy: string;
+  estimated_complexity: string;
+  detected_task_type?: string | null;
+  judge_reasoning: string;
+  judge_model_name: string;
+  latency_ms: number;
+  status: string;
+  error?: string | null;
+}
+
 export interface RouterApiKey {
   id: number;
   name: string;
@@ -309,6 +378,7 @@ export interface RouterApiKey {
   allowed_models: string[];
   allowed_routes: string[];
   allowed_fusions: string[];
+  allowed_judges?: string[];
   rate_limit_rpm?: number;
   rate_limit_tpm?: number;
   request_limit?: number;
@@ -383,6 +453,7 @@ export interface RouterApiKeyCreate {
   allowed_models?: string[];
   allowed_routes?: string[];
   allowed_fusions?: string[];
+  allowed_judges?: string[];
   rate_limit_rpm?: number;
 }
 

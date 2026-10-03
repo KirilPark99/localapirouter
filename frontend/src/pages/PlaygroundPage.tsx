@@ -37,6 +37,7 @@ import {
   DiscoveredModel,
   RoutingProfile,
   FusionProfile,
+  JudgeProfile,
   RouterApiKey,
   Provider,
   JevRequest,
@@ -204,6 +205,7 @@ export const PlaygroundPage: React.FC = () => {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [routes, setRoutes] = useState<RoutingProfile[]>([]);
   const [fusions, setFusions] = useState<FusionProfile[]>([]);
+  const [judges, setJudges] = useState<JudgeProfile[]>([]);
   const [keys, setKeys] = useState<RouterApiKey[]>([]);
 
   // Mode: "single" prompt, "chat" multi-turn, "compare" side-by-side
@@ -216,7 +218,7 @@ export const PlaygroundPage: React.FC = () => {
 
   // Target Filter & Search
   const [targetSearch, setTargetSearch] = useState("");
-  const [targetTypeFilter, setTargetTypeFilter] = useState<"all" | "models" | "routes" | "fusion">("all");
+  const [targetTypeFilter, setTargetTypeFilter] = useState<"all" | "models" | "routes" | "fusion" | "judge">("all");
 
   // Generation Parameters
   const [systemPrompt, setSystemPrompt] = useState("You are an intelligent, helpful AI coding assistant.");
@@ -289,17 +291,19 @@ export const PlaygroundPage: React.FC = () => {
 
   const loadData = async () => {
     try {
-      const [m, p, r, f, k] = await Promise.all([
+      const [m, p, r, f, j, k] = await Promise.all([
         apiRequest<DiscoveredModel[]>("/api/admin/models"),
         apiRequest<Provider[]>("/api/admin/providers"),
         apiRequest<RoutingProfile[]>("/api/admin/routes"),
         apiRequest<FusionProfile[]>("/api/admin/fusion"),
+        apiRequest<JudgeProfile[]>("/api/admin/judges"),
         apiRequest<RouterApiKey[]>("/api/admin/keys"),
       ]);
       setModels(m);
       setProviders(p);
       setRoutes(r);
       setFusions(f);
+      setJudges(j);
       setKeys(k);
 
       // Default Target A
@@ -317,6 +321,8 @@ export const PlaygroundPage: React.FC = () => {
             setTargetA(replay.model);
             if (replay.model.startsWith("fusion/")) {
               setTargetTypeFilter("fusion");
+            } else if (replay.model.startsWith("judge/") || replay.model.startsWith("smart/")) {
+              setTargetTypeFilter("judge");
             } else if (replay.model.startsWith("route/")) {
               setTargetTypeFilter("routes");
             } else {
@@ -334,6 +340,8 @@ export const PlaygroundPage: React.FC = () => {
         setTargetA(queryModel);
         if (queryModel.startsWith("fusion/")) {
           setTargetTypeFilter("fusion");
+        } else if (queryModel.startsWith("judge/") || queryModel.startsWith("smart/")) {
+          setTargetTypeFilter("judge");
         } else if (queryModel.startsWith("route/")) {
           setTargetTypeFilter("routes");
         } else {
@@ -343,6 +351,8 @@ export const PlaygroundPage: React.FC = () => {
         setTargetA(`route/${r[0].slug}`);
       } else if (f.length > 0 && f[0].enabled) {
         setTargetA(`fusion/${f[0].slug}`);
+      } else if (j.length > 0 && j[0].enabled) {
+        setTargetA(`judge/${j[0].slug}`);
       } else if (visibleModels.length > 0) {
         setTargetA(visibleModels[0].canonical_slug);
       }
@@ -370,7 +380,7 @@ export const PlaygroundPage: React.FC = () => {
 
   // Combined searchable target items
   const allTargets = useMemo(() => {
-    const list: { id: string; name: string; type: "route" | "fusion" | "model"; group: string; subtitle?: string }[] = [];
+    const list: { id: string; name: string; type: "route" | "fusion" | "judge" | "model"; group: string; subtitle?: string }[] = [];
 
     // Routes
     routes.filter((r) => r.enabled).forEach((r) => {
@@ -394,6 +404,17 @@ export const PlaygroundPage: React.FC = () => {
       });
     });
 
+    // Judges
+    judges.filter((j) => j.enabled).forEach((j) => {
+      list.push({
+        id: `judge/${j.slug}`,
+        name: `judge/${j.slug}`,
+        type: "judge",
+        group: "Judge Profiles",
+        subtitle: `Judge: ${j.judge_model_name} (${j.candidates.length} candidates)`,
+      });
+    });
+
     // Direct Models
     visibleProviderGroups.forEach(({ provider, models: pModels }) => {
       pModels.forEach((m) => {
@@ -408,13 +429,14 @@ export const PlaygroundPage: React.FC = () => {
     });
 
     return list;
-  }, [routes, fusions, visibleProviderGroups]);
+  }, [routes, fusions, judges, visibleProviderGroups]);
 
   // Filtered targets based on search & category
   const filteredTargets = useMemo(() => {
     return allTargets.filter((item) => {
       if (targetTypeFilter === "routes" && item.type !== "route") return false;
       if (targetTypeFilter === "fusion" && item.type !== "fusion") return false;
+      if (targetTypeFilter === "judge" && item.type !== "judge") return false;
       if (targetTypeFilter === "models" && item.type !== "model") return false;
       if (!targetSearch.trim()) return true;
       const q = targetSearch.toLowerCase();
@@ -472,7 +494,7 @@ export const PlaygroundPage: React.FC = () => {
       }
       return false;
     }
-    if (targetId.startsWith("fusion/")) {
+    if (targetId.startsWith("fusion/") || targetId.startsWith("judge/") || targetId.startsWith("smart/")) {
       return false;
     }
     const m = models.find((x) => x.canonical_slug === targetId || x.provider_model_id === targetId);
@@ -667,6 +689,8 @@ export const PlaygroundPage: React.FC = () => {
             ? "PRIORITY"
             : targetId.startsWith("fusion/")
             ? "FUSION"
+            : targetId.startsWith("judge/") || targetId.startsWith("smart/")
+            ? "JUDGE"
             : "DIRECT",
         });
         return { content: accumulated, reasoning: accumulatedReasoning };
@@ -704,6 +728,8 @@ export const PlaygroundPage: React.FC = () => {
             ? "PRIORITY"
             : targetId.startsWith("fusion/")
             ? "FUSION"
+            : targetId.startsWith("judge/") || targetId.startsWith("smart/")
+            ? "JUDGE"
             : "DIRECT",
         });
         return { content, reasoning };
@@ -1259,7 +1285,7 @@ main();`;
             </div>
 
             {/* Target Category Tabs */}
-            <div className="grid grid-cols-4 gap-1 p-1 bg-slate-950/80 rounded-xl border border-white/[0.06] text-[10px] font-medium text-slate-400">
+            <div className="grid grid-cols-5 gap-1 p-1 bg-slate-950/80 rounded-xl border border-white/[0.06] text-[10px] font-medium text-slate-400">
               <button
                 type="button"
                 onClick={() => setTargetTypeFilter("all")}
@@ -1274,7 +1300,7 @@ main();`;
                 onClick={() => {
                   setTargetTypeFilter("models");
                   const firstModel = allTargets.find((t) => t.type === "model");
-                  if (firstModel && (!targetA || targetA.startsWith("route/") || targetA.startsWith("fusion/"))) {
+                  if (firstModel && (!targetA || targetA.startsWith("route/") || targetA.startsWith("fusion/") || targetA.startsWith("judge/") || targetA.startsWith("smart/"))) {
                     setTargetA(firstModel.id);
                   }
                 }}
@@ -1314,6 +1340,21 @@ main();`;
               >
                 Fusion
               </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTargetTypeFilter("judge");
+                  const firstJudge = allTargets.find((t) => t.type === "judge");
+                  if (firstJudge && (!targetA || (!targetA.startsWith("judge/") && !targetA.startsWith("smart/")))) {
+                    setTargetA(firstJudge.id);
+                  }
+                }}
+                className={`btn-press py-1.5 rounded-lg text-center transition-all ${
+                  targetTypeFilter === "judge" ? "bg-amber-900/60 text-amber-200 font-bold shadow-xs border border-amber-700/50" : "hover:text-slate-200"
+                }`}
+              >
+                Judge
+              </button>
             </div>
 
             {/* Target Search Box */}
@@ -1344,12 +1385,12 @@ main();`;
             >
               {!filteredTargets.some((item) => item.id === targetA) && targetA && (
                 <option value={targetA}>
-                  [{targetA.startsWith("route/") ? "ROUTE" : targetA.startsWith("fusion/") ? "FUSION" : "DIRECT"}] {targetA}
+                  [{targetA.startsWith("route/") ? "ROUTE" : targetA.startsWith("fusion/") ? "FUSION" : targetA.startsWith("judge/") || targetA.startsWith("smart/") ? "JUDGE" : "DIRECT"}] {targetA}
                 </option>
               )}
               {filteredTargets.map((item) => (
                 <option key={item.id} value={item.id}>
-                  [{item.type === "route" ? "ROUTE" : item.type === "fusion" ? "FUSION" : item.group}] {item.name}
+                  [{item.type === "route" ? "ROUTE" : item.type === "fusion" ? "FUSION" : item.type === "judge" ? "JUDGE" : item.group}] {item.name}
                   {item.subtitle ? ` — ${item.subtitle}` : ""}
                 </option>
               ))}
@@ -1362,14 +1403,18 @@ main();`;
               </span>
               <span
                 className={`text-[9px] uppercase px-1.5 py-0.5 rounded font-bold shrink-0 ${
-                  targetA.startsWith("fusion/")
+                  targetA.startsWith("judge/") || targetA.startsWith("smart/")
+                    ? "bg-amber-950 text-amber-300 border border-amber-800/70"
+                    : targetA.startsWith("fusion/")
                     ? "bg-purple-950 text-purple-300 border border-purple-800/70"
                     : targetA.startsWith("route/")
                     ? "bg-indigo-950 text-indigo-300 border border-indigo-800/70"
                     : "bg-emerald-950 text-emerald-300 border border-emerald-800/70"
                 }`}
               >
-                {targetA.startsWith("fusion/")
+                {targetA.startsWith("judge/") || targetA.startsWith("smart/")
+                  ? "Judge Classifier"
+                  : targetA.startsWith("fusion/")
                   ? "Fusion Ensemble"
                   : targetA.startsWith("route/")
                   ? "Route Fallback"
@@ -1524,7 +1569,7 @@ main();`;
               >
                 {allTargets.map((item) => (
                   <option key={`b-${item.id}`} value={item.id}>
-                    [{item.type === "route" ? "ROUTE" : item.type === "fusion" ? "FUSION" : item.group}] {item.name}
+                    [{item.type === "route" ? "ROUTE" : item.type === "fusion" ? "FUSION" : item.type === "judge" ? "JUDGE" : item.group}] {item.name}
                   </option>
                 ))}
               </select>

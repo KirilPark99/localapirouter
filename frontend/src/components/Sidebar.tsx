@@ -7,6 +7,7 @@ import {
   Boxes,
   GitFork,
   Merge,
+  Scale,
   ShieldCheck,
   Network,
   TerminalSquare,
@@ -27,6 +28,7 @@ export type PageId =
   | "credentials"
   | "models"
   | "routing"
+  | "judge"
   | "fusion"
   | "keys"
   | "proxies"
@@ -70,6 +72,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         { id: "playground", label: t.nav.playground, icon: <TerminalSquare size={16} />, badge: "Live" },
         { id: "models", label: t.nav.models, icon: <Boxes size={16} /> },
         { id: "routing", label: t.nav.routing, icon: <GitFork size={16} /> },
+        { id: "judge", label: t.nav.judge || "Судейская маршрутизация", icon: <Scale size={16} />, badge: "Smart" },
         { id: "fusion", label: t.nav.fusion, icon: <Merge size={16} />, badge: "AI" },
       ],
     },

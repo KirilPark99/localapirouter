@@ -137,6 +137,9 @@ def normalize_upstream_error(
         except Exception:
             err_msg = response_body[:300]
 
+    if not err_msg and exception is not None:
+        err_msg = str(exception)
+
     category = ErrorCategory.UNKNOWN
     if status_code is not None:
         if status_code == 401:

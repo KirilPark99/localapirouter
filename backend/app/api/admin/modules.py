@@ -167,6 +167,10 @@ async def list_module_profiles(module_id: str, db: AsyncSession = Depends(get_db
             else:
                 masked_fields[k] = v
 
+        meta = c.metadata_json if isinstance(c.metadata_json, dict) else {}
+        source = meta.get("_source", "ui")
+        file_path = meta.get("_file_path")
+
         output.append({
             "id": c.id,
             "provider_id": c.provider_id,
@@ -179,6 +183,8 @@ async def list_module_profiles(module_id: str, db: AsyncSession = Depends(get_db
             "proxy_id": c.proxy_id,
             "proxy": proxy_info,
             "fields": masked_fields,
+            "source": source,
+            "file_path": file_path,
             "last_checked_at": c.last_checked_at.isoformat() if c.last_checked_at else None,
             "last_success_at": c.last_success_at.isoformat() if c.last_success_at else None,
             "last_error": c.last_error,
@@ -308,10 +314,25 @@ async def update_module_profile(
                     current_fields = json.loads(decrypted)
             except Exception:
                 pass
-        current_fields.update(data.fields)
+        for k, v in data.fields.items():
+            if v is None:
+                continue
+            v_str = str(v).strip()
+            # If the value contains mask bullets (•), user did not edit this field; preserve existing secret
+            if "•" in v_str:
+                continue
+            current_fields[k] = v_str
+
         serialized_fields = json.dumps(current_fields)
         cred.encrypted_api_key = encrypt_secret(serialized_fields)
         cred.metadata_json = current_fields
+        if "api_key" in current_fields:
+            cred.masked_key = mask_secret(str(current_fields["api_key"]))
+        elif "token" in current_fields:
+            cred.masked_key = mask_secret(str(current_fields["token"]))
+        elif current_fields:
+            first_val = list(current_fields.values())[0]
+            cred.masked_key = mask_secret(str(first_val))
 
     await db.commit()
     await db.refresh(cred)
@@ -373,3 +394,34 @@ async def sync_module_models(
     """
     result = await ModelDiscoveryService.fetch_models_from_provider(db, profile_id)
     return result
+
+
+@router.post("/{module_id}/profiles/{profile_id}/export")
+async def export_module_profile(
+    module_id: str,
+    profile_id: int,
+    format: str = "json",
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Export a profile to the profiles/ directory outside git.
+    """
+    from app.modules.profile_loader import export_profile_to_file
+    try:
+        res = await export_profile_to_file(db, profile_id, module_id, format)
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Export failed: {str(e)}")
+
+
+@router.post("/sync-profiles")
+async def sync_all_disk_profiles(
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Manually rescan and synchronize profiles from the profiles/ directory.
+    """
+    from app.modules.profile_loader import sync_profiles_from_disk
+    result = await sync_profiles_from_disk(db)
+    return result
+

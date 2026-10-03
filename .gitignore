@@ -58,6 +58,22 @@ frontend/.env.*
 *.crt
 *.p12
 
+# Module profiles (DO NOT COMMIT to GitHub)
+profiles/
+!profiles/.gitkeep
+!profiles/README.md
+!profiles/*.example.*
+!profiles/**/*.example.*
+backend/data/profiles/
+!backend/data/profiles/.gitkeep
+!backend/data/profiles/README.md
+
+# Safeguards: prevent any accidental credential/profile files in modules
+backend/modules/**/credentials*.json
+backend/modules/**/profile*.json
+backend/modules/**/token*.json
+backend/modules/**/.env*
+
 # Frontend Node
 node_modules/
 frontend/dist/

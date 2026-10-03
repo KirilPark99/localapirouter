@@ -6,7 +6,7 @@ import inspect
 import importlib.util
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,8 +26,7 @@ class LoadedModule(BaseModel):
     profiles_count: int = 0
     models_count: int = 0
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class ModuleLoader:
@@ -113,6 +112,8 @@ class ModuleLoader:
             # Dynamically import handler.py
             try:
                 module_name = f"app_custom_module_{manifest.id}"
+                if str(item) not in sys.path:
+                    sys.path.insert(0, str(item))
                 spec = importlib.util.spec_from_file_location(module_name, str(handler_path))
                 if spec is None or spec.loader is None:
                     raise ImportError(f"Cannot create module spec for {handler_path}")
@@ -211,37 +212,79 @@ class ModuleLoader:
             ) or 0
             loaded.profiles_count = cred_count
 
-            # 3. Seed default models if none exist yet for this provider
+            # 3. Seed or update default models
             existing_models = (await db.execute(
                 select(DiscoveredModel).where(DiscoveredModel.provider_id == provider.id)
             )).scalars().all()
-            loaded.models_count = len(existing_models)
+            existing_map = {m.provider_model_id: m for m in existing_models}
 
-            if not existing_models and manifest.default_models:
+            if manifest.default_models:
+                manifest_ids = {def_model.id for def_model in manifest.default_models}
                 for def_model in manifest.default_models:
                     canonical_slug = f"{manifest.id}/{def_model.id}"
-                    m_obj = DiscoveredModel(
-                        provider_id=provider.id,
-                        credential_id=None,
-                        provider_model_id=def_model.id,
-                        display_name=def_model.name,
-                        canonical_slug=canonical_slug,
-                        capabilities=def_model.capabilities,
-                        supported_endpoints=["/chat/completions"],
-                        context_length=def_model.context_length,
-                        max_output_tokens=def_model.max_output_tokens,
-                        reasoning_effort=def_model.reasoning_effort,
-                        enabled=True,
-                        available=True,
-                        is_visible=True,
-                        model_type="openai",
-                    )
-                    db.add(m_obj)
+                    if def_model.id in existing_map:
+                        m_obj = existing_map[def_model.id]
+                        m_obj.display_name = def_model.name
+                        m_obj.capabilities = def_model.capabilities
+                        m_obj.context_length = def_model.context_length
+                        m_obj.max_output_tokens = def_model.max_output_tokens
+                        m_obj.reasoning_effort = def_model.reasoning_effort
+                    else:
+                        m_obj = DiscoveredModel(
+                            provider_id=provider.id,
+                            credential_id=None,
+                            provider_model_id=def_model.id,
+                            display_name=def_model.name,
+                            canonical_slug=canonical_slug,
+                            capabilities=def_model.capabilities,
+                            supported_endpoints=["/chat/completions"],
+                            context_length=def_model.context_length,
+                            max_output_tokens=def_model.max_output_tokens,
+                            reasoning_effort=def_model.reasoning_effort,
+                            enabled=True,
+                            available=True,
+                            is_visible=True,
+                            model_type="openai",
+                        )
+                        db.add(m_obj)
+
+                # Remove obsolete models that are no longer part of the module manifest
+                for old_id, old_obj in existing_map.items():
+                    if old_id not in manifest_ids:
+                        await db.delete(old_obj)
+
                 await db.flush()
-                loaded.models_count = len(manifest.default_models)
-                logger.info(f"Seeded {len(manifest.default_models)} default models for module '{manifest.name}'")
+
+            # Refresh count
+            all_models = (await db.execute(
+                select(DiscoveredModel).where(DiscoveredModel.provider_id == provider.id)
+            )).scalars().all()
+            loaded.models_count = len(all_models)
+            logger.info(f"Synchronized models for module '{manifest.name}' (Total: {len(all_models)})")
 
         await db.commit()
+
+        # Synchronize external file-based profiles from the profiles directory
+        try:
+            from app.modules.profile_loader import sync_profiles_from_disk
+            profile_sync_res = await sync_profiles_from_disk(db)
+            logger.info(f"File-based profiles sync completed: {profile_sync_res}")
+        except Exception as e:
+            logger.error(f"Failed to sync file-based profiles from disk: {e}", exc_info=True)
+
+        # Refresh profiles count on all loaded modules
+        from app.models.entities import ProviderCredential
+        from sqlalchemy import func
+        for module_id, loaded in cls._modules.items():
+            if loaded.status != "ready":
+                continue
+            provider_slug = f"module_{loaded.manifest.id}"
+            prov = (await db.execute(select(Provider).where(Provider.slug == provider_slug))).scalar_one_or_none()
+            if prov:
+                cred_count = await db.scalar(
+                    select(func.count(ProviderCredential.id)).where(ProviderCredential.provider_id == prov.id)
+                ) or 0
+                loaded.profiles_count = cred_count
 
     @classmethod
     async def reload_and_sync(cls, db: AsyncSession) -> Dict[str, Any]:

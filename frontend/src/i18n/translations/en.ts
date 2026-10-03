@@ -58,6 +58,7 @@ export const en: TranslationSchema = {
     credentials: "Credentials",
     models: "Model Catalog",
     routing: "Routing & Fallback",
+    judge: "Judge Router",
     fusion: "Model Fusion",
     modules: "Modules",
     keys: "API Keys",

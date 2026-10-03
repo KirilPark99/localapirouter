@@ -86,6 +86,8 @@ interface ModuleProfile {
     country_code?: string;
   } | null;
   fields: Record<string, any>;
+  source?: string;
+  file_path?: string;
   last_checked_at?: string | null;
   last_success_at?: string | null;
   last_error?: string | null;
@@ -325,6 +327,22 @@ export const ModulesPage: React.FC = () => {
     }
   };
 
+  const handleExportProfile = async (profileId: number) => {
+    if (!selectedModule) return;
+    try {
+      const res = await apiRequest<{ success: boolean; relative_path: string }>(
+        `/api/admin/modules/${selectedModule.manifest.id}/profiles/${profileId}/export`,
+        { method: "POST" }
+      );
+      if (res && res.success) {
+        alert(`Профиль успешно экспортирован в файл:\nprofiles/${res.relative_path}\n\nЭтот файл защищён в .gitignore и никогда не попадёт в Git.`);
+        await fetchProfiles(selectedModule.manifest.id);
+      }
+    } catch (err: any) {
+      alert(`Ошибка экспорта: ${err.message}`);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Top Header */}
@@ -512,11 +530,19 @@ export const ModulesPage: React.FC = () => {
               </button>
             </div>
 
+            {/* Git Isolation Notice */}
+            <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-xs text-indigo-300 flex items-start gap-2.5">
+              <Shield size={16} className="shrink-0 mt-0.5 text-indigo-400" />
+              <div className="leading-relaxed">
+                <strong>Изоляция от Git:</strong> Механизмы модулей (<code className="text-slate-200">backend/modules/</code>) отделены от личных профилей. Профили сохраняются в локальной зашифрованной БД или в файлах в папке <code className="bg-slate-900 px-1 py-0.5 rounded text-slate-200">profiles/</code>, которая полностью исключена из Git (<code className="text-slate-400 font-mono">.gitignore</code>) и никогда не попадёт на GitHub.
+              </div>
+            </div>
+
             {loadingProfiles ? (
               <div className="p-8 text-center text-slate-500 text-xs">Загрузка профилей...</div>
             ) : profiles.length === 0 ? (
               <div className="p-8 text-center border border-dashed border-white/[0.08] rounded-xl text-xs text-slate-400">
-                У этого модуля пока нет созданных профилей. Нажмите кнопку выше, чтобы добавить профиль с нужными параметрами авторизации и прокси.
+                У этого модуля пока нет созданных профилей. Нажмите кнопку выше, чтобы добавить профиль, либо поместите файл в папку <code className="text-indigo-300 font-mono">profiles/{selectedModule.manifest.id}/</code>.
               </div>
             ) : (
               <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
@@ -534,6 +560,19 @@ export const ModulesPage: React.FC = () => {
                           <div className="flex items-center gap-2">
                             <span className="font-semibold text-slate-100 text-sm">{p.name}</span>
                             <StatusBadge status={p.status} />
+                            {p.source === "file" ? (
+                              <span
+                                className="text-[10px] px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/20 flex items-center gap-1 font-mono"
+                                title={`Файл: profiles/${p.file_path || ''}`}
+                              >
+                                <FolderCode size={10} />
+                                <span>Файл: {p.file_path}</span>
+                              </span>
+                            ) : (
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800/80 text-slate-400 border border-white/[0.06]">
+                                UI
+                              </span>
+                            )}
                             {!p.enabled && (
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
                                 Отключен
@@ -581,6 +620,13 @@ export const ModulesPage: React.FC = () => {
                           >
                             <Play size={11} className={isTesting ? "animate-spin text-indigo-400" : "text-emerald-400"} />
                             <span>{isTesting ? "Тест..." : "Тест"}</span>
+                          </button>
+                          <button
+                            onClick={() => handleExportProfile(p.id)}
+                            className="btn-press p-1.5 bg-slate-800 hover:bg-slate-700 text-sky-400 rounded-lg text-xs border border-white/[0.06] transition-all"
+                            title="Экспортировать профиль в папку profiles/ (в файл вне Git)"
+                          >
+                            <FolderCode size={13} />
                           </button>
                           <button
                             onClick={() => handleSyncModels(p.id)}

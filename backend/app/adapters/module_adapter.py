@@ -27,6 +27,9 @@ class CustomModuleAdapter(BaseProviderAdapter):
 
         adapter = ModuleLoader.get_adapter(module_id)
         if not adapter:
+            ModuleLoader.scan_modules()
+            adapter = ModuleLoader.get_adapter(module_id)
+        if not adapter:
             raise RouterException(f"Custom module '{module_id}' is not loaded or has failed initialization")
 
         # Build credentials dict: merge decrypted metadata_json and api_key
@@ -109,3 +112,54 @@ class CustomModuleAdapter(BaseProviderAdapter):
         adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout, model_id)
         async for chunk in adapter.stream_chat(request, ctx):
             yield chunk
+
+    def normalize_error(
+        self,
+        status_code: Optional[int] = None,
+        response_body: Optional[Any] = None,
+        exception: Optional[Exception] = None,
+        retry_after: Optional[float] = None,
+    ) -> RouterException:
+        if isinstance(exception, RouterException):
+            return exception
+        from app.core.errors import ErrorCategory
+        err_msg = str(exception or response_body or "")
+        if "ERR_RATE_LIMIT" in err_msg or "429" in err_msg or status_code == 429:
+            if "Arena" in err_msg:
+                msg = f"Превышен лимит запросов LMSYS Chatbot Arena (HTTP 429): {err_msg}. Подождите немного или смените IP/прокси."
+            elif "ERR_RATE_LIMIT" in err_msg or "DuckDuckGo" in err_msg:
+                msg = "Превышен лимит запросов DuckDuckGo AI Chat (HTTP 429). Рекомендуется привязать прокси к профилю DuckDuckGo в админ-панели или подождать 30-60 секунд."
+            else:
+                msg = f"Превышен лимит запросов (HTTP 429): {err_msg}"
+            return RouterException(
+                msg,
+                ErrorCategory.RATE_LIMIT,
+                status_code=429,
+                retry_after=retry_after or 30.0,
+            )
+        if "temporarily-unavailable" in err_msg or "temporarily_unavailable" in err_msg:
+            return RouterException(
+                "Доступ к Notion AI временно приостановлен Notion (temporarily-unavailable). На бесплатном тарифе или при исчерпании квоты воркспейса Notion временно ограничивает генерацию (6-часовое скользящее окно либо требуется платная подписка Notion AI).",
+                ErrorCategory.RATE_LIMIT,
+                status_code=429,
+                retry_after=retry_after or 60.0,
+            )
+        if "ERR_MODEL_RESTRICTED" in err_msg or "403" in err_msg or status_code == 403:
+            return RouterException(
+                err_msg if "доступна только по платной подписке" in err_msg else "Запрошенная модель ограничена и требует платной подписки DuckDuckGo Pro.",
+                ErrorCategory.AUTH_ERROR,
+                status_code=403,
+            )
+        if "FRONTEND_CAPTCHA_REQUIRED" in err_msg:
+            return RouterException(
+                err_msg,
+                ErrorCategory.AUTH_ERROR,
+                status_code=403,
+            )
+        if "upstream error" in err_msg.lower():
+            return RouterException(
+                err_msg,
+                ErrorCategory.UPSTREAM_5XX,
+                status_code=502,
+            )
+        return super().normalize_error(status_code, response_body, exception, retry_after)

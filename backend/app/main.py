@@ -22,6 +22,7 @@ from app.api.admin.proxies import router as admin_proxies_router
 from app.api.admin.models import router as admin_models_router
 from app.api.admin.routes import router as admin_routes_router
 from app.api.admin.fusion import router as admin_fusion_router
+from app.api.admin.judges import router as admin_judges_router
 from app.api.admin.keys import router as admin_keys_router
 from app.api.admin.logs import router as admin_logs_router
 from app.api.admin.settings import router as admin_settings_router
@@ -71,6 +72,7 @@ app.include_router(admin_proxies_router, prefix="/api/admin")
 app.include_router(admin_models_router, prefix="/api/admin")
 app.include_router(admin_routes_router, prefix="/api/admin")
 app.include_router(admin_fusion_router, prefix="/api/admin")
+app.include_router(admin_judges_router, prefix="/api/admin")
 app.include_router(admin_keys_router, prefix="/api/admin")
 app.include_router(admin_logs_router, prefix="/api/admin")
 app.include_router(admin_settings_router, prefix="/api/admin")

@@ -1,0 +1,523 @@
+{
+  "id": "notion_web",
+  "name": "Notion AI Web",
+  "version": "1.2.0",
+  "description": "Notion AI internal web inference integration with token_v2 cookie auth, multi-turn thread continuity, transcript builder, and live workspace model roster from getAvailableModels.",
+  "author": "Omniroute Port",
+  "icon": "Bot",
+  "auth_type": "custom_fields",
+  "fields": [
+    {
+      "key": "token_v2",
+      "label": "Notion token_v2 Cookie",
+      "type": "password",
+      "required": true,
+      "placeholder": "token_v2 cookie value from app.notion.com",
+      "description": "DevTools → Application → Cookies → https://www.notion.so or app.notion.com → token_v2"
+    },
+    {
+      "key": "space_id",
+      "label": "Workspace Space ID (Optional)",
+      "type": "text",
+      "required": false,
+      "placeholder": "UUID of your Notion workspace (auto-discovered if empty)",
+      "description": "Workspace ID. If omitted, will be auto-resolved from /api/v3/getSpaces"
+    }
+  ],
+  "default_models": [
+    {
+      "id": "notion-ai",
+      "name": "Notion AI (Auto)",
+      "context_length": 128000,
+      "max_output_tokens": 4096,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "name": "GPT-6.1 Sol (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "name": "GPT-5.6 Terra (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-6-luna",
+      "name": "GPT-6 Luna (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 4096,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "opus-5.5",
+      "name": "Opus 5.5 (Notion)",
+      "context_length": 200000,
+      "max_output_tokens": 4096,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "grok-4.6",
+      "name": "Grok 4.6 (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "name": "GPT-5.6 Luna (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 4096,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.2",
+      "name": "GPT-5.2 (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.4",
+      "name": "GPT-5.4 (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "name": "GPT-5.5 (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "name": "Gemini 3.5 Flash (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "name": "Gemini 3.6 Flash (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "name": "Gemini 3.7 Flash (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "sonnet-4.6",
+      "name": "Sonnet 4.6 (Notion)",
+      "context_length": 200000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "sonnet-5",
+      "name": "Sonnet 5 (Notion)",
+      "context_length": 200000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "sonnet-5.5",
+      "name": "Sonnet 5.5 (Notion)",
+      "context_length": 200000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "opus-4.6",
+      "name": "Opus 4.6 (Notion)",
+      "context_length": 200000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "opus-4.7",
+      "name": "Opus 4.7 (Notion)",
+      "context_length": 200000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "opus-4.8",
+      "name": "Opus 4.8 (Notion)",
+      "context_length": 200000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "opus-5",
+      "name": "Opus 5 (Notion)",
+      "context_length": 200000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "name": "GPT-5.4 Mini (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 4096,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.4-nano",
+      "name": "GPT-5.4 Nano (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 4096,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "kimi-k3",
+      "name": "Kimi K3 (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "name": "DeepSeek V4 Flash (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 4096,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "name": "DeepSeek V4.1 Flash (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 4096,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "glm-5.2",
+      "name": "GLM 5.2 (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "glm-5.3",
+      "name": "GLM 5.3 (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "glm-5.3-flash",
+      "name": "GLM 5.3 Flash (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 4096,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "grok-4.3",
+      "name": "Grok 4.3 (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "grok-4.5",
+      "name": "Grok 4.5 (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "grok-build-0.1",
+      "name": "Grok Build 0.1 (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-3.1-pro",
+      "name": "Gemini 3.1 Pro (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 4096,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "haiku-4.5",
+      "name": "Haiku 4.5 (Notion)",
+      "context_length": 200000,
+      "max_output_tokens": 4096,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-3-flash",
+      "name": "Gemini 3 Flash (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 4096,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-6-astra",
+      "name": "GPT-6 Astra (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "fable-5.1",
+      "name": "Fable 5.1 (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "fable-5",
+      "name": "Fable 5 (Notion)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    }
+  ]
+}

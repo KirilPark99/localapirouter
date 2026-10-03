@@ -13,6 +13,7 @@ from app.models.entities import (
     RoutingCandidate,
     FusionProfile,
     FusionParticipant,
+    JudgeProfile,
     RouterApiKey,
 )
 from app.schemas.entities import (
@@ -439,6 +440,7 @@ class LogService:
         m_count = (await db.execute(select(func.count(DiscoveredModel.id)))).scalar_one()
         r_count = (await db.execute(select(func.count(RoutingProfile.id)))).scalar_one()
         f_count = (await db.execute(select(func.count(FusionProfile.id)))).scalar_one()
+        j_count = (await db.execute(select(func.count(JudgeProfile.id)))).scalar_one()
 
         # 24h stats
         reqs_24h = (await db.execute(
@@ -448,14 +450,14 @@ class LogService:
         success_24h = (await db.execute(
             select(func.count(RequestLog.id)).where(
                 RequestLog.created_at >= day_ago,
-                RequestLog.status.in_(["SUCCESS", "FALLBACK_SUCCESS", "FUSION_SUCCESS"]),
+                RequestLog.status.in_(["SUCCESS", "FALLBACK_SUCCESS", "FUSION_SUCCESS", "JUDGE_FALLBACK_SUCCESS"]),
             )
         )).scalar_one()
 
         fallbacks_24h = (await db.execute(
             select(func.count(RequestLog.id)).where(
                 RequestLog.created_at >= day_ago,
-                RequestLog.status == "FALLBACK_SUCCESS",
+                RequestLog.status.in_(["FALLBACK_SUCCESS", "JUDGE_FALLBACK_SUCCESS"]),
             )
         )).scalar_one()
 
@@ -480,6 +482,7 @@ class LogService:
             total_models=m_count,
             total_routes=r_count,
             total_fusions=f_count,
+            total_judges=j_count,
             requests_24h=reqs_24h,
             fallbacks_24h=fallbacks_24h,
             success_rate_24h=round(success_rate, 1),

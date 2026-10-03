@@ -225,6 +225,59 @@ class FusionParticipant(Base, TimestampMixin):
     credential: Mapped[Optional["ProviderCredential"]] = relationship("ProviderCredential", foreign_keys=[credential_id])
     model: Mapped[Optional["DiscoveredModel"]] = relationship("DiscoveredModel", foreign_keys=[model_id])
 
+class JudgeProfile(Base, TimestampMixin):
+    __tablename__ = "judge_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)  # accessed as "judge/<slug>" or "smart/<slug>"
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    strategy: Mapped[str] = mapped_column(String(50), default="auto", nullable=False)  # auto, complexity, task_type
+    judge_type: Mapped[str] = mapped_column(String(30), default="model", nullable=False)  # "model" or "profile"
+    judge_routing_profile_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("routing_profiles.id", ondelete="SET NULL"), nullable=True)
+    judge_provider_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("providers.id", ondelete="CASCADE"), nullable=True)
+    judge_credential_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("provider_credentials.id", ondelete="SET NULL"), nullable=True)
+    judge_credential_group: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    judge_model_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("discovered_models.id", ondelete="CASCADE"), nullable=True)
+    judge_thinking_effort: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    judge_temperature: Mapped[Optional[float]] = mapped_column(Float, default=0.1, nullable=True)
+    system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    fallback_candidate_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    timeout_seconds: Mapped[float] = mapped_column(Float, default=60.0, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    judge_routing_profile: Mapped[Optional["RoutingProfile"]] = relationship("RoutingProfile", foreign_keys=[judge_routing_profile_id])
+    judge_provider: Mapped[Optional["Provider"]] = relationship("Provider", foreign_keys=[judge_provider_id])
+    judge_credential: Mapped[Optional["ProviderCredential"]] = relationship("ProviderCredential", foreign_keys=[judge_credential_id])
+    judge_model: Mapped[Optional["DiscoveredModel"]] = relationship("DiscoveredModel", foreign_keys=[judge_model_id])
+    candidates: Mapped[List["JudgeCandidate"]] = relationship("JudgeCandidate", back_populates="profile", cascade="all, delete-orphan", order_by="JudgeCandidate.priority_order")
+
+class JudgeCandidate(Base, TimestampMixin):
+    __tablename__ = "judge_candidates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    profile_id: Mapped[int] = mapped_column(Integer, ForeignKey("judge_profiles.id", ondelete="CASCADE"), nullable=False)
+    candidate_type: Mapped[str] = mapped_column(String(30), default="model", nullable=False)  # "model" or "profile"
+    target_profile_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("routing_profiles.id", ondelete="CASCADE"), nullable=True)
+    provider_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("providers.id", ondelete="CASCADE"), nullable=True)
+    credential_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("provider_credentials.id", ondelete="SET NULL"), nullable=True)
+    credential_group: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    model_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("discovered_models.id", ondelete="CASCADE"), nullable=True)
+    thinking_effort: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    temperature: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    priority_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    label: Mapped[str] = mapped_column(String(100), default="Candidate", nullable=False)
+    task_types: Mapped[List[str]] = mapped_column(JSON, default=list, nullable=False)
+    complexity_level: Mapped[str] = mapped_column(String(50), default="all", nullable=False)  # "low", "medium", "high", "all"
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    profile: Mapped["JudgeProfile"] = relationship("JudgeProfile", back_populates="candidates")
+    target_profile: Mapped[Optional["RoutingProfile"]] = relationship("RoutingProfile", foreign_keys=[target_profile_id])
+    provider: Mapped[Optional["Provider"]] = relationship("Provider", foreign_keys=[provider_id])
+    credential: Mapped[Optional["ProviderCredential"]] = relationship("ProviderCredential", foreign_keys=[credential_id])
+    model: Mapped[Optional["DiscoveredModel"]] = relationship("DiscoveredModel", foreign_keys=[model_id])
+
 class RouterApiKey(Base, TimestampMixin):
     __tablename__ = "router_api_keys"
 
@@ -234,10 +287,11 @@ class RouterApiKey(Base, TimestampMixin):
     key_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True, nullable=False)
     masked_key: Mapped[str] = mapped_column(String(100), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    permissions: Mapped[List[str]] = mapped_column(JSON, default=lambda: ["direct", "routes", "fusion"], nullable=False)
+    permissions: Mapped[List[str]] = mapped_column(JSON, default=lambda: ["direct", "routes", "fusion", "judge"], nullable=False)
     allowed_models: Mapped[List[str]] = mapped_column(JSON, default=lambda: ["*"], nullable=False)
     allowed_routes: Mapped[List[str]] = mapped_column(JSON, default=lambda: ["*"], nullable=False)
     allowed_fusions: Mapped[List[str]] = mapped_column(JSON, default=lambda: ["*"], nullable=False)
+    allowed_judges: Mapped[List[str]] = mapped_column(JSON, default=lambda: ["*"], nullable=False)
     rate_limit_rpm: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     rate_limit_tpm: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     request_limit: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

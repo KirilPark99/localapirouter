@@ -7,6 +7,7 @@ import { ProvidersPage } from "./pages/ProvidersPage";
 import { CredentialsPage } from "./pages/CredentialsPage";
 import { ModelsPage } from "./pages/ModelsPage";
 import { RoutingPage } from "./pages/RoutingPage";
+import { JudgeRoutingPage } from "./pages/JudgeRoutingPage";
 import { FusionPage } from "./pages/FusionPage";
 import { ApiKeysPage } from "./pages/ApiKeysPage";
 import { ProxiesPage } from "./pages/ProxiesPage";
@@ -135,6 +136,7 @@ export const App: React.FC = () => {
           {activePage === "credentials" && <CredentialsPage />}
           {activePage === "models" && <ModelsPage />}
           {activePage === "routing" && <RoutingPage />}
+          {activePage === "judge" && <JudgeRoutingPage />}
           {activePage === "fusion" && <FusionPage />}
           {activePage === "keys" && <ApiKeysPage />}
           {activePage === "proxies" && <ProxiesPage />}

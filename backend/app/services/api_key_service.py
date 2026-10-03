@@ -37,16 +37,17 @@ class ApiKeyService:
             key_hash=key_hash,
             masked_key=masked,
             enabled=True,
-            permissions=data.permissions,
-            allowed_models=data.allowed_models,
-            allowed_routes=data.allowed_routes,
-            allowed_fusions=data.allowed_fusions,
-            rate_limit_rpm=data.rate_limit_rpm,
-            rate_limit_tpm=data.rate_limit_tpm,
-            request_limit=data.request_limit,
+            permissions=getattr(data, "permissions", ["direct", "routes", "fusion", "judge"]),
+            allowed_models=getattr(data, "allowed_models", ["*"]),
+            allowed_routes=getattr(data, "allowed_routes", ["*"]),
+            allowed_fusions=getattr(data, "allowed_fusions", ["*"]),
+            allowed_judges=getattr(data, "allowed_judges", ["*"]),
+            rate_limit_rpm=getattr(data, "rate_limit_rpm", None),
+            rate_limit_tpm=getattr(data, "rate_limit_tpm", None),
+            request_limit=getattr(data, "request_limit", None),
             total_requests=0,
-            expiration_date=data.expiration_date,
-            ip_restrictions=data.ip_restrictions,
+            expiration_date=getattr(data, "expiration_date", None),
+            ip_restrictions=getattr(data, "ip_restrictions", []),
         )
         db.add(key_obj)
         await db.commit()
@@ -77,6 +78,8 @@ class ApiKeyService:
             k.allowed_routes = data.allowed_routes
         if data.allowed_fusions is not None:
             k.allowed_fusions = data.allowed_fusions
+        if data.allowed_judges is not None:
+            k.allowed_judges = data.allowed_judges
         if data.rate_limit_rpm is not None:
             k.rate_limit_rpm = data.rate_limit_rpm
         if data.rate_limit_tpm is not None:
@@ -147,6 +150,7 @@ class ApiKeyService:
             allowed_models=k.allowed_models,
             allowed_routes=k.allowed_routes,
             allowed_fusions=k.allowed_fusions,
+            allowed_judges=getattr(k, "allowed_judges", ["*"]) or ["*"],
             rate_limit_rpm=k.rate_limit_rpm,
             rate_limit_tpm=k.rate_limit_tpm,
             request_limit=k.request_limit,

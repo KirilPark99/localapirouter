@@ -539,13 +539,164 @@ class FusionProfileRead(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+# Judge Routing
+class JudgeCandidateInput(BaseModel):
+    candidate_type: Literal["model", "profile"] = "model"
+    target_profile_id: Optional[int] = None
+    provider_id: Optional[int] = None
+    credential_id: Optional[int] = None
+    credential_group: Optional[str] = None
+    model_id: Optional[int] = None
+    thinking_effort: Optional[str] = None
+    temperature: Optional[float] = None
+    priority_order: int = 0
+    label: str = "Candidate"
+    task_types: List[str] = Field(default_factory=list)
+    complexity_level: Literal["low", "medium", "high", "all"] = "all"
+    description: Optional[str] = None
+    is_active: bool = True
+
+    @field_validator("temperature")
+    @classmethod
+    def validate_temp(cls, v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return None
+        if v < 0.0 or v > 2.0:
+            raise ValueError("Temperature must be between 0.0 and 2.0")
+        return round(float(v), 3)
+
+class JudgeCandidateRead(BaseModel):
+    id: int
+    candidate_type: str = "model"
+    target_profile_id: Optional[int] = None
+    target_profile_name: Optional[str] = None
+    target_profile_slug: Optional[str] = None
+    provider_id: Optional[int] = None
+    provider_name: Optional[str] = None
+    credential_id: Optional[int] = None
+    credential_name: Optional[str] = None
+    credential_group: Optional[str] = None
+    model_id: Optional[int] = None
+    model_name: Optional[str] = None
+    canonical_slug: Optional[str] = None
+    thinking_effort: Optional[str] = None
+    temperature: Optional[float] = None
+    priority_order: int = 0
+    label: str
+    task_types: List[str] = Field(default_factory=list)
+    complexity_level: str = "all"
+    description: Optional[str] = None
+    is_active: bool
+
+class JudgeProfileCreate(BaseModel):
+    name: str
+    slug: str
+    description: Optional[str] = None
+    strategy: Literal["auto", "complexity", "task_type"] = "auto"
+    judge_type: Literal["model", "profile"] = "model"
+    judge_routing_profile_id: Optional[int] = None
+    judge_provider_id: Optional[int] = None
+    judge_credential_id: Optional[int] = None
+    judge_credential_group: Optional[str] = None
+    judge_model_id: Optional[int] = None
+    judge_thinking_effort: Optional[str] = None
+    judge_temperature: Optional[float] = 0.1
+    system_prompt: Optional[str] = None
+    fallback_candidate_id: Optional[int] = None
+    timeout_seconds: float = 60.0
+    enabled: bool = True
+    candidates: List[JudgeCandidateInput] = Field(default_factory=list)
+
+    @field_validator("judge_temperature")
+    @classmethod
+    def validate_temp(cls, v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return None
+        if v < 0.0 or v > 2.0:
+            raise ValueError("Temperature must be between 0.0 and 2.0")
+        return round(float(v), 3)
+
+class JudgeProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    slug: Optional[str] = None
+    description: Optional[str] = None
+    strategy: Optional[Literal["auto", "complexity", "task_type"]] = None
+    judge_type: Optional[Literal["model", "profile"]] = None
+    judge_routing_profile_id: Optional[int] = None
+    judge_provider_id: Optional[int] = None
+    judge_credential_id: Optional[int] = None
+    judge_credential_group: Optional[str] = None
+    judge_model_id: Optional[int] = None
+    judge_thinking_effort: Optional[str] = None
+    judge_temperature: Optional[float] = None
+    system_prompt: Optional[str] = None
+    fallback_candidate_id: Optional[int] = None
+    timeout_seconds: Optional[float] = None
+    enabled: Optional[bool] = None
+    candidates: Optional[List[JudgeCandidateInput]] = None
+
+    @field_validator("judge_temperature")
+    @classmethod
+    def validate_temp(cls, v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return None
+        if v < 0.0 or v > 2.0:
+            raise ValueError("Temperature must be between 0.0 and 2.0")
+        return round(float(v), 3)
+
+class JudgeProfileRead(BaseModel):
+    id: int
+    name: str
+    slug: str
+    description: Optional[str] = None
+    strategy: str
+    judge_type: str
+    judge_routing_profile_id: Optional[int] = None
+    judge_routing_profile_name: Optional[str] = None
+    judge_routing_profile_slug: Optional[str] = None
+    judge_provider_id: Optional[int] = None
+    judge_provider_name: Optional[str] = None
+    judge_credential_id: Optional[int] = None
+    judge_credential_name: Optional[str] = None
+    judge_credential_group: Optional[str] = None
+    judge_model_id: Optional[int] = None
+    judge_model_name: Optional[str] = None
+    judge_canonical_slug: Optional[str] = None
+    judge_model_type: Optional[str] = None
+    judge_thinking_effort: Optional[str] = None
+    judge_temperature: Optional[float] = None
+    system_prompt: Optional[str] = None
+    fallback_candidate_id: Optional[int] = None
+    timeout_seconds: float
+    enabled: bool
+    candidates: List[JudgeCandidateRead] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+class JudgeTestRequest(BaseModel):
+    prompt: str = Field(..., description="Prompt or query to be evaluated by the judge")
+
+class JudgeTestResponse(BaseModel):
+    selected_candidate_id: Optional[int] = None
+    selected_candidate_label: str
+    selected_target: str
+    strategy: str
+    estimated_complexity: str
+    detected_task_type: Optional[str] = None
+    judge_reasoning: str
+    judge_model_name: str
+    latency_ms: float
+    status: str
+    error: Optional[str] = None
+
 # Router API Key
 class RouterApiKeyCreate(BaseModel):
     name: str
-    permissions: List[str] = Field(default_factory=lambda: ["direct", "routes", "fusion"])
+    permissions: List[str] = Field(default_factory=lambda: ["direct", "routes", "fusion", "judge"])
     allowed_models: List[str] = Field(default_factory=lambda: ["*"])
     allowed_routes: List[str] = Field(default_factory=lambda: ["*"])
     allowed_fusions: List[str] = Field(default_factory=lambda: ["*"])
+    allowed_judges: List[str] = Field(default_factory=lambda: ["*"])
     rate_limit_rpm: Optional[int] = None
     rate_limit_tpm: Optional[int] = None
     request_limit: Optional[int] = None
@@ -559,6 +710,7 @@ class RouterApiKeyUpdate(BaseModel):
     allowed_models: Optional[List[str]] = None
     allowed_routes: Optional[List[str]] = None
     allowed_fusions: Optional[List[str]] = None
+    allowed_judges: Optional[List[str]] = None
     rate_limit_rpm: Optional[int] = None
     rate_limit_tpm: Optional[int] = None
     request_limit: Optional[int] = None
@@ -575,6 +727,7 @@ class RouterApiKeyRead(BaseModel):
     allowed_models: List[str]
     allowed_routes: List[str]
     allowed_fusions: List[str]
+    allowed_judges: List[str] = Field(default_factory=lambda: ["*"])
     rate_limit_rpm: Optional[int] = None
     rate_limit_tpm: Optional[int] = None
     request_limit: Optional[int] = None
@@ -647,6 +800,7 @@ class DashboardStats(BaseModel):
     total_models: int
     total_routes: int
     total_fusions: int
+    total_judges: int = 0
     requests_24h: int
     fallbacks_24h: int = 0
     success_rate_24h: float

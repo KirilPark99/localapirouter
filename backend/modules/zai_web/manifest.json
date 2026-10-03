@@ -1,0 +1,68 @@
+{
+  "id": "zai_web",
+  "name": "Z.ai Web Chat",
+  "version": "1.2.0",
+  "description": "Zhipu AI consumer web chat at chat.z.ai with JWT authentication, custom HMAC signing protocol, and Deep Think reasoning support.",
+  "author": "Omniroute Port",
+  "icon": "Bot",
+  "auth_type": "bearer",
+  "fields": [
+    {
+      "key": "token",
+      "label": "Z.ai Web Token",
+      "type": "password",
+      "required": true,
+      "placeholder": "JWT token from chat.z.ai localStorage",
+      "description": "DevTools → Application → Local Storage → https://chat.z.ai → token"
+    },
+    {
+      "key": "captcha_verify_param",
+      "label": "CAPTCHA Verify Param",
+      "type": "password",
+      "required": false,
+      "placeholder": "captcha_verify_param from Network inspection",
+      "description": "DevTools → Network → Filter 'chat/completions' → Payload → captcha_verify_param. Required by chat.z.ai when CAPTCHA is enabled."
+    }
+  ],
+  "default_models": [
+    {
+      "id": "glm-5.3",
+      "name": "GLM-5.3 (Z.ai)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "glm-5.3-flash",
+      "name": "GLM-5.3-Flash (Z.ai)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "glm-5.2",
+      "name": "GLM-5.2 (Z.ai)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": true,
+        "reasoning": true
+      }
+    }
+  ]
+}

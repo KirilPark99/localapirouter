@@ -1,0 +1,96 @@
+{
+  "id": "deepseek_web",
+  "name": "DeepSeek Web Chat",
+  "version": "1.0.0",
+  "description": "Reverse-engineered DeepSeek Web chat module based on OmniRoute architecture. Features DeepSeekHashV1 WASM PoW solver, R1 reasoning/thinking support, web search citations, multi-turn history window, and proxy routing.",
+  "author": "Omniroute Port",
+  "icon": "Bot",
+  "auth_type": "custom_fields",
+  "fields": [
+    {
+      "key": "user_token",
+      "label": "DeepSeek userToken",
+      "type": "password",
+      "required": true,
+      "placeholder": "userToken from chat.deepseek.com localStorage",
+      "description": "DevTools (F12) → Application → Local Storage → https://chat.deepseek.com → userToken"
+    },
+    {
+      "key": "persist_session",
+      "label": "Persist Session",
+      "type": "select",
+      "required": false,
+      "default": "false",
+      "options": [
+        { "label": "No (Fresh session per request - recommended)", "value": "false" },
+        { "label": "Yes (Reuse session on DeepSeek server)", "value": "true" }
+      ],
+      "description": "Reusing upstream session keeps chat context on server. May fail if deleted in DeepSeek web UI."
+    },
+    {
+      "key": "history_window",
+      "label": "History Window Size",
+      "type": "number",
+      "required": false,
+      "default": 20,
+      "placeholder": "20",
+      "description": "Number of recent turns to fold into the rolling prompt transcript (default: 20)."
+    }
+  ],
+  "default_models": [
+    {
+      "id": "deepseek-chat",
+      "name": "DeepSeek V3 (Chat Web)",
+      "context_length": 64000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": true,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "deepseek-reasoner",
+      "name": "DeepSeek R1 (Reasoner Web)",
+      "context_length": 64000,
+      "max_output_tokens": 8192,
+      "reasoning_effort": "high",
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "deepseek-search",
+      "name": "DeepSeek Chat + Web Search",
+      "context_length": 64000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": true,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "deepseek-reasoner-search",
+      "name": "DeepSeek R1 + Web Search",
+      "context_length": 64000,
+      "max_output_tokens": 8192,
+      "reasoning_effort": "high",
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": true,
+        "reasoning": true
+      }
+    }
+  ]
+}

@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db, AsyncSessionLocal, _safe_close_session
 from app.api.deps import get_router_key_dep
-from app.models.entities import RouterApiKey, DiscoveredModel, RoutingProfile, FusionProfile, Provider
+from app.models.entities import RouterApiKey, DiscoveredModel, RoutingProfile, FusionProfile, JudgeProfile, Provider
 from app.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -21,6 +21,7 @@ from app.schemas.entities import ModelListResponse, ModelCard
 from app.schemas.jev import JevRequest, JevResponse
 from app.routing.engine import RoutingEngine
 from app.fusion.engine import FusionEngine
+from app.judge.engine import JudgeEngine
 from app.jev.engine import JevEngine
 from app.core.errors import RouterException
 
@@ -81,6 +82,16 @@ async def list_models(
                 continue
             cards.append(ModelCard(id=f"fusion/{f.slug}", root=f"fusion/{f.slug}"))
 
+    # 4. Judge Profiles
+    if not router_key or "judge" in router_key.permissions or "routes" in router_key.permissions:
+        j_query = select(JudgeProfile).where(JudgeProfile.enabled == True)
+        j_res = await db.execute(j_query)
+        for j in j_res.scalars().all():
+            allowed_j = getattr(router_key, "allowed_judges", ["*"]) or ["*"]
+            if router_key and "*" not in allowed_j and j.slug not in allowed_j:
+                continue
+            cards.append(ModelCard(id=f"judge/{j.slug}", root=f"judge/{j.slug}"))
+
     # Deduplicate cards by id
     seen = set()
     unique_cards = []
@@ -124,6 +135,20 @@ async def retrieve_model(
         profile = f_res.scalar_one_or_none()
         if profile:
             return ModelCard(id=f"fusion/{profile.slug}", root=f"fusion/{profile.slug}")
+
+    # 3. Judge profile
+    if m_id.startswith("judge/") or m_id.startswith("smart/"):
+        slug = m_id.removeprefix("judge/").removeprefix("smart/")
+        if router_key:
+            if "judge" not in router_key.permissions and "routes" not in router_key.permissions:
+                return JSONResponse(status_code=403, content={"error": {"message": "Forbidden", "type": "auth_error"}})
+            allowed_j = getattr(router_key, "allowed_judges", ["*"]) or ["*"]
+            if "*" not in allowed_j and slug not in allowed_j:
+                return JSONResponse(status_code=403, content={"error": {"message": "Forbidden", "type": "auth_error"}})
+        j_res = await db.execute(select(JudgeProfile).where(JudgeProfile.slug == slug, JudgeProfile.enabled == True))
+        profile = j_res.scalar_one_or_none()
+        if profile:
+            return ModelCard(id=f"judge/{profile.slug}", root=f"judge/{profile.slug}")
 
     # 3. Discovered Model (by canonical_slug or provider_model_id)
     query = select(DiscoveredModel).where(
@@ -177,6 +202,12 @@ async def retrieve_model(
     if f_profile:
         return ModelCard(id=f"fusion/{f_profile.slug}", root=f"fusion/{f_profile.slug}")
 
+    # 4. Bare Judge profile slug
+    j_res = await db.execute(select(JudgeProfile).where(JudgeProfile.slug == m_id, JudgeProfile.enabled == True))
+    j_profile = j_res.scalar_one_or_none()
+    if j_profile:
+        return ModelCard(id=f"judge/{j_profile.slug}", root=f"judge/{j_profile.slug}")
+
     return JSONResponse(
         status_code=404,
         content={
@@ -193,7 +224,7 @@ async def _resolve_is_fusion(model_str: str, db: Optional[AsyncSession] = None) 
     """Returns (is_fusion, normalized_model_str). Handles explicit 'fusion/slug' and bare slug."""
     if model_str.startswith("fusion/"):
         return True, model_str
-    if model_str.startswith("route/"):
+    if model_str.startswith("route/") or model_str.startswith("judge/") or model_str.startswith("smart/"):
         return False, model_str
 
     from app.services.fusion_service import FusionService
@@ -202,6 +233,28 @@ async def _resolve_is_fusion(model_str: str, db: Optional[AsyncSession] = None) 
         f_prof = await FusionService.get_profile_by_slug(session, model_str)
         if f_prof and f_prof.enabled:
             return True, f"fusion/{f_prof.slug}"
+    except Exception:
+        pass
+    finally:
+        if db is None:
+            await _safe_close_session(session)
+    return False, model_str
+
+async def _resolve_is_judge(model_str: str, db: Optional[AsyncSession] = None) -> tuple[bool, str]:
+    """Returns (is_judge, normalized_model_str). Handles explicit 'judge/slug', 'smart/slug', and bare slug."""
+    if model_str.startswith("judge/"):
+        return True, model_str
+    if model_str.startswith("smart/"):
+        return True, f"judge/{model_str.removeprefix('smart/')}"
+    if model_str.startswith("fusion/") or model_str.startswith("route/"):
+        return False, model_str
+
+    from app.services.judge_service import JudgeService
+    session = db if db is not None else AsyncSessionLocal()
+    try:
+        j_prof = await JudgeService.get_profile_by_slug(session, model_str)
+        if j_prof and j_prof.enabled:
+            return True, f"judge/{j_prof.slug}"
     except Exception:
         pass
     finally:
@@ -221,6 +274,11 @@ async def chat_completions(
     is_fusion, model_str = await _resolve_is_fusion(model_str, db)
     payload.model = model_str
 
+    is_judge = False
+    if not is_fusion:
+        is_judge, model_str = await _resolve_is_judge(model_str, db)
+        payload.model = model_str
+
     try:
         if is_fusion:
             if payload.stream:
@@ -237,6 +295,25 @@ async def chat_completions(
                     session = AsyncSessionLocal()
                     try:
                         return await FusionEngine.execute_fusion(
+                            db=session, request=payload, router_key=router_key, request_id=req_id
+                        )
+                    finally:
+                        await _safe_close_session(session)
+        elif is_judge:
+            if payload.stream:
+                stream_gen = JudgeEngine.execute_judge_stream(
+                    db=None, request=payload, router_key=router_key, request_id=req_id
+                )
+                return StreamingResponse(stream_gen, media_type="text/event-stream")
+            else:
+                if db is not None:
+                    return await JudgeEngine.execute_judge(
+                        db=db, request=payload, router_key=router_key, request_id=req_id
+                    )
+                else:
+                    session = AsyncSessionLocal()
+                    try:
+                        return await JudgeEngine.execute_judge(
                             db=session, request=payload, router_key=router_key, request_id=req_id
                         )
                     finally:

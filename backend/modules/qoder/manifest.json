@@ -1,0 +1,146 @@
+{
+  "id": "qoder",
+  "name": "Qoder Cloud",
+  "version": "1.0.0",
+  "description": "Qoder Cloud AI code completion and chat service with DashScope compatible mode, custom API base support, and error unwrap handling.",
+  "author": "Omniroute Port",
+  "icon": "Cpu",
+  "auth_type": "bearer",
+  "fields": [
+    {
+      "key": "api_key",
+      "label": "Qoder API Key / PAT / Token",
+      "type": "password",
+      "required": true,
+      "placeholder": "Bearer token or API Key",
+      "description": "API Key or Access Token for Qoder / DashScope"
+    },
+    {
+      "key": "api_base",
+      "label": "Custom API Base (Optional)",
+      "type": "text",
+      "required": false,
+      "placeholder": "https://api.qoder.com/v1",
+      "description": "Custom API base URL (defaults to https://api.qoder.com/v1 or DashScope)"
+    }
+  ],
+  "default_models": [
+    {
+      "id": "qwen3.8-max-preview",
+      "name": "Qwen3.8 Max Preview",
+      "context_length": 1000000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "qwen3.7-max",
+      "name": "Qwen3.7 Max",
+      "context_length": 1000000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3.7-plus",
+      "name": "Qwen3.7 Plus",
+      "context_length": 1000000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "kimi-k3",
+      "name": "Kimi K3",
+      "context_length": 1000000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "name": "Kimi K2.7 Code",
+      "context_length": 256000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "glm-5.2",
+      "name": "GLM 5.2",
+      "context_length": 1000000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro",
+      "context_length": 1000000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "name": "DeepSeek V4 Flash",
+      "context_length": 1000000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "minimax-m3",
+      "name": "MiniMax M3",
+      "context_length": 1000000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,153 @@
+{
+  "id": "kimi_web",
+  "name": "Kimi AI Web Chat",
+  "version": "1.1.0",
+  "description": "Moonshot Kimi Web consumer chat (www.kimi.ai) with Connect-RPC unary envelope framing, reasoning deltas, and multi-turn prompt folding.",
+  "author": "Omniroute Port",
+  "icon": "MessageSquare",
+  "auth_type": "bearer",
+  "fields": [
+    {
+      "key": "access_token",
+      "label": "Kimi access_token",
+      "type": "password",
+      "required": true,
+      "placeholder": "access_token from kimi.ai localStorage",
+      "description": "DevTools → Application → Local Storage → https://www.kimi.ai → access_token"
+    }
+  ],
+  "default_models": [
+    {
+      "id": "kimi-k2.8",
+      "name": "Kimi K2.8 (Web)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "kimi-k2.8-thinking",
+      "name": "Kimi K2.8 (Deep Thinking)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "reasoning_effort": "low",
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "k2d8",
+      "name": "Kimi K2.8 (Web Alias)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "k2.8",
+      "name": "Kimi K2.8 (Short)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "kimi-k3",
+      "name": "Kimi K3 (Web)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "kimi-k3-thinking",
+      "name": "Kimi K3 (Deep Thinking)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "reasoning_effort": "low",
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "k3",
+      "name": "Kimi K3 (Web Alias)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "kimi-k2.6",
+      "name": "Kimi K2.6 (Web)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "k2d6",
+      "name": "Kimi K2.6 (Web Alias)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "k2.6",
+      "name": "Kimi K2.6 (Short)",
+      "context_length": 1048576,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    }
+  ]
+}

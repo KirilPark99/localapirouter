@@ -1,7 +1,7 @@
 import os
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import httpx
 
 from app.schemas.chat import (
@@ -64,8 +64,7 @@ class ModuleExecutionContext(BaseModel):
     timeout: float = 60.0
     extra_config: Dict[str, Any] = Field(default_factory=dict)
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class BaseModuleAdapter(ABC):

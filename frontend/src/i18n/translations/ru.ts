@@ -58,6 +58,7 @@ export const ru: TranslationSchema = {
     credentials: "Учетные данные",
     models: "Каталог моделей",
     routing: "Маршрутизация",
+    judge: "Судейская маршрутизация",
     fusion: "Model Fusion",
     modules: "Модули",
     keys: "Ключи доступа",

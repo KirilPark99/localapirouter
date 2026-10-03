@@ -1,0 +1,1633 @@
+{
+  "id": "lmarena",
+  "name": "LMSYS Chatbot Arena",
+  "version": "1.1.0",
+  "description": "LMSYS Chatbot Arena direct battle chat evaluation (arena.ai) using session cookies, AI-SDK stream parsing, and direct model mappings.",
+  "author": "Omniroute Port",
+  "icon": "Layers",
+  "auth_type": "custom_fields",
+  "fields": [
+    {
+      "key": "cookie",
+      "label": "Arena Session Cookie",
+      "type": "textarea",
+      "required": true,
+      "placeholder": "arena-auth-prod-v1=... or full Cookie header from arena.ai",
+      "description": "DevTools → Application → Cookies → https://arena.ai → arena-auth-prod-v1"
+    }
+  ],
+  "default_models": [
+    {
+      "id": "gemini-3.1-pro-preview",
+      "name": "gemini-3.1-pro-preview (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "name": "gemini-3.6-flash (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5.5-instant",
+      "name": "gpt-5.5-instant (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-3-flash",
+      "name": "gemini-3-flash (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "grok-4.20-beta-0309-reasoning",
+      "name": "grok-4.20-beta-0309-reasoning (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "grok-4.20-multi-agent-beta-0309",
+      "name": "grok-4.20-multi-agent-beta-0309 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "kiteki",
+      "name": "qwen3.5-max-preview (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "glm-5",
+      "name": "glm-5 (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3.7-plus",
+      "name": "qwen3.7-plus (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5.1-high",
+      "name": "gpt-5.1-high (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "name": "gemini-3.5-flash-lite (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5.4-mini-high",
+      "name": "gpt-5.4-mini-high (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-2.5-pro",
+      "name": "gemini-2.5-pro (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "glm-4.7",
+      "name": "glm-4.7 (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "minimax-m3",
+      "name": "minimax-m3 (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5.1",
+      "name": "gpt-5.1 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5.2-high",
+      "name": "gpt-5.2-high (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5.2",
+      "name": "gpt-5.2 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5-high",
+      "name": "gpt-5-high (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-max-preview",
+      "name": "qwen3-max-preview (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "glm-5v-turbo",
+      "name": "glm-5v-turbo (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "o3-2025-04-16",
+      "name": "o3-2025-04-16 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "kimi-k2-thinking-turbo",
+      "name": "kimi-k2-thinking-turbo (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "qwen3-max-2025-09-23",
+      "name": "qwen3-max-2025-09-23 (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-235b-a22b-instruct-2507",
+      "name": "qwen3-235b-a22b-instruct-2507 (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "kimi-k2-0905-preview",
+      "name": "kimi-k2-0905-preview (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "kimi-k2-0711-preview",
+      "name": "kimi-k2-0711-preview (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3.5-122b-a10b",
+      "name": "qwen3.5-122b-a10b (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "deep-octo",
+      "name": "minimax-m2.7 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-4.1-2025-04-14",
+      "name": "gpt-4.1-2025-04-14 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "mistral-large-3",
+      "name": "mistral-large-3 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "name": "claude-haiku-4-5-20251001 (Arena)",
+      "context_length": 200000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-vl-235b-a22b-instruct",
+      "name": "qwen3-vl-235b-a22b-instruct (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "name": "gemini-2.5-flash (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3.5-27b",
+      "name": "qwen3.5-27b (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "mistral-medium-2508",
+      "name": "mistral-medium-2508 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "inkling-small",
+      "name": "inkling-small (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-235b-a22b-no-thinking",
+      "name": "qwen3-235b-a22b-no-thinking (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.4-nano-high",
+      "name": "gpt-5.4-nano-high (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "longcat-flash-chat",
+      "name": "longcat-flash-chat (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-235b-a22b-thinking-2507",
+      "name": "qwen3-235b-a22b-thinking-2507 (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "qwen3-next-80b-a3b-instruct",
+      "name": "qwen3-next-80b-a3b-instruct (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3.5-flash",
+      "name": "qwen3.5-flash (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-vl-235b-a22b-thinking",
+      "name": "qwen3-vl-235b-a22b-thinking (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "hunyuan-vision-1.5-thinking",
+      "name": "hunyuan-vision-1.5-thinking (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "qwen3.5-35b-a3b",
+      "name": "qwen3.5-35b-a3b (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "step-3.5-flash",
+      "name": "step-3.5-flash (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "minimax-m2.5",
+      "name": "minimax-m2.5 (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "o4-mini-2025-04-16",
+      "name": "o4-mini-2025-04-16 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5-mini-high",
+      "name": "gpt-5-mini-high (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-coder-480b-a35b-instruct",
+      "name": "qwen3-coder-480b-a35b-instruct (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "minimax-m2.1-preview",
+      "name": "minimax-m2.1-preview (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-4.1-mini-2025-04-14",
+      "name": "gpt-4.1-mini-2025-04-14 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-30b-a3b-instruct-2507",
+      "name": "qwen3-30b-a3b-instruct-2507 (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "trinity-large",
+      "name": "trinity-large-preview (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-235b-a22b",
+      "name": "qwen3-235b-a22b (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-next-80b-a3b-thinking",
+      "name": "qwen3-next-80b-a3b-thinking (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "trinity-large-thinking",
+      "name": "trinity-large-thinking (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemma-3-27b-it",
+      "name": "gemma-3-27b-it (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "minimax-m1",
+      "name": "minimax-m1 (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-2.0-flash-001",
+      "name": "gemini-2.0-flash-001 (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "intellect-3",
+      "name": "intellect-3 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-oss-120b",
+      "name": "gpt-oss-120b (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "o3-mini",
+      "name": "o3-mini (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "ling-flash-2.0",
+      "name": "ling-flash-2.0 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "minimax-m2",
+      "name": "minimax-m2 (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "mercury-2",
+      "name": "mercury-2 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5-nano-high",
+      "name": "gpt-5-nano-high (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwq-32b",
+      "name": "qwq-32b (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "nova-2-lite",
+      "name": "nova-2-lite (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-30b-a3b",
+      "name": "qwen3-30b-a3b (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "ring-flash-2.0",
+      "name": "ring-flash-2.0 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-oss-20b",
+      "name": "gpt-oss-20b (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemma-3n-e4b-it",
+      "name": "gemma-3n-e4b-it (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "nvidia-nemotron-3-nano-30b-a3b-bf16",
+      "name": "nvidia-nemotron-3-nano-30b-a3b-bf16 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "mercury",
+      "name": "mercury (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "granite-4.1-8b",
+      "name": "granite-4.1-8b (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "ibm-granite-h-small",
+      "name": "ibm-granite-h-small (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "Max",
+      "name": "Max (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "amazon.nova-pro-v1:0",
+      "name": "amazon.nova-pro-v1:0 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "august26-chatbot1",
+      "name": "nvidia-nemotron-3.5-lightning-30b-a3b-nvfp4 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "claude-sonnet-5",
+      "name": "claude-sonnet-5-high (Arena)",
+      "context_length": 200000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "deepseek-v4-flash-max",
+      "name": "deepseek-v4.1-flash-max (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-3-flash (thinking-minimal)",
+      "name": "gemini-3-flash (thinking-minimal) (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.1-flash-lite",
+      "name": "gemini-3.1-flash-lite (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "name": "gemini-3.5-flash (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-3.5-flash-high",
+      "name": "gemini-3.5-flash-high (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "name": "gemini-3.7-flash (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gemini-3.8-flash-high",
+      "name": "gemini-3.8-flash-high (Arena)",
+      "context_length": 1000000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "glm-5.1",
+      "name": "glm-5.2 (max) (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5-high-new-system-prompt",
+      "name": "gpt-5-high-new-system-prompt (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "grok-4.3",
+      "name": "grok-4.5 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "grok-4.6",
+      "name": "grok-4.6-medium (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "inkling-low",
+      "name": "inkling-low (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "inkling-medium",
+      "name": "inkling-medium (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "inkling-small-low",
+      "name": "inkling-small-low (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "inkling-small-medium",
+      "name": "inkling-small-medium (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "kizen-alpha",
+      "name": "qwen3.6-max-preview (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "ling-2.5-1t",
+      "name": "ling-2.5-1t (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "longcat-2.0",
+      "name": "longcat-2.0 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "march26-chatbot1-public",
+      "name": "nvidia-nemotron-3-super-120b-a12b (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "may-alpha",
+      "name": "qwen3.7-plus-preview (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "may26-chatbot4-public",
+      "name": "nvidia-nemotron-3-ultra-550b-a55b-nvfp4 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "melyora",
+      "name": "qwen3.7-max-preview (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "mimo-v2.5",
+      "name": "mimo-v2.5 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "mimo-v2.5-pro",
+      "name": "mimo-v2.5-pro (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "minimax-m2-preview",
+      "name": "minimax-m2-preview (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "mistral-medium-3.5",
+      "name": "mistral-medium-3.5 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "onyx-v1-4",
+      "name": "muse-glimmer (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "pteronura",
+      "name": "gemma-4-31b (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen-vl-max-2025-08-13",
+      "name": "qwen-vl-max-2025-08-13 (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-max-2025-09-26",
+      "name": "qwen3-max-2025-09-26 (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-max-thinking",
+      "name": "qwen3-max-thinking (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "qwen3-omni-flash",
+      "name": "qwen3-omni-flash (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-vl-8b-instruct",
+      "name": "qwen3-vl-8b-instruct (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3-vl-8b-thinking",
+      "name": "qwen3-vl-8b-thinking (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "qwen3.5-397b-a17b",
+      "name": "qwen3.5-397b-a17b (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3.6-27b",
+      "name": "qwen3.6-27b (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3.6-plus",
+      "name": "qwen3.6-plus (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "qwen3.7-max",
+      "name": "qwen3.7-max (Arena)",
+      "context_length": 131072,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "ring-2.5-1t",
+      "name": "ring-2.5-1t (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "significant-otter",
+      "name": "gemma-4-26b-a4b (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "solar-pro4",
+      "name": "solar-pro4 (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 16384,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "step-5-preview",
+      "name": "step-5-preview (Arena)",
+      "context_length": 128000,
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": false,
+        "reasoning": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,994 @@
+{
+  "Max": {
+    "arenaId": "019b24bb-5caf-71c3-b854-37d0c7086f21",
+    "name": "Max (Arena)",
+    "organization": "boss-bandit",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "gemini-3.1-pro-preview": {
+    "arenaId": "019c7820-5480-78b6-9fef-04c0d7004054",
+    "name": "gemini-3.1-pro-preview (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 18
+  },
+  "gemini-3.6-flash": {
+    "arenaId": "019f90b1-c0ac-71ce-b295-487f261bf0f4",
+    "name": "gemini-3.6-flash (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 22
+  },
+  "gpt-5.5-instant": {
+    "arenaId": "019e71ea-1e1d-740f-9c2d-dab5869ff108",
+    "name": "gpt-5.5-instant (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 40
+  },
+  "gemini-3-flash": {
+    "arenaId": "019b47da-49b9-7295-906c-ce44ccd30d74",
+    "name": "gemini-3-flash (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 42
+  },
+  "grok-4.20-beta-0309-reasoning": {
+    "arenaId": "019ce35a-fa6f-7262-8ee2-ed4442821ce7",
+    "name": "grok-4.20-beta-0309-reasoning (Arena)",
+    "organization": "xai",
+    "vision": true,
+    "reasoning": true,
+    "rank": 44
+  },
+  "grok-4.20-multi-agent-beta-0309": {
+    "arenaId": "019ceb00-ae9a-7aa3-98d8-25713be55d80",
+    "name": "grok-4.20-multi-agent-beta-0309 (Arena)",
+    "organization": "xai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 46
+  },
+  "kiteki": {
+    "arenaId": "019cddbe-a52e-720f-9398-0f40a2914b99",
+    "name": "qwen3.5-max-preview (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 54
+  },
+  "glm-5": {
+    "arenaId": "019c45d7-96f0-7d39-8143-9d57941b5523",
+    "name": "glm-5 (Arena)",
+    "organization": "zai",
+    "vision": false,
+    "reasoning": false,
+    "rank": 63
+  },
+  "qwen3.7-plus": {
+    "arenaId": "019e86fe-167d-77bd-94a8-df7aee4f4551",
+    "name": "qwen3.7-plus (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": false,
+    "rank": 68
+  },
+  "gpt-5.1-high": {
+    "arenaId": "019a8548-a2b1-70ce-b1be-eba096d41f58",
+    "name": "gpt-5.1-high (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 69
+  },
+  "gemini-3.5-flash-lite": {
+    "arenaId": "019f90b1-cae9-786a-91a2-f3ee4c6cbf61",
+    "name": "gemini-3.5-flash-lite (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 71
+  },
+  "gpt-5.4-mini-high": {
+    "arenaId": "019cfcdd-5426-777e-8314-04619cb92cc4",
+    "name": "gpt-5.4-mini-high (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 83
+  },
+  "gemini-2.5-pro": {
+    "arenaId": "0199f060-b306-7e1f-aeae-0ebb4e3f1122",
+    "name": "gemini-2.5-pro (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 85
+  },
+  "glm-4.7": {
+    "arenaId": "019becd0-af81-7883-a7ca-5c4a4e42ff7a",
+    "name": "glm-4.7 (Arena)",
+    "organization": "zai",
+    "vision": false,
+    "reasoning": false,
+    "rank": 92
+  },
+  "minimax-m3": {
+    "arenaId": "019e809d-f62d-7192-bb7f-1657e066b5f2",
+    "name": "minimax-m3 (Arena)",
+    "organization": "minimax",
+    "vision": true,
+    "reasoning": false,
+    "rank": 95
+  },
+  "gpt-5.1": {
+    "arenaId": "019a7ebf-0f3f-7518-8899-fca13e32d9dc",
+    "name": "gpt-5.1 (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 96
+  },
+  "gpt-5.2-high": {
+    "arenaId": "019b1449-0313-7911-b836-419e2ed79b2e",
+    "name": "gpt-5.2-high (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 100
+  },
+  "gpt-5.2": {
+    "arenaId": "019b1448-ff14-7c98-a1ac-726fece799ec",
+    "name": "gpt-5.2 (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 103
+  },
+  "gpt-5-high": {
+    "arenaId": "983bc566-b783-4d28-b24c-3c8b08eb1086",
+    "name": "gpt-5-high (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 104
+  },
+  "qwen3-max-preview": {
+    "arenaId": "019b9784-470e-75b9-b2fb-f005d78972e1",
+    "name": "qwen3-max-preview (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 105
+  },
+  "glm-5v-turbo": {
+    "arenaId": "019d4a09-9651-78cb-86ea-bb0fa5ec77f4",
+    "name": "glm-5v-turbo (Arena)",
+    "organization": "zai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 107
+  },
+  "o3-2025-04-16": {
+    "arenaId": "cb0f1e24-e8e9-4745-aabc-b926ffde7475",
+    "name": "o3-2025-04-16 (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": true,
+    "rank": 109
+  },
+  "kimi-k2-thinking-turbo": {
+    "arenaId": "019a59bc-8bb8-7933-92eb-fe143770c211",
+    "name": "kimi-k2-thinking-turbo (Arena)",
+    "organization": "moonshot",
+    "vision": false,
+    "reasoning": true,
+    "rank": 113
+  },
+  "qwen3-max-2025-09-23": {
+    "arenaId": "98ad8b8b-12cd-46cd-98de-99edde7e03eb",
+    "name": "qwen3-max-2025-09-23 (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 123
+  },
+  "qwen3-235b-a22b-instruct-2507": {
+    "arenaId": "ee7cb86e-8601-4585-b1d0-7c7380f8f6f4",
+    "name": "qwen3-235b-a22b-instruct-2507 (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 125
+  },
+  "kimi-k2-0905-preview": {
+    "arenaId": "b88e983b-9459-473d-8bf1-753932f1679a",
+    "name": "kimi-k2-0905-preview (Arena)",
+    "organization": "moonshot",
+    "vision": false,
+    "reasoning": false,
+    "rank": 130
+  },
+  "kimi-k2-0711-preview": {
+    "arenaId": "7a3626fc-4e64-4c9e-821f-b449a4b43b6a",
+    "name": "kimi-k2-0711-preview (Arena)",
+    "organization": "moonshot",
+    "vision": false,
+    "reasoning": false,
+    "rank": 131
+  },
+  "qwen3.5-122b-a10b": {
+    "arenaId": "019c9270-083e-72b7-9bb6-ef32fe092f51",
+    "name": "qwen3.5-122b-a10b (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": false,
+    "rank": 134
+  },
+  "deep-octo": {
+    "arenaId": "019cf4e3-36a5-75a8-811d-1eaf867e3d0d",
+    "name": "minimax-m2.7 (Arena)",
+    "organization": "minimax",
+    "vision": false,
+    "reasoning": false,
+    "rank": 136
+  },
+  "gpt-4.1-2025-04-14": {
+    "arenaId": "14e9311c-94d2-40c2-8c54-273947e208b0",
+    "name": "gpt-4.1-2025-04-14 (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 138
+  },
+  "mistral-large-3": {
+    "arenaId": "019acbac-df7c-73dc-9716-ebe040daaa4e",
+    "name": "mistral-large-3 (Arena)",
+    "organization": "mistral",
+    "vision": true,
+    "reasoning": false,
+    "rank": 140
+  },
+  "claude-haiku-4-5-20251001": {
+    "arenaId": "0199e8e9-01ed-73e0-96ba-cf43b286bf10",
+    "name": "claude-haiku-4-5-20251001 (Arena)",
+    "organization": "anthropic",
+    "vision": false,
+    "reasoning": false,
+    "rank": 141
+  },
+  "qwen3-vl-235b-a22b-instruct": {
+    "arenaId": "716aa8ca-d729-427f-93ab-9579e4a13e98",
+    "name": "qwen3-vl-235b-a22b-instruct (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": false,
+    "rank": 142
+  },
+  "gemini-2.5-flash": {
+    "arenaId": "0199f059-3877-7cfe-bc80-e01b1a4a83de",
+    "name": "gemini-2.5-flash (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 147
+  },
+  "qwen3.5-27b": {
+    "arenaId": "019c9240-6a0f-704e-954a-0d1e3b1b660c",
+    "name": "qwen3.5-27b (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": false,
+    "rank": 149
+  },
+  "mistral-medium-2508": {
+    "arenaId": "27035fb8-a25b-4ec9-8410-34be18328afd",
+    "name": "mistral-medium-2508 (Arena)",
+    "organization": "mistral",
+    "vision": true,
+    "reasoning": false,
+    "rank": 150
+  },
+  "inkling-small": {
+    "arenaId": "019fb49a-925f-7b4d-b89a-66ef7de2116d",
+    "name": "inkling-small (Arena)",
+    "organization": "thinky",
+    "vision": true,
+    "reasoning": false,
+    "rank": 151
+  },
+  "qwen3-235b-a22b-no-thinking": {
+    "arenaId": "1a400d9a-f61c-4bc2-89b4-a9b7e77dff12",
+    "name": "qwen3-235b-a22b-no-thinking (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": true,
+    "rank": 154
+  },
+  "gpt-5.4-nano-high": {
+    "arenaId": "019cfcdd-0bca-706f-92b5-a4c4cbd022d8",
+    "name": "gpt-5.4-nano-high (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 157
+  },
+  "longcat-flash-chat": {
+    "arenaId": "6fcbe051-f521-4dc7-8986-c429eb6191bf",
+    "name": "longcat-flash-chat (Arena)",
+    "organization": "meituan",
+    "vision": false,
+    "reasoning": false,
+    "rank": 158
+  },
+  "qwen3-235b-a22b-thinking-2507": {
+    "arenaId": "16b8e53a-cc7b-4608-a29a-20d4dac77cf2",
+    "name": "qwen3-235b-a22b-thinking-2507 (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": true,
+    "rank": 159
+  },
+  "qwen3-next-80b-a3b-instruct": {
+    "arenaId": "351fe482-eb6c-4536-857b-909e16c0bf52",
+    "name": "qwen3-next-80b-a3b-instruct (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 160
+  },
+  "qwen3.5-flash": {
+    "arenaId": "019c9aff-e04b-746b-82bd-9c771362bcd9",
+    "name": "qwen3.5-flash (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": false,
+    "rank": 162
+  },
+  "qwen3-vl-235b-a22b-thinking": {
+    "arenaId": "03c511f5-0d35-4751-aae6-24f918b0d49e",
+    "name": "qwen3-vl-235b-a22b-thinking (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": true,
+    "rank": 164
+  },
+  "hunyuan-vision-1.5-thinking": {
+    "arenaId": "6a3a1e04-050e-4cb4-9052-b9ac4bec0c38",
+    "name": "hunyuan-vision-1.5-thinking (Arena)",
+    "organization": "tencent",
+    "vision": true,
+    "reasoning": true,
+    "rank": 165
+  },
+  "qwen3.5-35b-a3b": {
+    "arenaId": "019c9254-5c32-70d0-8877-afdfd3590e1d",
+    "name": "qwen3.5-35b-a3b (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": false,
+    "rank": 167
+  },
+  "step-3.5-flash": {
+    "arenaId": "019d22bb-fcf5-7866-9c07-de74fe05c9cc",
+    "name": "step-3.5-flash (Arena)",
+    "organization": "stepfun",
+    "vision": false,
+    "reasoning": false,
+    "rank": 168
+  },
+  "minimax-m2.5": {
+    "arenaId": "019c52a8-650a-7a55-b321-7fbc1c56588b",
+    "name": "minimax-m2.5 (Arena)",
+    "organization": "minimax",
+    "vision": false,
+    "reasoning": false,
+    "rank": 170
+  },
+  "o4-mini-2025-04-16": {
+    "arenaId": "f1102bbf-34ca-468f-a9fc-14bcf63f315b",
+    "name": "o4-mini-2025-04-16 (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 171
+  },
+  "gpt-5-mini-high": {
+    "arenaId": "5fd3caa8-fe4c-41a5-a22c-0025b58f4b42",
+    "name": "gpt-5-mini-high (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 173
+  },
+  "qwen3-coder-480b-a35b-instruct": {
+    "arenaId": "af033cbd-ec6c-42cc-9afa-e227fc12efe8",
+    "name": "qwen3-coder-480b-a35b-instruct (Arena)",
+    "organization": "Alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 177
+  },
+  "minimax-m2.1-preview": {
+    "arenaId": "019b4231-1994-75a1-8567-8cba308fba55",
+    "name": "minimax-m2.1-preview (Arena)",
+    "organization": "minimax",
+    "vision": false,
+    "reasoning": false,
+    "rank": 181
+  },
+  "gpt-4.1-mini-2025-04-14": {
+    "arenaId": "6a5437a7-c786-467b-b701-17b0bc8c8231",
+    "name": "gpt-4.1-mini-2025-04-14 (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 182
+  },
+  "qwen3-30b-a3b-instruct-2507": {
+    "arenaId": "a8d1d310-e485-4c50-8f27-4bff18292a99",
+    "name": "qwen3-30b-a3b-instruct-2507 (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 184
+  },
+  "trinity-large": {
+    "arenaId": "019c6e9c-b7f1-774b-8674-b0a795a49d8b",
+    "name": "trinity-large-preview (Arena)",
+    "organization": "arcee-ai",
+    "vision": false,
+    "reasoning": false,
+    "rank": 187
+  },
+  "qwen3-235b-a22b": {
+    "arenaId": "2595a594-fa54-4299-97cd-2d7380d21c80",
+    "name": "qwen3-235b-a22b (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 188
+  },
+  "qwen3-next-80b-a3b-thinking": {
+    "arenaId": "73cf8705-98c8-4b75-8d04-e3746e1c1565",
+    "name": "qwen3-next-80b-a3b-thinking (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": true,
+    "rank": 194
+  },
+  "trinity-large-thinking": {
+    "arenaId": "019d50aa-447d-74d6-8661-405b4b6de5de",
+    "name": "trinity-large-thinking (Arena)",
+    "organization": "arcee-ai",
+    "vision": false,
+    "reasoning": true,
+    "rank": 195
+  },
+  "gemma-3-27b-it": {
+    "arenaId": "789e245f-eafe-4c72-b563-d135e93988fc",
+    "name": "gemma-3-27b-it (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 196
+  },
+  "minimax-m1": {
+    "arenaId": "87e8d160-049e-4b4e-adc4-7f2511348539",
+    "name": "minimax-m1 (Arena)",
+    "organization": "minimax",
+    "vision": false,
+    "reasoning": false,
+    "rank": 199
+  },
+  "gemini-2.0-flash-001": {
+    "arenaId": "7a55108b-b997-4cff-a72f-5aa83beee918",
+    "name": "gemini-2.0-flash-001 (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 203
+  },
+  "intellect-3": {
+    "arenaId": "019aebfd-af0e-7f0c-8f0d-96c588e4cd3b",
+    "name": "intellect-3 (Arena)",
+    "organization": "prime-intellect",
+    "vision": false,
+    "reasoning": false,
+    "rank": 207
+  },
+  "gpt-oss-120b": {
+    "arenaId": "6ee9f901-17b5-4fbe-9cc2-13c16497c23b",
+    "name": "gpt-oss-120b (Arena)",
+    "organization": "openai",
+    "vision": false,
+    "reasoning": false,
+    "rank": 211
+  },
+  "o3-mini": {
+    "arenaId": "c680645e-efac-4a81-b0af-da16902b2541",
+    "name": "o3-mini (Arena)",
+    "organization": "openai",
+    "vision": false,
+    "reasoning": true,
+    "rank": 217
+  },
+  "ling-flash-2.0": {
+    "arenaId": "71f96ca9-4cf8-4be7-bac2-2231613930a6",
+    "name": "ling-flash-2.0 (Arena)",
+    "organization": "ant-group",
+    "vision": false,
+    "reasoning": false,
+    "rank": 223
+  },
+  "minimax-m2": {
+    "arenaId": "019a27e0-e7d8-7b0b-877c-a2106c6eb87d",
+    "name": "minimax-m2 (Arena)",
+    "organization": "minimax",
+    "vision": false,
+    "reasoning": false,
+    "rank": 224
+  },
+  "mercury-2": {
+    "arenaId": "019cc65f-c1e3-7574-b332-898ab71c8211",
+    "name": "mercury-2 (Arena)",
+    "organization": "inception-ai",
+    "vision": false,
+    "reasoning": false,
+    "rank": 225
+  },
+  "gpt-5-nano-high": {
+    "arenaId": "2dc249b3-98da-44b4-8d1e-6666346a8012",
+    "name": "gpt-5-nano-high (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 232
+  },
+  "qwq-32b": {
+    "arenaId": "885976d3-d178-48f5-a3f4-6e13e0718872",
+    "name": "qwq-32b (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 235
+  },
+  "nova-2-lite": {
+    "arenaId": "019ae300-83b7-7717-a1e0-31accd1ff6fa",
+    "name": "nova-2-lite (Arena)",
+    "organization": "amazon",
+    "vision": false,
+    "reasoning": false,
+    "rank": 239
+  },
+  "qwen3-30b-a3b": {
+    "arenaId": "9a066f6a-7205-4325-8d0b-d81cc4b049c0",
+    "name": "qwen3-30b-a3b (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 246
+  },
+  "ring-flash-2.0": {
+    "arenaId": "11ad4114-c868-4fed-b6e7-d535dc9c62f8",
+    "name": "ring-flash-2.0 (Arena)",
+    "organization": "ant-group",
+    "vision": false,
+    "reasoning": false,
+    "rank": 252
+  },
+  "gpt-oss-20b": {
+    "arenaId": "ec3beb4b-7229-4232-bab9-670ee52dd711",
+    "name": "gpt-oss-20b (Arena)",
+    "organization": "openai",
+    "vision": false,
+    "reasoning": false,
+    "rank": 262
+  },
+  "gemma-3n-e4b-it": {
+    "arenaId": "896a3848-ae03-4651-963b-7d8f54b61ae8",
+    "name": "gemma-3n-e4b-it (Arena)",
+    "organization": "google",
+    "vision": false,
+    "reasoning": false,
+    "rank": 263
+  },
+  "nvidia-nemotron-3-nano-30b-a3b-bf16": {
+    "arenaId": "019b0aa7-334a-78e8-b2a8-885f31f4fc0c",
+    "name": "nvidia-nemotron-3-nano-30b-a3b-bf16 (Arena)",
+    "organization": "nvidia",
+    "vision": false,
+    "reasoning": false,
+    "rank": 267
+  },
+  "mercury": {
+    "arenaId": "019a6f77-e20d-7c1d-a7cd-8bd926e7395d",
+    "name": "mercury (Arena)",
+    "organization": "inception-ai",
+    "vision": false,
+    "reasoning": false,
+    "rank": 277
+  },
+  "granite-4.1-8b": {
+    "arenaId": "019de522-c5eb-722f-a907-c79891cc6795",
+    "name": "granite-4.1-8b (Arena)",
+    "organization": "ibm",
+    "vision": false,
+    "reasoning": false,
+    "rank": 279
+  },
+  "ibm-granite-h-small": {
+    "arenaId": "4ddb69f5-391a-4f78-af92-7d7328c18ab1",
+    "name": "ibm-granite-h-small (Arena)",
+    "organization": "ibm",
+    "vision": false,
+    "reasoning": false,
+    "rank": 293
+  },
+  "qwen3.6-plus": {
+    "arenaId": "019d688c-b540-75ff-994d-338e3aec20ce",
+    "name": "qwen3.6-plus (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "grok-4.6": {
+    "arenaId": "019ff69d-0234-7d00-a218-8fefcc9b7a9d",
+    "name": "grok-4.6-medium (Arena)",
+    "organization": "xai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "qwen3.5-397b-a17b": {
+    "arenaId": "019c6918-1d2a-7e3f-88ec-ada000b6ab16",
+    "name": "qwen3.5-397b-a17b (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "qwen3-vl-8b-instruct": {
+    "arenaId": "0199e3d1-a713-7de2-a5dd-a1583cad9532",
+    "name": "qwen3-vl-8b-instruct (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "gemini-3-flash (thinking-minimal)": {
+    "arenaId": "019b5265-8405-799e-87af-199dc9f4ad4a",
+    "name": "gemini-3-flash (thinking-minimal) (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": true,
+    "rank": 999
+  },
+  "march26-chatbot1-public": {
+    "arenaId": "019cd9e3-c3ff-7225-92f2-c392259b1fbe",
+    "name": "nvidia-nemotron-3-super-120b-a12b (Arena)",
+    "organization": "nvidia",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "onyx-v1-4": {
+    "arenaId": "019fb542-0691-7552-89b9-198fbe5da905",
+    "name": "muse-glimmer (Arena)",
+    "organization": "meta",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "ling-2.5-1t": {
+    "arenaId": "019c6e76-fbbc-7e92-b0ba-784c7ef3ad8b",
+    "name": "ling-2.5-1t (Arena)",
+    "organization": "ant-group",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "inkling-small-low": {
+    "arenaId": "019fba3f-d28c-7a06-a63f-871290dca150",
+    "name": "inkling-small-low (Arena)",
+    "organization": "thinky",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "gemini-3.7-flash": {
+    "arenaId": "01a03590-2058-7d1a-bae4-94295d7ad0ef",
+    "name": "gemini-3.7-flash (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "mimo-v2.5-pro": {
+    "arenaId": "019db650-909d-7dec-8711-1907d7233cd4",
+    "name": "mimo-v2.5-pro (Arena)",
+    "organization": "xiaomi",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "pteronura": {
+    "arenaId": "019d2cd2-dd83-75ab-a421-d0ba2e22b1e3",
+    "name": "gemma-4-31b (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "step-5-preview": {
+    "arenaId": "01a0cfd0-aa7c-7694-bcd1-60575944429b",
+    "name": "step-5-preview (Arena)",
+    "organization": "stepfun",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "ring-2.5-1t": {
+    "arenaId": "019c6e77-1b9f-7649-9136-43d07566c6c5",
+    "name": "ring-2.5-1t (Arena)",
+    "organization": "ant-group",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "inkling-low": {
+    "arenaId": "019f722d-ec5a-735e-bd31-51ee14c6af17",
+    "name": "inkling-low (Arena)",
+    "organization": "thinky",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "gemini-3.5-flash": {
+    "arenaId": "019ef23a-bf03-7f87-9b9e-2d5d8a974a2f",
+    "name": "gemini-3.5-flash (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "amazon.nova-pro-v1:0": {
+    "arenaId": "a14546b5-d78d-4cf6-bb61-ab5b8510a9d6",
+    "name": "amazon.nova-pro-v1:0 (Arena)",
+    "organization": "amazon",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "gemini-3.1-flash-lite": {
+    "arenaId": "019f408a-186c-7f3a-9595-4e079e42a613",
+    "name": "gemini-3.1-flash-lite (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "grok-4.3": {
+    "arenaId": "019f42aa-9c3b-76d1-8bdf-2e883b1ca227",
+    "name": "grok-4.5 (Arena)",
+    "organization": "xai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "inkling-medium": {
+    "arenaId": "019f722d-f655-7a00-8eb3-24d9be72a104",
+    "name": "inkling-medium (Arena)",
+    "organization": "thinky",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "deepseek-v4-flash-max": {
+    "arenaId": "01a088f2-2e70-71e2-9d8a-bab3d370df44",
+    "name": "deepseek-v4.1-flash-max (Arena)",
+    "organization": "deepseek",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "gemini-3.5-flash-high": {
+    "arenaId": "019f406f-fc33-7b9d-9571-7b8443bc7ca0",
+    "name": "gemini-3.5-flash-high (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "may-alpha": {
+    "arenaId": "019e222b-e8b3-7f0a-85db-daa010a64f3e",
+    "name": "qwen3.7-plus-preview (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "qwen-vl-max-2025-08-13": {
+    "arenaId": "6fe1ec40-3219-4c33-b3e7-0e65658b4194",
+    "name": "qwen-vl-max-2025-08-13 (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "gpt-5-high-new-system-prompt": {
+    "arenaId": "19ad5f04-38c6-48ae-b826-f7d5bbfd79f7",
+    "name": "gpt-5-high-new-system-prompt (Arena)",
+    "organization": "openai",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "claude-sonnet-5": {
+    "arenaId": "019f19f2-41f1-7c6d-9891-48d02fd9952c",
+    "name": "claude-sonnet-5-high (Arena)",
+    "organization": "anthropic",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "significant-otter": {
+    "arenaId": "019d2cd3-2641-7628-94bd-67ecb0a7134e",
+    "name": "gemma-4-26b-a4b (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "qwen3-omni-flash": {
+    "arenaId": "0199c9dc-e157-7458-bd49-5942363be215",
+    "name": "qwen3-omni-flash (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "qwen3-max-2025-09-26": {
+    "arenaId": "ac31e980-8bf1-4637-adba-cf9ffa8b6343",
+    "name": "qwen3-max-2025-09-26 (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "longcat-2.0": {
+    "arenaId": "019f3a0a-bd19-7b19-9eed-a98453759b48",
+    "name": "longcat-2.0 (Arena)",
+    "organization": "meituan",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "august26-chatbot1": {
+    "arenaId": "019fde64-4042-75ce-955d-90f16327afe2",
+    "name": "nvidia-nemotron-3.5-lightning-30b-a3b-nvfp4 (Arena)",
+    "organization": "nvidia",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "glm-5.1": {
+    "arenaId": "019ebf6a-94d4-7649-b704-1dbbd5eb0942",
+    "name": "glm-5.2 (max) (Arena)",
+    "organization": "zai",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "qwen3-max-thinking": {
+    "arenaId": "019bf8c6-3678-7e81-a0f7-0fe16e71d1cc",
+    "name": "qwen3-max-thinking (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": true,
+    "rank": 999
+  },
+  "kizen-alpha": {
+    "arenaId": "019daede-adf8-7f17-8545-d840f387a75c",
+    "name": "qwen3.6-max-preview (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "may26-chatbot4-public": {
+    "arenaId": "019e8ea8-2052-7f2e-b1b6-59bd94be5203",
+    "name": "nvidia-nemotron-3-ultra-550b-a55b-nvfp4 (Arena)",
+    "organization": "nvidia",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "gemini-3.8-flash-high": {
+    "arenaId": "01a0681c-b561-76b6-b338-a44ff0cff460",
+    "name": "gemini-3.8-flash-high (Arena)",
+    "organization": "google",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "solar-pro4": {
+    "arenaId": "01a03fe7-b31e-7d79-a6ee-8b82f683d02e",
+    "name": "solar-pro4 (Arena)",
+    "organization": "upstage",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "melyora": {
+    "arenaId": "019e128d-bc7d-744c-8854-67a38b15b3a1",
+    "name": "qwen3.7-max-preview (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "qwen3.6-27b": {
+    "arenaId": "019dc239-99a2-7747-9042-d1c47c8a3c24",
+    "name": "qwen3.6-27b (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "qwen3-vl-8b-thinking": {
+    "arenaId": "0199e3d1-a308-77b9-a650-41453e8ef2fb",
+    "name": "qwen3-vl-8b-thinking (Arena)",
+    "organization": "alibaba",
+    "vision": true,
+    "reasoning": true,
+    "rank": 999
+  },
+  "qwen3.7-max": {
+    "arenaId": "019e6530-f140-77b1-b6b8-5c859829d992",
+    "name": "qwen3.7-max (Arena)",
+    "organization": "alibaba",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "mimo-v2.5": {
+    "arenaId": "019db651-bd2f-7d80-ab12-d69c6bb623df",
+    "name": "mimo-v2.5 (Arena)",
+    "organization": "xiaomi",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "mistral-medium-3.5": {
+    "arenaId": "019f30a4-044d-7a14-9d3b-2e7299159e36",
+    "name": "mistral-medium-3.5 (Arena)",
+    "organization": "mistral",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  },
+  "minimax-m2-preview": {
+    "arenaId": "019a17b5-5e1e-7df6-9e1a-6c4338f8b6ff",
+    "name": "minimax-m2-preview (Arena)",
+    "organization": "minimax",
+    "vision": false,
+    "reasoning": false,
+    "rank": 999
+  },
+  "inkling-small-medium": {
+    "arenaId": "019fba3e-b802-72fd-8c5a-3d54e97a12b2",
+    "name": "inkling-small-medium (Arena)",
+    "organization": "thinky",
+    "vision": true,
+    "reasoning": false,
+    "rank": 999
+  }
+}
