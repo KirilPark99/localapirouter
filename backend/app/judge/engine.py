@@ -128,10 +128,11 @@ class JudgeEngine:
             )
             tasks = ", ".join(c.task_types) if c.task_types else "any / general"
             desc = f" | Description: {c.description}" if c.description else ""
+            thinking = f" | Reasoning Effort: {c.thinking_effort}" if c.thinking_effort else ""
             lines.append(
                 f"[Candidate Index {idx}] Label: \"{c.label}\" (Target: {target})\n"
                 f"  - Suitable Complexity: {c.complexity_level}\n"
-                f"  - Suitable Task Types: {tasks}{desc}"
+                f"  - Suitable Task Types: {tasks}{desc}{thinking}"
             )
         return "\n\n".join(lines)
 
@@ -186,9 +187,16 @@ class JudgeEngine:
             if is_jev:
                 criteria_map = {}
                 for idx, c in enumerate(active_candidates):
-                    crit_desc = f"Label: {c.label}, Complexity: {c.complexity_level}, Tasks: {', '.join(c.task_types)}."
+                    target = (
+                        f"Routing Profile 'route/{c.target_profile.slug}'"
+                        if c.candidate_type == "profile" and c.target_profile
+                        else (c.model.display_name or c.model.provider_model_id if c.model else c.label)
+                    )
+                    crit_desc = f"Label: {c.label}, Target: {target}, Complexity: {c.complexity_level}, Tasks: {', '.join(c.task_types) if c.task_types else 'any / general'}."
                     if c.description:
-                        crit_desc += f" {c.description}"
+                        crit_desc += f" Description: {c.description}."
+                    if c.thinking_effort:
+                        crit_desc += f" Reasoning Effort: {c.thinking_effort}."
                     criteria_map[f"candidate_{idx}"] = crit_desc
 
                 jev_questions = {
@@ -246,7 +254,7 @@ class JudgeEngine:
                 "\nRespond STRICTLY with a valid JSON object without any Markdown formatting or code fences:\n"
                 "{\n"
                 '  "selected_candidate_index": <int 0..' + str(len(active_candidates) - 1) + ">,\n"
-                '  "estimated_complexity": "low" | "medium" | "high",\n'
+                '  "estimated_complexity": "<string matching or describing estimated complexity, e.g. low, medium, high, or specific candidate complexity>",\n'
                 '  "detected_task_type": "<e.g. code, math, reasoning, chat, creative, etc.>",\n'
                 '  "reasoning": "<concise rationale for why this candidate was chosen>"\n'
                 "}\n"

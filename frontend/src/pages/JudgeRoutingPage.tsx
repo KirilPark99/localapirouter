@@ -47,6 +47,24 @@ export const JUDGE_TEMP_PRESETS = [
   { id: "inherit", label: "Inherit", value: null, desc: "По умолчанию" },
 ];
 
+export const REASONING_EFFORT_PRESETS = [
+  { id: "inherit", label: "Inherit", desc: "По умолчанию модели / запроса" },
+  { id: "none", label: "none (off)", desc: "Отключить рассуждения" },
+  { id: "low", label: "low", desc: "Низкий уровень" },
+  { id: "medium", label: "medium", desc: "Средний уровень" },
+  { id: "high", label: "high", desc: "Высокий уровень" },
+  { id: "auto", label: "auto", desc: "Автоматический выбор" },
+  { id: "custom", label: "Custom...", desc: "Свой вариант" },
+];
+
+export const COMPLEXITY_PRESETS = [
+  { id: "all", label: "Любая сложность (All)", desc: "Все типы запросов" },
+  { id: "low", label: "Низкая сложность (Low)", desc: "Простые вопросы, быстрый чат" },
+  { id: "medium", label: "Средняя сложность (Medium)", desc: "Аналитика, стандартный код" },
+  { id: "high", label: "Высокая сложность (High)", desc: "Глубокая логика, сложные алгоритмы" },
+  { id: "custom", label: "Свой уровень сложности (Custom)...", desc: "Пользовательский" },
+];
+
 export const TASK_TYPE_PRESETS = [
   "code",
   "math",
@@ -90,7 +108,8 @@ export const JudgeRoutingPage: React.FC = () => {
   const [formJudgeProviderId, setFormJudgeProviderId] = useState<number>(1);
   const [formJudgeCredTarget, setFormJudgeCredTarget] = useState<string>("all");
   const [formJudgeModelId, setFormJudgeModelId] = useState<number>(1);
-  const [formJudgeThinkingEffort, setFormJudgeThinkingEffort] = useState<string>("inherit");
+  const [formJudgeThinkingPreset, setFormJudgeThinkingPreset] = useState<string>("inherit");
+  const [formJudgeCustomThinking, setFormJudgeCustomThinking] = useState<string>("");
   const [formJudgeTempPreset, setFormJudgeTempPreset] = useState<string>("0.1");
   const [formJudgeCustomTemp, setFormJudgeCustomTemp] = useState<string>("");
   const [formSystemPrompt, setFormSystemPrompt] = useState("");
@@ -108,9 +127,11 @@ export const JudgeRoutingPage: React.FC = () => {
   const [candLabel, setCandLabel] = useState("");
   const [candTaskTypes, setCandTaskTypes] = useState<string[]>([]);
   const [customTagInput, setCustomTagInput] = useState("");
-  const [candComplexity, setCandComplexity] = useState<"low" | "medium" | "high" | "all">("all");
+  const [candComplexityPreset, setCandComplexityPreset] = useState<string>("all");
+  const [candCustomComplexity, setCandCustomComplexity] = useState<string>("");
   const [candDescription, setCandDescription] = useState("");
-  const [candThinkingEffort, setCandThinkingEffort] = useState<string>("inherit");
+  const [candThinkingPreset, setCandThinkingPreset] = useState<string>("inherit");
+  const [candCustomThinking, setCandCustomThinking] = useState<string>("");
   const [candTempPreset, setCandTempPreset] = useState<string>("inherit");
   const [candCustomTemp, setCandCustomTemp] = useState<string>("");
 
@@ -309,12 +330,20 @@ export const JudgeRoutingPage: React.FC = () => {
     }
     if (routingProfiles.length > 0) setFormJudgeRoutingProfileId(routingProfiles[0].id);
     setFormJudgeCredTarget("all");
-    setFormJudgeThinkingEffort("inherit");
+    setFormJudgeThinkingPreset("inherit");
+    setFormJudgeCustomThinking("");
     setFormJudgeTempPreset("0.1");
     setFormJudgeCustomTemp("");
     setFormSystemPrompt("");
     setFormFallbackCandidateId(undefined);
     setFormCandidates([]);
+
+    setCandComplexityPreset("all");
+    setCandCustomComplexity("");
+    setCandThinkingPreset("inherit");
+    setCandCustomThinking("");
+    setCandTempPreset("inherit");
+    setCandCustomTemp("");
     setIsModalOpen(true);
   };
 
@@ -349,7 +378,20 @@ export const JudgeRoutingPage: React.FC = () => {
       setFormJudgeCredTarget("all");
     }
 
-    setFormJudgeThinkingEffort(p.judge_thinking_effort || "inherit");
+    if (p.judge_thinking_effort) {
+      const match = REASONING_EFFORT_PRESETS.find((pr) => pr.id === p.judge_thinking_effort);
+      if (match && match.id !== "custom") {
+        setFormJudgeThinkingPreset(match.id);
+        setFormJudgeCustomThinking("");
+      } else {
+        setFormJudgeThinkingPreset("custom");
+        setFormJudgeCustomThinking(p.judge_thinking_effort);
+      }
+    } else {
+      setFormJudgeThinkingPreset("inherit");
+      setFormJudgeCustomThinking("");
+    }
+
     if (p.judge_temperature !== null && p.judge_temperature !== undefined) {
       const match = JUDGE_TEMP_PRESETS.find((pr) => pr.value === p.judge_temperature);
       if (match) {
@@ -367,6 +409,13 @@ export const JudgeRoutingPage: React.FC = () => {
     setFormSystemPrompt(p.system_prompt || "");
     setFormFallbackCandidateId(p.fallback_candidate_id || undefined);
     setFormCandidates([...p.candidates]);
+
+    setCandComplexityPreset("all");
+    setCandCustomComplexity("");
+    setCandThinkingPreset("inherit");
+    setCandCustomThinking("");
+    setCandTempPreset("inherit");
+    setCandCustomTemp("");
     setIsModalOpen(true);
   };
 
@@ -390,6 +439,20 @@ export const JudgeRoutingPage: React.FC = () => {
     } else if (candTempPreset !== "inherit") {
       const pr = JUDGE_TEMP_PRESETS.find((p) => p.id === candTempPreset);
       if (pr && pr.value !== null) effTemp = pr.value;
+    }
+
+    let effComplexity = "all";
+    if (candComplexityPreset === "custom") {
+      effComplexity = candCustomComplexity.trim() || "all";
+    } else {
+      effComplexity = candComplexityPreset;
+    }
+
+    let effThinking: string | null = null;
+    if (candThinkingPreset === "custom") {
+      effThinking = candCustomThinking.trim() || null;
+    } else if (candThinkingPreset !== "inherit") {
+      effThinking = candThinkingPreset;
     }
 
     const selectedModel = models.find((m) => m.id === candModelId);
@@ -417,9 +480,9 @@ export const JudgeRoutingPage: React.FC = () => {
       canonical_slug: selectedModel?.canonical_slug,
       label: candLabel.trim() || defaultLabel,
       task_types: [...candTaskTypes],
-      complexity_level: candComplexity,
+      complexity_level: effComplexity,
       description: candDescription.trim() || null,
-      thinking_effort: candThinkingEffort === "inherit" ? null : candThinkingEffort,
+      thinking_effort: effThinking,
       temperature: effTemp,
       priority_order: formCandidates.length,
       is_active: true,
@@ -429,8 +492,75 @@ export const JudgeRoutingPage: React.FC = () => {
     setCandLabel("");
     setCandTaskTypes([]);
     setCandDescription("");
-    setCandComplexity("all");
+    setCandComplexityPreset("all");
+    setCandCustomComplexity("");
+    setCandThinkingPreset("inherit");
+    setCandCustomThinking("");
     setCandTempPreset("inherit");
+    setCandCustomTemp("");
+  };
+
+  const handleEditCandidate = (index: number) => {
+    const c = formCandidates[index];
+    if (!c) return;
+
+    setCandType(c.candidate_type);
+    if (c.target_profile_id) setCandTargetProfileId(c.target_profile_id);
+    if (c.provider_id) setCandProviderId(c.provider_id);
+    if (c.model_id) setCandModelId(c.model_id);
+    if (c.credential_id) {
+      setCandCredTarget(`cred_${c.credential_id}`);
+    } else if (c.credential_group) {
+      setCandCredTarget(`group_${c.credential_group}`);
+    } else {
+      setCandCredTarget("all");
+    }
+
+    setCandLabel(c.label);
+    setCandTaskTypes([...(c.task_types || [])]);
+    setCandDescription(c.description || "");
+
+    // Complexity
+    const compPreset = COMPLEXITY_PRESETS.find((p) => p.id === c.complexity_level);
+    if (compPreset && compPreset.id !== "custom") {
+      setCandComplexityPreset(compPreset.id);
+      setCandCustomComplexity("");
+    } else {
+      setCandComplexityPreset("custom");
+      setCandCustomComplexity(c.complexity_level);
+    }
+
+    // Thinking Effort
+    if (c.thinking_effort) {
+      const thPreset = REASONING_EFFORT_PRESETS.find((p) => p.id === c.thinking_effort);
+      if (thPreset && thPreset.id !== "custom") {
+        setCandThinkingPreset(thPreset.id);
+        setCandCustomThinking("");
+      } else {
+        setCandThinkingPreset("custom");
+        setCandCustomThinking(c.thinking_effort);
+      }
+    } else {
+      setCandThinkingPreset("inherit");
+      setCandCustomThinking("");
+    }
+
+    // Temperature
+    if (c.temperature !== null && c.temperature !== undefined) {
+      const tMatch = JUDGE_TEMP_PRESETS.find((p) => p.value === c.temperature);
+      if (tMatch) {
+        setCandTempPreset(tMatch.id);
+        setCandCustomTemp("");
+      } else {
+        setCandTempPreset("custom");
+        setCandCustomTemp(String(c.temperature));
+      }
+    } else {
+      setCandTempPreset("inherit");
+      setCandCustomTemp("");
+    }
+
+    setFormCandidates(formCandidates.filter((_, i) => i !== index));
   };
 
   const handleRemoveCandidate = (index: number) => {
@@ -499,6 +629,13 @@ export const JudgeRoutingPage: React.FC = () => {
       if (pr && pr.value !== null) effJudgeTemp = pr.value;
     }
 
+    let effJudgeThinking: string | null = null;
+    if (formJudgeThinkingPreset === "custom" && formJudgeCustomThinking) {
+      effJudgeThinking = formJudgeCustomThinking.trim() || null;
+    } else if (formJudgeThinkingPreset !== "inherit") {
+      effJudgeThinking = formJudgeThinkingPreset;
+    }
+
     const payload = {
       name: formName.trim(),
       slug: cleanSlug,
@@ -510,7 +647,7 @@ export const JudgeRoutingPage: React.FC = () => {
       judge_credential_id: formJudgeType === "model" ? judgeCredId : null,
       judge_credential_group: formJudgeType === "model" ? judgeCredGroup : null,
       judge_model_id: formJudgeType === "model" ? formJudgeModelId : null,
-      judge_thinking_effort: formJudgeThinkingEffort === "inherit" ? null : formJudgeThinkingEffort,
+      judge_thinking_effort: formJudgeType === "model" ? effJudgeThinking : null,
       judge_temperature: effJudgeTemp,
       system_prompt: formSystemPrompt.trim() || null,
       fallback_candidate_id: formFallbackCandidateId || null,
@@ -609,8 +746,18 @@ export const JudgeRoutingPage: React.FC = () => {
         return <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20">Средние (Medium)</span>;
       case "low":
         return <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Простые (Low)</span>;
-      default:
+      case "all":
         return <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-sky-500/10 text-sky-400 border border-sky-500/20">Любая (All)</span>;
+      default:
+        return (
+          <span
+            className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-purple-500/15 text-purple-300 border border-purple-500/30 flex items-center gap-1"
+            title={`Пользовательский уровень сложности: ${level}`}
+          >
+            <Tag size={9} className="text-purple-400 shrink-0" />
+            <span className="truncate max-w-[120px]">{level}</span>
+          </span>
+        );
     }
   };
 
@@ -850,14 +997,25 @@ export const JudgeRoutingPage: React.FC = () => {
                         key={c.id || idx}
                         className="bg-slate-950/60 border border-white/[0.05] rounded-xl p-3 space-y-2 hover:border-white/[0.12] transition-colors"
                       >
-                        <div className="flex items-center justify-between">
-                          <span className="font-semibold text-slate-200 text-xs flex items-center gap-1.5">
-                            <span className="w-4 h-4 rounded-full bg-slate-800 text-slate-400 text-[10px] flex items-center justify-center font-mono">
+                        <div className="flex items-center justify-between gap-1 flex-wrap">
+                          <span className="font-semibold text-slate-200 text-xs flex items-center gap-1.5 truncate">
+                            <span className="w-4 h-4 rounded-full bg-slate-800 text-slate-400 text-[10px] flex items-center justify-center font-mono shrink-0">
                               {idx + 1}
                             </span>
-                            {c.label}
+                            <span className="truncate">{c.label}</span>
                           </span>
-                          {getComplexityBadge(c.complexity_level)}
+                          <div className="flex items-center gap-1 shrink-0">
+                            {c.thinking_effort && (
+                              <span
+                                className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-purple-500/15 text-purple-300 border border-purple-500/25 flex items-center gap-1"
+                                title={`Уровень размышления кандидата: ${c.thinking_effort}`}
+                              >
+                                <Brain size={10} className="text-purple-400 shrink-0" />
+                                <span>{c.thinking_effort}</span>
+                              </span>
+                            )}
+                            {getComplexityBadge(c.complexity_level)}
+                          </div>
                         </div>
 
                         <div className="text-[11px] text-slate-400 truncate font-mono">
@@ -1089,14 +1247,45 @@ export const JudgeRoutingPage: React.FC = () => {
               </div>
             )}
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {formJudgeType === "model" && (
+                <div>
+                  <label className="block text-slate-400 font-medium mb-1 flex items-center gap-1.5">
+                    <Brain size={12} className="text-purple-400" />
+                    <span>Размышление судьи</span>
+                  </label>
+                  <div className="flex gap-2">
+                    <select
+                      value={formJudgeThinkingPreset}
+                      onChange={(e) => setFormJudgeThinkingPreset(e.target.value)}
+                      className="flex-1 bg-slate-900 border border-white/[0.09] rounded-xl px-2.5 py-2 text-white text-xs focus:outline-none focus:border-amber-500"
+                    >
+                      {REASONING_EFFORT_PRESETS.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
+                    {formJudgeThinkingPreset === "custom" && (
+                      <input
+                        type="text"
+                        value={formJudgeCustomThinking}
+                        onChange={(e) => setFormJudgeCustomThinking(e.target.value)}
+                        placeholder="e.g. high"
+                        className="w-24 bg-slate-900 border border-purple-500/40 rounded-xl px-2 py-2 text-purple-200 font-mono text-xs"
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label className="block text-slate-400 font-medium mb-1">Температура судьи</label>
                 <div className="flex gap-2">
                   <select
                     value={formJudgeTempPreset}
                     onChange={(e) => setFormJudgeTempPreset(e.target.value)}
-                    className="flex-1 bg-slate-900 border border-white/[0.09] rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-500"
+                    className="flex-1 bg-slate-900 border border-white/[0.09] rounded-xl px-2.5 py-2 text-white text-xs focus:outline-none focus:border-amber-500"
                   >
                     {JUDGE_TEMP_PRESETS.map((p) => (
                       <option key={p.id} value={p.id}>
@@ -1114,18 +1303,18 @@ export const JudgeRoutingPage: React.FC = () => {
                       value={formJudgeCustomTemp}
                       onChange={(e) => setFormJudgeCustomTemp(e.target.value)}
                       placeholder="0.1"
-                      className="w-20 bg-slate-900 border border-white/[0.09] rounded-xl px-2 py-2 text-white font-mono"
+                      className="w-20 bg-slate-900 border border-white/[0.09] rounded-xl px-2 py-2 text-white font-mono text-xs"
                     />
                   )}
                 </div>
               </div>
 
               <div>
-                <label className="block text-slate-400 font-medium mb-1">Резервный кандидат (при сбое судьи)</label>
+                <label className="block text-slate-400 font-medium mb-1">Резервный кандидат</label>
                 <select
                   value={formFallbackCandidateId || ""}
                   onChange={(e) => setFormFallbackCandidateId(e.target.value ? parseInt(e.target.value, 10) : undefined)}
-                  className="w-full bg-slate-900 border border-white/[0.09] rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-500"
+                  className="w-full bg-slate-900 border border-white/[0.09] rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-500 text-xs"
                 >
                   <option value="">По умолчанию (Кандидат #1)</option>
                   {formCandidates.map((c, idx) => (
@@ -1177,8 +1366,17 @@ export const JudgeRoutingPage: React.FC = () => {
                         {idx + 1}
                       </span>
                       <div className="min-w-0">
-                        <div className="font-semibold text-slate-200 flex items-center gap-2">
+                        <div className="font-semibold text-slate-200 flex items-center gap-2 flex-wrap">
                           <span className="truncate">{c.label}</span>
+                          {c.thinking_effort && (
+                            <span
+                              className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-purple-500/15 text-purple-300 border border-purple-500/25 flex items-center gap-1"
+                              title={`Уровень размышления: ${c.thinking_effort}`}
+                            >
+                              <Brain size={10} className="text-purple-400 shrink-0" />
+                              <span>{c.thinking_effort}</span>
+                            </span>
+                          )}
                           {getComplexityBadge(c.complexity_level)}
                         </div>
                         <div className="text-[11px] text-slate-400 font-mono truncate">
@@ -1201,9 +1399,18 @@ export const JudgeRoutingPage: React.FC = () => {
                     <div className="flex items-center gap-1 shrink-0 ml-2">
                       <button
                         type="button"
+                        onClick={() => handleEditCandidate(idx)}
+                        className="p-1 hover:bg-amber-500/20 text-slate-400 hover:text-amber-300 rounded transition-colors"
+                        title="Редактировать кандидата"
+                      >
+                        <Edit2 size={13} />
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => handleMoveCandidate(idx, "up")}
                         disabled={idx === 0}
                         className="p-1 hover:bg-slate-800 disabled:opacity-30 rounded text-slate-400 hover:text-white"
+                        title="Поднять выше"
                       >
                         <ArrowUp size={13} />
                       </button>
@@ -1212,6 +1419,7 @@ export const JudgeRoutingPage: React.FC = () => {
                         onClick={() => handleMoveCandidate(idx, "down")}
                         disabled={idx === formCandidates.length - 1}
                         className="p-1 hover:bg-slate-800 disabled:opacity-30 rounded text-slate-400 hover:text-white"
+                        title="Опустить ниже"
                       >
                         <ArrowDown size={13} />
                       </button>
@@ -1219,6 +1427,7 @@ export const JudgeRoutingPage: React.FC = () => {
                         type="button"
                         onClick={() => handleRemoveCandidate(idx)}
                         className="p-1 hover:bg-rose-500/20 text-rose-400 rounded transition-colors"
+                        title="Удалить кандидата"
                       >
                         <Trash2 size={13} />
                       </button>
@@ -1325,24 +1534,116 @@ export const JudgeRoutingPage: React.FC = () => {
                     value={candLabel}
                     onChange={(e) => setCandLabel(e.target.value)}
                     placeholder="Например: Senior Coder / Fast Chat"
-                    className="w-full bg-slate-950 border border-white/[0.08] rounded-lg px-2.5 py-1.5 text-white"
+                    className="w-full bg-slate-950 border border-white/[0.08] rounded-lg px-2.5 py-1.5 text-white text-xs"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">Подходящая сложность запроса</label>
-                  <select
-                    value={candComplexity}
-                    onChange={(e) => setCandComplexity(e.target.value as any)}
-                    className="w-full bg-slate-950 border border-white/[0.08] rounded-lg px-2.5 py-1.5 text-white"
-                  >
-                    <option value="all">Любая сложность (All)</option>
-                    <option value="low">Низкая сложность (Low) - простые вопросы, быстрый чат</option>
-                    <option value="medium">Средняя сложность (Medium) - аналитика, стандартный код</option>
-                    <option value="high">Высокая сложность (High) - глубокая логика, сложные алгоритмы</option>
-                  </select>
+                  <label className="block text-[11px] text-slate-400 mb-1 flex items-center justify-between">
+                    <span>Подходящая сложность запроса</span>
+                    {candComplexityPreset === "custom" && (
+                      <span className="text-[10px] text-amber-400 font-mono">Свой вариант</span>
+                    )}
+                  </label>
+                  <div className="space-y-1.5">
+                    <select
+                      value={candComplexityPreset}
+                      onChange={(e) => setCandComplexityPreset(e.target.value)}
+                      className="w-full bg-slate-950 border border-white/[0.08] rounded-lg px-2.5 py-1.5 text-white text-xs"
+                    >
+                      {COMPLEXITY_PRESETS.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.label} {p.desc ? `— ${p.desc}` : ""}
+                        </option>
+                      ))}
+                    </select>
+
+                    {candComplexityPreset === "custom" && (
+                      <input
+                        type="text"
+                        value={candCustomComplexity}
+                        onChange={(e) => setCandCustomComplexity(e.target.value)}
+                        placeholder="Впишите свой уровень сложности (e.g. выше среднего, hard)..."
+                        className="w-full bg-slate-950 border border-amber-500/40 focus:border-amber-400 rounded-lg px-2.5 py-1.5 text-amber-200 text-xs font-medium placeholder:text-slate-500"
+                        autoFocus
+                      />
+                    )}
+                  </div>
                 </div>
               </div>
+
+              {/* Candidate Model Parameters: Reasoning Effort & Temperature */}
+              {candType === "model" && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 p-2.5 bg-slate-950/40 rounded-xl border border-white/[0.04]">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5 text-slate-300">
+                        <Brain size={12} className="text-purple-400" />
+                        <span>Уровень размышления (Reasoning Effort)</span>
+                      </span>
+                      {candThinkingPreset === "custom" && (
+                        <span className="text-[10px] text-purple-400 font-mono">Custom</span>
+                      )}
+                    </label>
+                    <div className="space-y-1.5">
+                      <select
+                        value={candThinkingPreset}
+                        onChange={(e) => setCandThinkingPreset(e.target.value)}
+                        className="w-full bg-slate-950 border border-white/[0.08] rounded-lg px-2.5 py-1.5 text-white text-xs"
+                      >
+                        {REASONING_EFFORT_PRESETS.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.label} — {p.desc}
+                          </option>
+                        ))}
+                      </select>
+                      {candThinkingPreset === "custom" && (
+                        <input
+                          type="text"
+                          value={candCustomThinking}
+                          onChange={(e) => setCandCustomThinking(e.target.value)}
+                          placeholder="Впишите свой уровень (e.g. minimal, maximum, budget:2048)..."
+                          className="w-full bg-slate-950 border border-purple-500/40 focus:border-purple-400 rounded-lg px-2.5 py-1.5 text-purple-200 text-xs font-mono placeholder:text-slate-500"
+                          autoFocus
+                        />
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1 flex items-center gap-1.5 text-slate-300">
+                      <Thermometer size={12} className="text-orange-400" />
+                      <span>Температура кандидата (опционально)</span>
+                    </label>
+                    <div className="flex gap-2">
+                      <select
+                        value={candTempPreset}
+                        onChange={(e) => setCandTempPreset(e.target.value)}
+                        className="flex-1 bg-slate-950 border border-white/[0.08] rounded-lg px-2.5 py-1.5 text-white text-xs"
+                      >
+                        {JUDGE_TEMP_PRESETS.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.label} — {p.desc}
+                          </option>
+                        ))}
+                        <option value="custom">Пользовательская...</option>
+                      </select>
+                      {candTempPreset === "custom" && (
+                        <input
+                          type="number"
+                          step="0.05"
+                          min="0"
+                          max="2"
+                          value={candCustomTemp}
+                          onChange={(e) => setCandCustomTemp(e.target.value)}
+                          placeholder="0.7"
+                          className="w-20 bg-slate-950 border border-white/[0.08] rounded-lg px-2 py-1.5 text-white font-mono text-xs"
+                        />
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Task Types Tags */}
               <div className="space-y-1.5">

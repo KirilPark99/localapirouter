@@ -557,7 +557,7 @@ class JudgeCandidateInput(BaseModel):
     priority_order: int = 0
     label: str = "Candidate"
     task_types: List[str] = Field(default_factory=list)
-    complexity_level: Literal["low", "medium", "high", "all"] = "all"
+    complexity_level: str = "all"
     description: Optional[str] = None
     is_active: bool = True
 
