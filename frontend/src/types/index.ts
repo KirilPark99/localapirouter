@@ -775,3 +775,60 @@ export interface JevResponse {
   usage: JevUsage;
   latency_ms?: number;
 }
+
+export interface StageConfigField {
+  key: string;
+  label: string;
+  type: "boolean" | "number" | "text" | "select" | "textarea";
+  default_value: any;
+  description?: string;
+  options?: Array<{ label: string; value: string }>;
+  min_value?: number;
+  max_value?: number;
+}
+
+export interface CompressionStageItem {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  stage_type: string;
+  priority_order: number;
+  enabled: boolean;
+  is_builtin: boolean;
+  config_json: Record<string, any>;
+  custom_rules?: Array<Record<string, any>> | null;
+  config_schema: StageConfigField[];
+}
+
+export interface CompressionGlobalSettings {
+  enabled: boolean;
+  trigger_token_threshold: number;
+  min_savings_bailout_percent: number;
+  preserve_recent_turns: number;
+  enable_telemetry: boolean;
+  fail_open: boolean;
+}
+
+export interface CompressionPreviewStep {
+  stage_id: string;
+  stage_name: string;
+  icon: string;
+  tokens_before: number;
+  tokens_after: number;
+  savings_percent: number;
+  duration_ms: number;
+  compressed: boolean;
+  rules: string[];
+}
+
+export interface CompressionPreviewResponse {
+  initial_tokens: number;
+  final_tokens: number;
+  tokens_saved: number;
+  savings_percent: number;
+  duration_ms: number;
+  steps: CompressionPreviewStep[];
+  compressed_messages: Array<{ role: string; content: string; name?: string }>;
+}
+

@@ -28,8 +28,10 @@ from app.api.admin.logs import router as admin_logs_router
 from app.api.admin.settings import router as admin_settings_router
 from app.api.admin.backup import router as admin_backup_router
 from app.api.admin.modules import router as admin_modules_router
+from app.api.admin.compression import router as admin_compression_router
 from app.api.ollama import router as ollama_router
 from app.modules.loader import ModuleLoader
+from app.compression.registry import StageRegistry
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,6 +40,7 @@ async def lifespan(app: FastAPI):
         await ProviderService.seed_default_presets(db)
         ModuleLoader.scan_modules()
         await ModuleLoader.sync_with_db(db)
+        await StageRegistry.sync_with_db(db)
     yield
     # Shutdown: close all active HTTP connection pools
     await http_client_manager.close_all()
@@ -78,6 +81,7 @@ app.include_router(admin_logs_router, prefix="/api/admin")
 app.include_router(admin_settings_router, prefix="/api/admin")
 app.include_router(admin_backup_router, prefix="/api/admin")
 app.include_router(admin_modules_router, prefix="/api/admin")
+app.include_router(admin_compression_router, prefix="/api/admin")
 
 # Mount Ollama Compatibility API (/api/show, /api/tags, /api/version)
 app.include_router(ollama_router, prefix="/api")

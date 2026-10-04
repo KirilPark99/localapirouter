@@ -30,6 +30,7 @@ export type PageId =
   | "routing"
   | "judge"
   | "fusion"
+  | "compression"
   | "keys"
   | "proxies"
   | "playground"
@@ -74,6 +75,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         { id: "routing", label: t.nav.routing, icon: <GitFork size={16} /> },
         { id: "judge", label: t.nav.judge || "Судейская маршрутизация", icon: <Scale size={16} />, badge: "Smart" },
         { id: "fusion", label: t.nav.fusion, icon: <Merge size={16} />, badge: "AI" },
+        { id: "compression", label: t.nav.compression || "Оптимизация контекста", icon: <Sparkles size={16} />, badge: "Token" },
       ],
     },
     {

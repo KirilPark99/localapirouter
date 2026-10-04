@@ -98,6 +98,7 @@ export interface TranslationSchema {
     fusion: string;
     judge?: string;
     modules?: string;
+    compression?: string;
     keys: string;
     proxies: string;
     playground: string;

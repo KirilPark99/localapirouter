@@ -266,11 +266,39 @@ async def _resolve_is_judge(model_str: str, db: Optional[AsyncSession] = None) -
 async def chat_completions(
     payload: ChatCompletionRequest,
     request: Request,
+    response: Response,
     db: Optional[AsyncSession] = Depends(lambda: None),
     router_key: Optional[RouterApiKey] = Depends(get_router_key_dep),
 ):
     req_id = f"req_{uuid.uuid4().hex[:16]}"
     model_str = payload.model.strip()
+
+    # Context Optimization (Token Compression Pipeline)
+    compression_summary = None
+    compression_db = db if db is not None else AsyncSessionLocal()
+    try:
+        from app.compression.pipeline import CompressionPipelineService
+        payload.messages, compression_summary = await CompressionPipelineService.optimize_messages(
+            db=compression_db,
+            messages=payload.messages,
+            model_id=model_str,
+            request_headers=dict(request.headers),
+        )
+        if compression_summary and compression_summary.get("compressed"):
+            response.headers["X-Tokens-Before"] = str(compression_summary["tokens_before"])
+            response.headers["X-Tokens-After"] = str(compression_summary["tokens_after"])
+            response.headers["X-Tokens-Saved"] = str(compression_summary["tokens_saved"])
+            response.headers["X-Compression-Savings"] = f"{compression_summary['savings_percent']}%"
+    except Exception:
+        pass
+    finally:
+        if db is None:
+            await _safe_close_session(compression_db)
+
+    def _make_streaming_response(stream_generator) -> StreamingResponse:
+        stream_headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
+        return StreamingResponse(stream_generator, media_type="text/event-stream", headers=stream_headers)
+
     is_fusion, model_str = await _resolve_is_fusion(model_str, db)
     payload.model = model_str
 
@@ -285,7 +313,7 @@ async def chat_completions(
                 stream_gen = FusionEngine.execute_fusion_stream(
                     db=None, request=payload, router_key=router_key, request_id=req_id
                 )
-                return StreamingResponse(stream_gen, media_type="text/event-stream")
+                return _make_streaming_response(stream_gen)
             else:
                 if db is not None:
                     return await FusionEngine.execute_fusion(
@@ -304,7 +332,7 @@ async def chat_completions(
                 stream_gen = JudgeEngine.execute_judge_stream(
                     db=None, request=payload, router_key=router_key, request_id=req_id
                 )
-                return StreamingResponse(stream_gen, media_type="text/event-stream")
+                return _make_streaming_response(stream_gen)
             else:
                 if db is not None:
                     return await JudgeEngine.execute_judge(
@@ -408,7 +436,7 @@ async def chat_completions(
                 stream_gen = RoutingEngine.route_stream_chat(
                     db=None, request=payload, router_key=router_key, request_id=req_id
                 )
-                return StreamingResponse(stream_gen, media_type="text/event-stream")
+                return _make_streaming_response(stream_gen)
             else:
                 if db is not None:
                     return await RoutingEngine.route_chat_completions(

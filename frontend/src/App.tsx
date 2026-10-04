@@ -16,6 +16,7 @@ import { LogsPage } from "./pages/LogsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { DocsPage } from "./pages/DocsPage";
 import { ModulesPage } from "./pages/ModulesPage";
+import { CompressionPage } from "./pages/CompressionPage";
 import { apiRequest } from "./api/client";
 import { TerminalSquare } from "lucide-react";
 import { useI18n } from "./i18n/context";
@@ -138,6 +139,7 @@ export const App: React.FC = () => {
           {activePage === "routing" && <RoutingPage />}
           {activePage === "judge" && <JudgeRoutingPage />}
           {activePage === "fusion" && <FusionPage />}
+          {activePage === "compression" && <CompressionPage />}
           {activePage === "keys" && <ApiKeysPage />}
           {activePage === "proxies" && <ProxiesPage />}
           {activePage === "playground" && <PlaygroundPage />}

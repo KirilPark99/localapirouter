@@ -60,6 +60,7 @@ export const ru: TranslationSchema = {
     routing: "Маршрутизация",
     judge: "Судейская маршрутизация",
     fusion: "Model Fusion",
+    compression: "Оптимизация контекста",
     modules: "Модули",
     keys: "Ключи доступа",
     proxies: "Прокси-серверы",

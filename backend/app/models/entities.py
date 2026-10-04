@@ -371,3 +371,29 @@ class AppSetting(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     key: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
     value_json: Mapped[Any] = mapped_column(JSON, nullable=False)
+
+class CompressionGlobalSetting(Base, TimestampMixin):
+    __tablename__ = "compression_global_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    trigger_token_threshold: Mapped[int] = mapped_column(Integer, default=1000, nullable=False)
+    min_savings_bailout_percent: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    preserve_recent_turns: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    enable_telemetry: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    fail_open: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+class CompressionStage(Base, TimestampMixin):
+    __tablename__ = "compression_stages"
+
+    id: Mapped[str] = mapped_column(String(100), primary_key=True)  # slug
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    icon: Mapped[str] = mapped_column(String(50), default="Zap", nullable=False)
+    stage_type: Mapped[str] = mapped_column(String(50), default="builtin", nullable=False)  # builtin, custom_regex, custom_script
+    priority_order: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    config_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    custom_rules: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(JSON, nullable=True)
+

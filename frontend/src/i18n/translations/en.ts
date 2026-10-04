@@ -60,6 +60,7 @@ export const en: TranslationSchema = {
     routing: "Routing & Fallback",
     judge: "Judge Router",
     fusion: "Model Fusion",
+    compression: "Token Compression",
     modules: "Modules",
     keys: "API Keys",
     proxies: "Proxy Servers",
