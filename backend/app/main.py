@@ -44,6 +44,8 @@ async def lifespan(app: FastAPI):
         await ModuleLoader.sync_with_db(db)
         await StageRegistry.sync_with_db(db)
     yield
+    from app.services.module_oauth import close_all
+    await close_all()
     # Shutdown: close all active HTTP connection pools
     await http_client_manager.close_all()
 

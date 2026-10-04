@@ -1,4 +1,6 @@
 import os
+import json
+import time
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field, ConfigDict
@@ -138,3 +140,51 @@ class BaseModuleAdapter(ABC):
             client_kwargs["proxy"] = ctx.proxy_url
 
         return httpx.AsyncClient(**client_kwargs)
+
+
+async def collect_chat_completion(source: AsyncGenerator[str, None], model: str) -> ChatCompletionResponse:
+    """Collect the same Chat SSE contract used by streaming CLI clients."""
+    from app.schemas.chat import ToolCall
+    content, reasoning, calls = "", "", {}
+    finish_reason, usage = "stop", None
+    response_id, created = None, int(time.time())
+    async for chunk in source:
+        for line in chunk.splitlines():
+            if not line.startswith("data:"):
+                continue
+            raw = line[5:].strip()
+            if not raw or raw == "[DONE]":
+                continue
+            payload = json.loads(raw)
+            if payload.get("error"):
+                from app.core.errors import normalize_upstream_error
+                raise normalize_upstream_error(response_body=payload)
+            response_id = payload.get("id") or response_id
+            created = payload.get("created", created)
+            if payload.get("usage"):
+                usage = UsageInfo.model_validate(payload["usage"])
+            for choice in payload.get("choices", []):
+                if choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta") or {}
+                content += delta.get("content") or ""
+                reasoning += delta.get("reasoning_content") or ""
+                finish_reason = choice.get("finish_reason") or finish_reason
+                for call in delta.get("tool_calls") or []:
+                    target = calls.setdefault(call.get("index", 0), {
+                        "id": "", "type": "function", "function": {"name": "", "arguments": ""},
+                    })
+                    if call.get("id"):
+                        target["id"] = call["id"]
+                    if call.get("extra_content"):
+                        target["extra_content"] = call["extra_content"]
+                    function = call.get("function") or {}
+                    target["function"]["name"] += function.get("name") or ""
+                    target["function"]["arguments"] += function.get("arguments") or ""
+    tool_calls = [ToolCall.model_validate(calls[i]) for i in sorted(calls)] or None
+    message = ChatMessage(role="assistant", content=content or (None if tool_calls else ""),
+                          reasoning_content=reasoning or None, tool_calls=tool_calls)
+    kwargs = {"id": response_id} if response_id else {}
+    return ChatCompletionResponse(model=model, created=created, **kwargs,
+        choices=[ChatCompletionChoice(message=message, finish_reason="tool_calls" if tool_calls else finish_reason)],
+        usage=usage)

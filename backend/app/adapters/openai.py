@@ -231,6 +231,10 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
             payload["seed"] = request.seed
         if request.tools is not None:
             payload["tools"] = request.tools
+        if request.tool_choice is not None:
+            payload["tool_choice"] = request.tool_choice
+        if request.parallel_tool_calls is not None:
+            payload["parallel_tool_calls"] = request.parallel_tool_calls
         if request.user is not None:
             payload["user"] = request.user
 
@@ -333,6 +337,9 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
                             role=msg.get("role", "assistant"),
                             content=content_raw,
                             reasoning_content=reasoning_raw,
+                            tool_calls=msg.get("tool_calls"),
+                            tool_call_id=msg.get("tool_call_id"),
+                            name=msg.get("name"),
                         ),
                         finish_reason=c.get("finish_reason", "stop"),
                     )

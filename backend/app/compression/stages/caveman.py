@@ -102,7 +102,7 @@ class CavemanStage(BaseCompressionStage):
 
             restored = PreservationGuards.restore(text_with_sentinels, preserved_blocks)
             if restored != content:
-                compressed_messages.append(ChatMessage(role=msg.role, content=restored, name=msg.name))
+                compressed_messages.append(msg.model_copy(update={"content": restored}))
             else:
                 compressed_messages.append(msg)
 

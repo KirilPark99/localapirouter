@@ -8,15 +8,15 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
-from app.modules.base import BaseModuleAdapter, ModuleExecutionContext
+from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_chat_completion
+from app.modules.responses import messages_to_input, tool_options, responses_to_chat
 from app.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ChatCompletionChoice,
     ChatMessage,
-    UsageInfo,
 )
 from app.adapters.base import DiscoveredModelData
+from app.core.errors import normalize_upstream_error
 
 logger = logging.getLogger("app.modules.codex_cli")
 
@@ -274,72 +274,16 @@ class CodexCliAdapter(BaseModuleAdapter):
         ]
 
     def _convert_messages_to_responses_input(self, messages: List[ChatMessage]) -> List[Dict[str, Any]]:
-        input_items: List[Dict[str, Any]] = []
-        for msg in messages:
-            role = (msg.role or "user").lower()
-            text = str(msg.content or "")
-            input_items.append({
-                "role": role,
-                "content": [{"type": "input_text", "text": text}],
-            })
-        if not input_items:
-            input_items.append({
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Hello"}],
-            })
-        return input_items
+        return messages_to_input(messages)
 
     async def chat_completions(
         self,
         request: ChatCompletionRequest,
         ctx: ModuleExecutionContext,
     ) -> ChatCompletionResponse:
-        full_content = ""
-        full_reasoning = ""
-        model_name = request.model or ctx.model_id or "gpt-6.1-sol"
-        if model_name.startswith("codex_cli/"):
-            model_name = model_name[10:]
-
-        async for chunk_str in self.stream_chat(request, ctx):
-            if not chunk_str.startswith("data: "):
-                continue
-            data_part = chunk_str[6:].strip()
-            if data_part == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data_part)
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                content = delta.get("content", "")
-                reasoning = delta.get("reasoning_content", "")
-                if content:
-                    full_content += content
-                if reasoning:
-                    full_reasoning += reasoning
-            except Exception:
-                pass
-
-        choice_msg = ChatMessage(role="assistant", content=full_content)
-        if full_reasoning:
-            choice_msg.reasoning_content = full_reasoning
-
-        return ChatCompletionResponse(
-            id=f"chatcmpl-codex-{uuid.uuid4().hex[:12]}",
-            object="chat.completion",
-            created=int(time.time()),
-            model=model_name,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=choice_msg,
-                    finish_reason="stop",
-                )
-            ],
-            usage=UsageInfo(
-                prompt_tokens=len(str(request.messages)) // 4,
-                completion_tokens=len(full_content) // 4,
-                total_tokens=(len(str(request.messages)) + len(full_content)) // 4,
-            ),
-        )
+        model = request.model or ctx.model_id or "gpt-6.1-sol"
+        model = model.removeprefix("codex_cli/")
+        return await collect_chat_completion(self.stream_chat(request, ctx), model)
 
     async def stream_chat(
         self,
@@ -361,6 +305,8 @@ class CodexCliAdapter(BaseModuleAdapter):
             "store": False,
         }
 
+        body.update(tool_options(request))
+
         async with self.create_http_client(ctx) as client:
             async with client.stream(
                 "POST",
@@ -371,85 +317,13 @@ class CodexCliAdapter(BaseModuleAdapter):
             ) as resp:
                 if resp.status_code != 200:
                     err_body = await resp.aread()
-                    raise RuntimeError(
-                        f"Codex Responses API error (HTTP {resp.status_code}): {err_body.decode('utf-8', errors='ignore')[:300]}"
+                    raise normalize_upstream_error(
+                        status_code=resp.status_code,
+                        response_body=err_body.decode("utf-8", errors="replace"),
                     )
 
                 chunk_id = f"chatcmpl-codex-{uuid.uuid4().hex[:12]}"
                 created = int(time.time())
 
-                async for line in resp.aiter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    raw_data = line[6:].strip()
-                    if not raw_data:
-                        continue
-                    try:
-                        event = json.loads(raw_data)
-                        ev_type = event.get("type", "")
-
-                        # Handle output text delta
-                        if ev_type in ("response.output_text.delta", "response.text.delta"):
-                            delta_text = event.get("delta", "")
-                            if delta_text:
-                                chunk = {
-                                    "id": chunk_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [
-                                        {
-                                            "index": 0,
-                                            "delta": {"content": delta_text},
-                                            "finish_reason": None,
-                                        }
-                                    ],
-                                }
-                                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-
-                        # Handle reasoning summary delta
-                        elif ev_type in ("response.reasoning_summary_part.delta", "response.reasoning.delta"):
-                            delta_text = event.get("delta", "")
-                            if delta_text:
-                                chunk = {
-                                    "id": chunk_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [
-                                        {
-                                            "index": 0,
-                                            "delta": {"reasoning_content": delta_text},
-                                            "finish_reason": None,
-                                        }
-                                    ],
-                                }
-                                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-
-                        # Handle content part delta
-                        elif ev_type == "response.content_part.delta":
-                            delta = event.get("delta", {})
-                            delta_text = delta.get("text", "") if isinstance(delta, dict) else str(delta)
-                            if delta_text:
-                                chunk = {
-                                    "id": chunk_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [
-                                        {
-                                            "index": 0,
-                                            "delta": {"content": delta_text},
-                                            "finish_reason": None,
-                                        }
-                                    ],
-                                }
-                                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-
-                        elif ev_type == "response.completed":
-                            break
-
-                    except Exception:
-                        continue
-
-                yield "data: [DONE]\n\n"
+                async for chunk in responses_to_chat(resp.aiter_lines(), model, chunk_id, created):
+                    yield chunk

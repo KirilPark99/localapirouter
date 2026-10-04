@@ -1,4 +1,5 @@
 import json
+from typing import Any
 import pytest
 from pathlib import Path
 from app.modules.loader import ModuleLoader
@@ -257,6 +258,63 @@ async def test_current_cli_catalog_matches_manifest(module_id, adapter_class, co
     assert ids == [m["id"] for m in expected]
     assert [m.context_length for m in models] == [m["context_length"] for m in expected]
     assert [m.max_output_tokens for m in models] == [m["max_output_tokens"] for m in expected]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("module_id,adapter_class", [
+    ("codex_cli", CodexCliAdapter),
+    ("grok_builder_cli", GrokBuilderCliAdapter),
+])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("upstream_status", [200, 400])
+async def test_responses_history_and_errors(monkeypatch, module_id, adapter_class, stream, upstream_status):
+    import httpx
+    from app.adapters.module_adapter import CustomModuleAdapter
+    from app.core.errors import ErrorCategory, RouterException
+
+    adapter = adapter_class()
+    monkeypatch.setattr(ModuleLoader, "get_adapter", lambda name: adapter if name == module_id else None)
+    bridge = CustomModuleAdapter()
+
+    def upstream(request):
+        body = json.loads(request.content)
+        assert [m["role"] for m in body["input"]] == ["system", "user", "assistant", "user"]
+        assert [m["content"][0]["type"] for m in body["input"]] == [
+            "input_text", "input_text", "output_text", "input_text",
+        ]
+        assert body["input"][2]["content"][0]["text"] == "Previous answer"
+        if upstream_status == 400:
+            return httpx.Response(400, json={"error": {"message": "Invalid input format"}})
+        event = {"type": "response.output_text.delta", "delta": "OK"}
+        return httpx.Response(200, text="data: " + json.dumps(event) + "\n\ndata: {\"type\":\"response.completed\"}\n\n",
+                              headers={"Content-Type": "text/event-stream"})
+
+    monkeypatch.setattr(adapter, "create_http_client", lambda *args, **kwargs:
+                        httpx.AsyncClient(transport=httpx.MockTransport(upstream)))
+    request = ChatCompletionRequest(model="test-model", stream=stream, messages=[
+        ChatMessage(role="system", content="Be concise"),
+        ChatMessage(role="user", content="Hello"),
+        ChatMessage(role="assistant", content="Previous answer"),
+        ChatMessage(role="user", content="Continue"),
+    ])
+    kwargs: dict[str, Any] = dict(base_url="", api_key=json.dumps({"auto_detect_local": False, "access_token": "dummy-token"}),
+                  model_id="test-model", request=request, extra_headers={}, configuration={"module_id": module_id})
+
+    async def invoke():
+        if stream:
+            return "".join([chunk async for chunk in bridge.stream_chat(**kwargs)])
+        return (await bridge.chat_completions(**kwargs)).choices[0].message.content
+
+    if upstream_status == 200:
+        result = await invoke()
+        assert result and "OK" in result
+    else:
+        with pytest.raises(RouterException) as caught:
+            await invoke()
+        error = bridge.normalize_error(exception=caught.value)
+        assert error.category == ErrorCategory.INVALID_REQUEST
+        assert error.status_code == error.upstream_status == 400
+        assert error.message == "Invalid input format"
 
 
 @pytest.mark.asyncio

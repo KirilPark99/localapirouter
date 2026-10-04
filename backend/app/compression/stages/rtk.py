@@ -106,7 +106,7 @@ class RtkStage(BaseCompressionStage):
 
             if content != orig:
                 any_modified = True
-                compressed_messages.append(ChatMessage(role=msg.role, content=content, name=msg.name))
+                compressed_messages.append(msg.model_copy(update={"content": content}))
             else:
                 compressed_messages.append(msg)
 

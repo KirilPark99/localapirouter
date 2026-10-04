@@ -105,7 +105,7 @@ class UltraStage(BaseCompressionStage):
 
             pruned_text = "".join(new_tokens)
             restored = PreservationGuards.restore(pruned_text, preserved_blocks)
-            compressed_messages.append(ChatMessage(role=msg.role, content=restored, name=msg.name))
+            compressed_messages.append(msg.model_copy(update={"content": restored}))
 
         # Check hard token limit post-pass
         current_tokens = count_messages_tokens(compressed_messages)

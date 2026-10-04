@@ -93,7 +93,7 @@ class ResponsesToolStage(BaseCompressionStage):
                 content = self.JSON_BLOCK_RE.sub(_compact_fenced_json, content)
 
             if content != orig:
-                compressed_messages.append(ChatMessage(role=msg.role, content=content, name=msg.name))
+                compressed_messages.append(msg.model_copy(update={"content": content}))
             else:
                 compressed_messages.append(msg)
 

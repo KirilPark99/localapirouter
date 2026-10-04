@@ -68,7 +68,7 @@ class OmniGlyphStage(BaseCompressionStage):
                     f"[OmniGlyph: Rendered {len(content)} characters as high-density vision text page. "
                     f"Excerpt: {content[:100]}...]"
                 )
-                compressed_messages.append(ChatMessage(role=msg.role, content=tile_repr, name=msg.name))
+                compressed_messages.append(msg.model_copy(update={"content": tile_repr}))
             else:
                 compressed_messages.append(msg)
 

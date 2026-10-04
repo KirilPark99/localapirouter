@@ -1,7 +1,8 @@
 import json
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +15,9 @@ from app.models.entities import Provider, ProviderCredential, Proxy, DiscoveredM
 from app.core.crypto import encrypt_secret, decrypt_secret, compute_fingerprint, mask_secret
 from app.services.credential_service import CredentialService
 from app.services.model_discovery_service import ModelDiscoveryService
-from app.core.circuit_breaker import CredentialStatus
+from app.core.circuit_breaker import CredentialStatus, circuit_breaker
+from app.services import module_oauth
+from app.services.proxy_service import ProxyService
 
 router = APIRouter(prefix="/modules", tags=["Modules Management"], dependencies=[Depends(get_current_admin)])
 
@@ -201,7 +204,7 @@ async def list_module_profiles(module_id: str, db: AsyncSession = Depends(get_db
         field_specs = {f.key: f for f in loaded.manifest.fields}
         for k, v in raw_fields.items():
             spec = field_specs.get(k)
-            if spec and spec.type == "password":
+            if (spec and spec.type == "password") or k in ("auth_json", "access_token", "refresh_token", "id_token", "key"):
                 masked_fields[k] = mask_secret(str(v))
             else:
                 masked_fields[k] = v
@@ -299,7 +302,7 @@ async def create_module_profile(
         weight=data.weight,
         notes=(data.notes.strip() if data.notes and data.notes.strip() else None),
         consecutive_failures=0,
-        metadata_json=data.fields,
+        metadata_json={},  # Credentials are stored only in encrypted_api_key.
     )
     db.add(cred)
     await db.commit()
@@ -370,7 +373,7 @@ async def update_module_profile(
 
         serialized_fields = json.dumps(current_fields)
         cred.encrypted_api_key = encrypt_secret(serialized_fields)
-        cred.metadata_json = current_fields
+        cred.metadata_json = {k: v for k, v in (cred.metadata_json or {}).items() if k.startswith("_")}
         if "api_key" in current_fields:
             cred.masked_key = mask_secret(str(current_fields["api_key"]))
         elif "token" in current_fields:
@@ -494,4 +497,88 @@ async def sync_all_disk_profiles(
     from app.modules.profile_loader import sync_profiles_from_disk
     result = await sync_profiles_from_disk(db)
     return result
+
+
+class BrowserOAuthStart(BaseModel):
+    proxy_id: Optional[int] = Field(None, ge=1)
+
+
+class BrowserOAuthCallback(BaseModel):
+    callback_url: str = Field(..., min_length=1, max_length=8192)
+
+
+class BrowserOAuthSave(ModuleProfileCreate):
+    profile_id: Optional[int] = Field(None, ge=1)
+    priority: Annotated[int, Field(ge=1, le=100)] = 1
+    weight: Annotated[int, Field(ge=1, le=100)] = 1
+
+
+@router.post("/{module_id}/oauth/start")
+async def start_browser_oauth(module_id: str, data: BrowserOAuthStart,
+                              db: AsyncSession = Depends(get_db), owner: str = Depends(get_current_admin)):
+    loaded = ModuleLoader.get_module(module_id)
+    if not loaded or loaded.status != "ready":
+        raise HTTPException(404, "Module is unavailable")
+    proxy_url = None
+    if data.proxy_id is not None:
+        proxy = await db.get(Proxy, data.proxy_id)
+        if not proxy or not proxy.enabled:
+            raise HTTPException(404, "Proxy is unavailable")
+        proxy_url = ProxyService.build_proxy_url(proxy)
+    return await module_oauth.start(module_id, owner, data.proxy_id, proxy_url)
+
+
+@router.get("/{module_id}/oauth/{session_id}")
+async def browser_oauth_status(module_id: str, session_id: str, owner: str = Depends(get_current_admin)):
+    return JSONResponse(module_oauth.get_session(session_id, module_id, owner).public(),
+                        headers={"Cache-Control": "no-store"})
+
+
+@router.post("/{module_id}/oauth/{session_id}/callback")
+async def browser_oauth_callback(module_id: str, session_id: str, data: BrowserOAuthCallback,
+                                 owner: str = Depends(get_current_admin)):
+    session = module_oauth.get_session(session_id, module_id, owner)
+    return await module_oauth.exchange(session, data.callback_url)
+
+
+@router.delete("/{module_id}/oauth/{session_id}")
+async def cancel_browser_oauth(module_id: str, session_id: str, owner: str = Depends(get_current_admin)):
+    module_oauth.get_session(session_id, module_id, owner)
+    await module_oauth.cancel(session_id)
+    return {"success": True}
+
+
+@router.post("/{module_id}/oauth/{session_id}/save")
+async def save_browser_oauth(module_id: str, session_id: str, data: BrowserOAuthSave,
+                             db: AsyncSession = Depends(get_db), owner: str = Depends(get_current_admin)):
+    session = module_oauth.get_session(session_id, module_id, owner)
+    async with session.lock:
+        module_oauth.get_session(session_id, module_id, owner)
+        if session.status != "authorized" or not session.tokens:
+            raise HTTPException(409, "Complete browser authorization before saving")
+        if data.proxy_id != session.proxy_id:
+            raise HTTPException(409, "Proxy changed; restart browser authorization")
+        fields = {**data.fields, **session.tokens}
+        if data.profile_id is not None:
+            cred = (await db.execute(select(ProviderCredential).join(Provider).where(
+                ProviderCredential.id == data.profile_id, Provider.slug == f"module_{module_id}"
+            ))).scalar_one_or_none()
+            if not cred:
+                raise HTTPException(404, "Profile does not belong to this module")
+            result = await update_module_profile(module_id, data.profile_id, ModuleProfileUpdate(
+                name=data.name, proxy_id=data.proxy_id, priority=data.priority, weight=data.weight,
+                fields=fields, notes=data.notes), db)
+            cred.status = CredentialStatus.HEALTHY if cred.enabled else CredentialStatus.DISABLED
+            cred.consecutive_failures = 0
+            cred.last_error = None
+            cred.cooldown_until = None
+            await db.commit()
+            circuit_breaker.reset(cred.id)
+            result["status"] = cred.status
+        else:
+            result = await create_module_profile(module_id, ModuleProfileCreate(
+                name=data.name, proxy_id=data.proxy_id, priority=data.priority, weight=data.weight,
+                fields=fields, notes=data.notes), db)
+        module_oauth.discard(session_id)
+        return result
 

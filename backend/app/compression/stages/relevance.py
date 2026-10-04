@@ -104,7 +104,7 @@ class RelevanceStage(BaseCompressionStage):
             if len(keep_indices) < len(sentences):
                 sentences_dropped += (len(sentences) - len(keep_indices))
                 retained_sentences = [s for s_idx, s in enumerate(sentences) if s_idx in keep_indices]
-                compressed_messages.append(ChatMessage(role=msg.role, content=" ".join(retained_sentences), name=msg.name))
+                compressed_messages.append(msg.model_copy(update={"content": " ".join(retained_sentences)}))
             else:
                 compressed_messages.append(msg)
 

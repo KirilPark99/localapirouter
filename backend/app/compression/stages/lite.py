@@ -91,7 +91,7 @@ class LiteStage(BaseCompressionStage):
 
                 if content != orig:
                     modified = True
-                    compressed_messages.append(ChatMessage(role=msg.role, content=content, name=msg.name))
+                    compressed_messages.append(msg.model_copy(update={"content": content}))
                 else:
                     compressed_messages.append(msg)
             elif isinstance(msg.content, list):
@@ -112,7 +112,7 @@ class LiteStage(BaseCompressionStage):
                         modified = True
                     else:
                         new_parts.append(part)
-                compressed_messages.append(ChatMessage(role=msg.role, content=new_parts, name=msg.name))
+                compressed_messages.append(msg.model_copy(update={"content": new_parts}))
             else:
                 compressed_messages.append(msg)
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Puzzle,
   RefreshCw,
@@ -98,6 +98,21 @@ interface ModuleProfile {
   notes?: string | null;
 }
 
+interface OAuthStatus {
+  status: "pending" | "authorized" | "error";
+  message?: string;
+  expires_in: number;
+}
+
+interface OAuthSession extends OAuthStatus {
+  session_id: string;
+  auth_url: string;
+  loopback: boolean;
+  moduleId: string;
+  proxyId: number | null;
+  expiresAt: number;
+}
+
 export const ModulesPage: React.FC = () => {
   const { t } = useI18n();
   const [modules, setModules] = useState<LoadedModule[]>([]);
@@ -122,6 +137,141 @@ export const ModulesPage: React.FC = () => {
   const [showPasswordFields, setShowPasswordFields] = useState<Record<string, boolean>>({});
   const [savingProfile, setSavingProfile] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [oauthSession, setOAuthSession] = useState<OAuthSession | null>(null);
+  const oauthRef = useRef<OAuthSession | null>(null);
+  const oauthGeneration = useRef(0);
+  const oauthRequestBusy = useRef(false);
+  const [oauthStarting, setOAuthStarting] = useState(false);
+  const [oauthCallbackBusy, setOAuthCallbackBusy] = useState(false);
+  const [callbackUrl, setCallbackUrl] = useState("");
+  const supportsBrowserOAuth = ["agy_cli", "codex_cli", "grok_builder_cli"].includes(selectedModule?.manifest.id || "");
+
+  const updateOAuthSession = (session: OAuthSession | null) => {
+    oauthRef.current = session;
+    setOAuthSession(session);
+  };
+
+  const cancelOAuth = (reportError = false) => {
+    oauthGeneration.current += 1;
+    const session = oauthRef.current;
+    updateOAuthSession(null);
+    setOAuthStarting(false);
+    setOAuthCallbackBusy(false);
+    setCallbackUrl("");
+    if (session) {
+      void apiRequest(`/api/admin/modules/${session.moduleId}/oauth/${session.session_id}`, {
+        method: "DELETE",
+        keepalive: true,
+      }).catch((err: Error) => {
+        if (reportError) setFormError(`Не удалось отменить OAuth-сессию: ${err.message}`);
+        else console.warn("Не удалось отменить OAuth-сессию:", err.message);
+      });
+    }
+  };
+
+  // Status updates must not cancel the session: only modal/module lifetime does.
+  useEffect(() => {
+    return () => cancelOAuth();
+  }, [isProfileModalOpen, selectedModule?.manifest.id]);
+
+  useEffect(() => {
+    const sessionId = oauthSession?.session_id;
+    if (!sessionId) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      const session = oauthRef.current;
+      if (stopped || session?.session_id !== sessionId || session.status === "error") return;
+      if (Date.now() >= session.expiresAt) {
+        updateOAuthSession({ ...session, status: "error", message: "Срок OAuth-сессии истёк. Авторизуйтесь повторно." });
+        return;
+      }
+      if (session.status === "pending" && !oauthRequestBusy.current) {
+        oauthRequestBusy.current = true;
+        try {
+          const status = await apiRequest<OAuthStatus>(`/api/admin/modules/${session.moduleId}/oauth/${sessionId}`);
+          if (!stopped && oauthRef.current?.session_id === sessionId) {
+            updateOAuthSession({ ...session, ...status });
+          }
+        } catch (err: any) {
+          if (!stopped && oauthRef.current?.session_id === sessionId) {
+            updateOAuthSession({ ...session, status: "error", message: err.message || "Ошибка проверки авторизации" });
+          }
+        } finally {
+          oauthRequestBusy.current = false;
+        }
+      }
+      if (!stopped) timer = setTimeout(poll, 1500);
+    };
+    timer = setTimeout(poll, 1500);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [oauthSession?.session_id]);
+
+  const handleStartOAuth = async () => {
+    if (!selectedModule || !supportsBrowserOAuth || oauthStarting || savingProfile) return;
+    cancelOAuth();
+    const generation = oauthGeneration.current;
+    const moduleId = selectedModule.manifest.id;
+    const proxyId = formProxyId ?? null;
+    // Open synchronously from the click; the visible link also works if blocked.
+    const popup = window.open("about:blank", "_blank");
+    if (popup) popup.opener = null;
+    setOAuthStarting(true);
+    setFormError(null);
+    try {
+      const result = await apiRequest<OAuthStatus & { session_id: string; auth_url: string; loopback: boolean }>(
+        `/api/admin/modules/${moduleId}/oauth/start`,
+        { method: "POST", body: JSON.stringify({ proxy_id: proxyId }) }
+      );
+      if (generation !== oauthGeneration.current) {
+        popup?.close();
+        await apiRequest(`/api/admin/modules/${moduleId}/oauth/${result.session_id}`, { method: "DELETE" });
+        return;
+      }
+      const session = { ...result, moduleId, proxyId, expiresAt: Date.now() + result.expires_in * 1000 };
+      updateOAuthSession(session);
+      if (new URL(result.auth_url).protocol !== "https:") throw new Error("Некорректная ссылка авторизации");
+      if (popup && !popup.closed) popup.location.replace(result.auth_url);
+    } catch (err: any) {
+      popup?.close();
+      if (generation === oauthGeneration.current) {
+        cancelOAuth();
+        setFormError(err.message || "Не удалось начать авторизацию");
+      }
+    } finally {
+      if (generation === oauthGeneration.current) setOAuthStarting(false);
+    }
+  };
+
+  const handleOAuthCallback = async () => {
+    const session = oauthRef.current;
+    if (!session || session.status !== "pending" || !callbackUrl.trim()) return;
+    if (oauthRequestBusy.current) {
+      setFormError("Выполняется проверка авторизации. Повторите отправку URL через несколько секунд.");
+      return;
+    }
+    oauthRequestBusy.current = true;
+    setOAuthCallbackBusy(true);
+    setFormError(null);
+    try {
+      const status = await apiRequest<OAuthStatus>(`/api/admin/modules/${session.moduleId}/oauth/${session.session_id}/callback`, {
+        method: "POST",
+        body: JSON.stringify({ callback_url: callbackUrl.trim() }),
+      });
+      if (oauthRef.current?.session_id === session.session_id) {
+        updateOAuthSession({ ...session, ...status });
+        setCallbackUrl("");
+      }
+    } catch (err: any) {
+      if (oauthRef.current?.session_id === session.session_id) setFormError(err.message || "Ошибка обработки URL возврата");
+    } finally {
+      oauthRequestBusy.current = false;
+      if (oauthRef.current?.session_id === session.session_id) setOAuthCallbackBusy(false);
+    }
+  };
 
   // Test Profile state
   const [testingProfileId, setTestingProfileId] = useState<number | null>(null);
@@ -285,6 +435,7 @@ export const ModulesPage: React.FC = () => {
   };
 
   const openCreateModal = (mod: LoadedModule) => {
+    cancelOAuth();
     setSelectedModule(mod);
     setEditingProfile(null);
     setFormName(`${mod.manifest.name} Profile`);
@@ -303,6 +454,7 @@ export const ModulesPage: React.FC = () => {
 
   const openEditModal = (profile: ModuleProfile) => {
     if (!selectedModule) return;
+    cancelOAuth();
     setEditingProfile(profile);
     setFormName(profile.name);
     setFormProxyId(profile.proxy_id || undefined);
@@ -316,13 +468,37 @@ export const ModulesPage: React.FC = () => {
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedModule) return;
+    if (!selectedModule || savingProfile || oauthStarting) return;
+    const session = oauthRef.current;
+    if (session && (session.status !== "authorized" || Date.now() >= session.expiresAt)) {
+      setFormError("Завершите авторизацию через браузер или отмените её для ручного ввода.");
+      return;
+    }
     setSavingProfile(true);
     setFormError(null);
 
     try {
       const finalNotes = formProfileNotes.trim() || null;
-      if (editingProfile) {
+      if (session) {
+        if (session.proxyId !== (formProxyId ?? null)) throw new Error("Прокси изменён. Начните авторизацию заново.");
+        const fields = Object.fromEntries(selectedModule.manifest.fields
+          .filter((field) => field.type !== "password" && !["auth_json", "access_token", "refresh_token", "id_token"].includes(field.key))
+          .map((field) => [field.key, formFields[field.key]]));
+        await apiRequest(`/api/admin/modules/${session.moduleId}/oauth/${session.session_id}/save`, {
+          method: "POST",
+          body: JSON.stringify({
+            profile_id: editingProfile?.id ?? null,
+            name: formName,
+            proxy_id: session.proxyId,
+            priority: formPriority,
+            weight: formWeight,
+            fields,
+            notes: finalNotes,
+          }),
+        });
+        updateOAuthSession(null);
+        setCallbackUrl("");
+      } else if (editingProfile) {
         // Update
         await apiRequest(`/api/admin/modules/${selectedModule.manifest.id}/profiles/${editingProfile.id}`, {
           method: "PUT",
@@ -849,7 +1025,7 @@ export const ModulesPage: React.FC = () => {
       {selectedModule && (
         <Modal
           isOpen={isProfileModalOpen}
-          onClose={() => setIsProfileModalOpen(false)}
+          onClose={() => { if (!savingProfile) setIsProfileModalOpen(false); }}
           title={editingProfile ? `Редактирование профиля: ${editingProfile.name}` : `Новый профиль для ${selectedModule.manifest.name}`}
           maxWidth="lg"
         >
@@ -889,6 +1065,7 @@ export const ModulesPage: React.FC = () => {
               </label>
               <select
                 value={formProxyId || ""}
+                disabled={oauthStarting || !!oauthSession || savingProfile}
                 onChange={(e) => setFormProxyId(e.target.value ? Number(e.target.value) : undefined)}
                 className="w-full px-3 py-2 bg-slate-950 border border-white/[0.08] focus:border-indigo-500 rounded-xl text-xs text-slate-200 focus:outline-hidden"
               >
@@ -900,6 +1077,62 @@ export const ModulesPage: React.FC = () => {
                 ))}
               </select>
             </div>
+
+            {supportsBrowserOAuth && (
+              <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 space-y-3 text-xs">
+                <p className="text-slate-400 leading-relaxed">
+                  Страница входа использует сеть вашего браузера. Выбранный прокси применяется на сервере для обмена токенами и вызовов моделей. Во время OAuth прокси изменить нельзя.
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleStartOAuth}
+                    disabled={oauthStarting || savingProfile || (!!oauthSession && oauthSession.status !== "error")}
+                    className="btn-press px-3 py-2 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 rounded-xl font-medium disabled:opacity-50"
+                  >
+                    {oauthStarting ? "Начало авторизации..." : oauthSession?.status === "error" ? "Повторить авторизацию" : "Авторизоваться через браузер"}
+                  </button>
+                  {(oauthSession || oauthStarting) && (
+                    <button type="button" onClick={() => cancelOAuth(true)} disabled={savingProfile} className="btn-press px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl disabled:opacity-50">
+                      Отменить OAuth
+                    </button>
+                  )}
+                </div>
+                {oauthSession && (
+                  <>
+                    <div role="status" aria-live="polite" className={oauthSession.status === "authorized" ? "text-emerald-300" : oauthSession.status === "error" ? "text-rose-300" : "text-indigo-300"}>
+                      {oauthSession.status === "authorized" ? "Авторизация завершена. Нажмите «Создать профиль» или «Обновить профиль», чтобы сохранить." : oauthSession.status === "error" ? (oauthSession.message || "Ошибка авторизации. Попробуйте снова.") : "Ожидание входа в браузере… Сессия действует 10 минут."}
+                    </div>
+                    {oauthSession.status === "pending" && (
+                      <>
+                        <a href={oauthSession.auth_url} target="_blank" rel="noopener noreferrer" className="inline-block text-indigo-300 underline underline-offset-2">
+                          Открыть страницу входа в новой вкладке (если она не открылась)
+                        </a>
+                        <p className="text-slate-400 leading-relaxed">
+                          {oauthSession.loopback ? "Возврат может обработаться автоматически, если браузер и сервер находятся на одном компьютере. " : "Автоматический возврат недоступен. "}
+                          Если вход не завершился здесь, скопируйте полный URL из адресной строки после входа (даже если страница localhost не открылась) и вставьте ниже. Не вставляйте токены.
+                        </p>
+                        <label htmlFor="module-oauth-callback" className="block text-slate-300">URL возврата после входа</label>
+                        <input
+                          id="module-oauth-callback"
+                          type="text"
+                          value={callbackUrl}
+                          onChange={(e) => setCallbackUrl(e.target.value)}
+                          autoComplete="off"
+                          spellCheck={false}
+                          placeholder="http://localhost:…/callback?code=…&state=…"
+                          disabled={oauthCallbackBusy}
+                          className="w-full px-3 py-2 bg-slate-950 border border-white/[0.08] focus:border-indigo-500 rounded-xl text-slate-200 placeholder-slate-600 focus:outline-hidden"
+                        />
+                        <button type="button" onClick={handleOAuthCallback} disabled={oauthCallbackBusy || !callbackUrl.trim()} className="btn-press px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl disabled:opacity-50">
+                          {oauthCallbackBusy ? "Обработка..." : "Отправить URL возврата"}
+                        </button>
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
 
             {/* Priority & Weight */}
             <div className="grid grid-cols-2 gap-3">
@@ -935,7 +1168,7 @@ export const ModulesPage: React.FC = () => {
                   <span>Параметры авторизации модуля</span>
                 </div>
 
-                {selectedModule.manifest.fields.map((field) => {
+                {selectedModule.manifest.fields.filter((field) => !oauthSession || (field.type !== "password" && !["auth_json", "access_token", "refresh_token", "id_token"].includes(field.key))).map((field) => {
                   const isPassword = field.type === "password";
                   const showPass = !!showPasswordFields[field.key];
                   const value = formFields[field.key] ?? "";
@@ -1025,13 +1258,14 @@ export const ModulesPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIsProfileModalOpen(false)}
+                disabled={savingProfile}
                 className="btn-press px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-medium border border-white/[0.06]"
               >
                 Отмена
               </button>
               <button
                 type="submit"
-                disabled={savingProfile}
+                disabled={savingProfile || oauthStarting || (!!oauthSession && oauthSession.status !== "authorized")}
                 className="btn-press px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-indigo-600/20 disabled:opacity-50"
               >
                 {savingProfile ? "Сохранение..." : editingProfile ? "Обновить профиль" : "Создать профиль"}

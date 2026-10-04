@@ -697,7 +697,22 @@ async def systemone_decision(
             await _safe_close_session(session)
 
 def _responses_payload(response: ChatCompletionResponse, response_id: str) -> dict:
-    text = response.choices[0].message.content if response.choices else ""
+    message = response.choices[0].message if response.choices else None
+    text = message.content if message else ""
+    output = []
+    if text or not (message and message.tool_calls):
+        output.append({
+            "id": f"msg_{uuid.uuid4().hex[:16]}", "type": "message",
+            "status": "completed", "role": "assistant",
+            "content": [{"type": "output_text", "text": text or "", "annotations": []}],
+        })
+    for call in (message.tool_calls or []) if message else []:
+        output.append({
+            "id": f"fc_{uuid.uuid4().hex[:16]}", "type": "function_call",
+            "status": "completed", "call_id": call.id,
+            "name": call.function.name, "arguments": call.function.arguments,
+            **({"extra_content": call.extra_content} if call.extra_content else {}),
+        })
     usage = response.usage
     return {
         "id": response_id,
@@ -707,13 +722,7 @@ def _responses_payload(response: ChatCompletionResponse, response_id: str) -> di
         "error": None,
         "incomplete_details": None,
         "model": response.model,
-        "output": [{
-            "id": f"msg_{uuid.uuid4().hex[:16]}",
-            "type": "message",
-            "status": "completed",
-            "role": "assistant",
-            "content": [{"type": "output_text", "text": text or "", "annotations": []}],
-        }],
+        "output": output,
         "output_text": text or "",
         "usage": {
             "input_tokens": usage.prompt_tokens if usage else 0,
@@ -725,17 +734,27 @@ def _responses_payload(response: ChatCompletionResponse, response_id: str) -> di
 
 
 async def _responses_event_stream(source: AsyncGenerator[str, None], model: str, response_id: str):
-    created = {
-        "type": "response.created",
-        "response": {"id": response_id, "object": "response", "status": "in_progress", "model": model},
-    }
-    yield f"event: response.created\ndata: {json.dumps(created)}\n\n"
-    output_index = 0
+    sequence_number = 0
+
+    def event(kind, **fields):
+        nonlocal sequence_number
+        payload = {"type": kind, "sequence_number": sequence_number, **fields}
+        sequence_number += 1
+        return f"event: {kind}\ndata: {json.dumps(payload)}\n\n"
+
+    yield event("response.created", response={"id": response_id, "object": "response", "status": "in_progress", "model": model})
+    output = []
+    calls = {}
+    text_item = None
+    text_index = None
+    usage = None
     async for chunk in source:
+        if isinstance(chunk, bytes):
+            chunk = chunk.decode()
         for line in chunk.splitlines():
-            if not line.startswith("data: "):
+            if not line.startswith("data:"):
                 continue
-            raw = line[6:].strip()
+            raw = line[5:].strip()
             if not raw or raw == "[DONE]":
                 continue
             try:
@@ -743,14 +762,64 @@ async def _responses_event_stream(source: AsyncGenerator[str, None], model: str,
             except json.JSONDecodeError:
                 continue
             if "error" in data:
-                yield f"event: response.failed\ndata: {json.dumps({'type': 'response.failed', 'response': {'id': response_id, 'status': 'failed', 'error': data['error']}})}\n\n"
+                yield event("response.failed", response={"id": response_id, "status": "failed", "error": data["error"]})
                 return
-            delta = data.get("choices", [{}])[0].get("delta", {}).get("content") if data.get("choices") else None
-            if delta:
-                event = {"type": "response.output_text.delta", "item_id": response_id, "output_index": output_index, "content_index": 0, "delta": delta}
-                yield f"event: response.output_text.delta\ndata: {json.dumps(event)}\n\n"
-    completed = {"type": "response.completed", "response": {"id": response_id, "object": "response", "status": "completed", "model": model}}
-    yield f"event: response.completed\ndata: {json.dumps(completed)}\n\n"
+            if data.get("usage"):
+                usage = UsageInfo(**data["usage"])
+            choices = data.get("choices") or []
+            delta = choices[0].get("delta") or {} if choices else {}
+            text = delta.get("content")
+            if text:
+                if text_item is None:
+                    text_index = len(output)
+                    text_item = {"id": f"msg_{uuid.uuid4().hex[:16]}", "type": "message", "status": "in_progress", "role": "assistant", "content": []}
+                    output.append(text_item)
+                    yield event("response.output_item.added", output_index=text_index, item=text_item)
+                    part = {"type": "output_text", "text": "", "annotations": []}
+                    yield event("response.content_part.added", item_id=text_item["id"], output_index=text_index, content_index=0, part=part)
+                    text_item["content"].append(part)
+                text_item["content"][0]["text"] += text
+                yield event("response.output_text.delta", item_id=text_item["id"], output_index=text_index, content_index=0, delta=text)
+            for position, call in enumerate(delta.get("tool_calls") or []):
+                index = call.get("index", position)
+                function = call.get("function") or {}
+                if index not in calls:
+                    item = {"id": f"fc_{uuid.uuid4().hex[:16]}", "type": "function_call", "status": "in_progress", "call_id": "", "name": "", "arguments": ""}
+                    calls[index] = {"item": item, "output_index": len(output), "added": False}
+                    output.append(item)
+                state = calls[index]
+                item = state["item"]
+                if call.get("id"):
+                    item["call_id"] = call["id"]
+                if call.get("extra_content"):
+                    item["extra_content"] = call["extra_content"]
+                if function.get("name"):
+                    item["name"] += function["name"]
+                arguments = function.get("arguments") or ""
+                item["arguments"] += arguments
+                # Wait for identity before exposing a call; early arguments remain buffered.
+                if not state["added"] and item["call_id"] and item["name"]:
+                    yield event("response.output_item.added", output_index=state["output_index"], item={**item, "arguments": ""})
+                    state["added"] = True
+                    arguments = item["arguments"]
+                if state["added"] and arguments:
+                    yield event("response.function_call_arguments.delta", item_id=item["id"], output_index=state["output_index"], delta=arguments)
+    if any(not state["added"] for state in calls.values()):
+        yield event("response.failed", response={"id": response_id, "status": "failed", "error": {"type": "upstream_error", "message": "Function call is missing call_id or name"}})
+        return
+    for index, item in enumerate(output):
+        item["status"] = "completed"
+        if item["type"] == "function_call":
+            yield event("response.function_call_arguments.done", item_id=item["id"], output_index=index, name=item["name"], arguments=item["arguments"])
+        else:
+            part = item["content"][0]
+            yield event("response.output_text.done", item_id=item["id"], output_index=index, content_index=0, text=part["text"])
+            yield event("response.content_part.done", item_id=item["id"], output_index=index, content_index=0, part=part)
+        yield event("response.output_item.done", output_index=index, item=item)
+    completed = _responses_payload(ChatCompletionResponse(model=model, choices=[], usage=usage), response_id)
+    completed["output"] = output
+    completed["output_text"] = text_item["content"][0]["text"] if text_item else ""
+    yield event("response.completed", response=completed)
 
 
 @router.post("/responses")
@@ -760,7 +829,10 @@ async def responses_api(
     db: AsyncSession = Depends(get_db),
 ):
     req_id = f"resp_{uuid.uuid4().hex[:16]}"
-    chat_request = payload.to_chat_request()
+    try:
+        chat_request = payload.to_chat_request()
+    except (ValueError, KeyError) as exc:
+        return JSONResponse(status_code=400, content={"error": {"message": str(exc), "type": "invalid_request_error", "request_id": req_id}})
     is_fusion, chat_request.model = await _resolve_is_fusion(chat_request.model, db)
     try:
         if payload.stream:

@@ -73,7 +73,7 @@ class CcrStage(BaseCompressionStage):
                 block_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:24]
                 self._store_block(block_hash, content)
                 marker = f"[CCR retrieve hash={block_hash} chars={len(content)}]"
-                compressed_messages.append(ChatMessage(role=msg.role, content=marker, name=msg.name))
+                compressed_messages.append(msg.model_copy(update={"content": marker}))
                 archived_count += 1
                 continue
 
@@ -94,7 +94,7 @@ class CcrStage(BaseCompressionStage):
                     modified_paragraphs.append(p)
 
             new_content = "\n\n".join(modified_paragraphs)
-            compressed_messages.append(ChatMessage(role=msg.role, content=new_content, name=msg.name))
+            compressed_messages.append(msg.model_copy(update={"content": new_content}))
 
         final_tokens = count_messages_tokens(compressed_messages)
         savings = max(0.0, round(((initial_tokens - final_tokens) / max(1, initial_tokens)) * 100, 2))

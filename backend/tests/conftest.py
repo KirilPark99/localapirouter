@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from cryptography.fernet import Fernet
 
-TEST_DB_PATH = "/tmp/myairouter_test.db"
+TEST_DB_PATH = str(Path(os.environ.get("TMPDIR", "/tmp")) / f"myairouter_test_{uuid.uuid4().hex}.db")
 test_db_url = f"sqlite+aiosqlite:///{TEST_DB_PATH}"
 os.environ["DATABASE_URL"] = test_db_url
 # Test-only credentials keep application startup fail-closed without relying on

@@ -83,7 +83,7 @@ class AggressiveStage(BaseCompressionStage):
                 summary = self._summarize_message(content, msg.role)
                 if len(summary) < len(content):
                     summarized_count += 1
-                    compressed_messages.append(ChatMessage(role=msg.role, content=summary, name=msg.name))
+                    compressed_messages.append(msg.model_copy(update={"content": summary}))
                 else:
                     compressed_messages.append(msg)
             else:
@@ -91,7 +91,7 @@ class AggressiveStage(BaseCompressionStage):
                 compacted = self._compact_middle(content)
                 if len(compacted) < len(content):
                     summarized_count += 1
-                    compressed_messages.append(ChatMessage(role=msg.role, content=compacted, name=msg.name))
+                    compressed_messages.append(msg.model_copy(update={"content": compacted}))
                 else:
                     compressed_messages.append(msg)
 

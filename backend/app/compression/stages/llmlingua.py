@@ -89,7 +89,7 @@ class LlmLinguaStage(BaseCompressionStage):
 
             pruned_text = "".join(new_tokens)
             restored = PreservationGuards.restore(pruned_text, preserved_blocks)
-            compressed_messages.append(ChatMessage(role=msg.role, content=restored, name=msg.name))
+            compressed_messages.append(msg.model_copy(update={"content": restored}))
 
         final_tokens = count_messages_tokens(compressed_messages)
         savings = max(0.0, round(((initial_tokens - final_tokens) / max(1, initial_tokens)) * 100, 2))

@@ -96,11 +96,9 @@ class SessionDedupStage(BaseCompressionStage):
             content_hash = hashlib.sha256(content.strip().encode("utf-8")).hexdigest()[:8]
             if content_hash in seen_blocks:
                 replaced_count += 1
-                new_msg = ChatMessage(
-                    role=msg.role,
-                    content=f"[dedup:ref sha={content_hash} (identical to earlier message)]",
-                    name=msg.name,
-                )
+                new_msg = msg.model_copy(update={
+                    "content": f"[dedup:ref sha={content_hash} (identical to earlier message)]",
+                })
                 compressed_messages.append(new_msg)
                 continue
 
@@ -116,7 +114,7 @@ class SessionDedupStage(BaseCompressionStage):
                 else:
                     seen_blocks[b_hash] = f"sha={b_hash}"
 
-            compressed_messages.append(ChatMessage(role=msg.role, content=modified_content, name=msg.name))
+            compressed_messages.append(msg.model_copy(update={"content": modified_content}))
 
         final_tokens = count_messages_tokens(compressed_messages)
         savings = max(0.0, round(((initial_tokens - final_tokens) / max(1, initial_tokens)) * 100, 2))

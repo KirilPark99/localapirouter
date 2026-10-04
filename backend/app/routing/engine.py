@@ -24,6 +24,7 @@ from app.schemas.chat import (
     UsageInfo,
 )
 from app.core.errors import RouterException, ErrorCategory
+from app.core.config import settings
 from app.core.circuit_breaker import circuit_breaker, CredentialStatus
 from app.core.crypto import decrypt_secret
 from app.adapters.factory import get_adapter
@@ -246,7 +247,7 @@ class RoutingEngine:
                     extra_headers=provider.extra_headers,
                     configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
                     proxy_url=proxy_url,
-                    timeout=60.0,
+                    timeout=settings.DEFAULT_TIMEOUT_SECONDS,
                 )
                 cand_latency = round((time.perf_counter() - cand_t0) * 1000, 2)
                 circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
@@ -399,7 +400,7 @@ class RoutingEngine:
                     extra_headers=provider.extra_headers,
                     configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
                     proxy_url=proxy_url,
-                    timeout=60.0,
+                    timeout=settings.DEFAULT_TIMEOUT_SECONDS,
                 ):
                     stream_started = True
                     if '"usage"' in chunk:

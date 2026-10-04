@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
+import json
 import time
 import uuid
 
@@ -11,6 +12,7 @@ class ToolCall(BaseModel):
     id: str = Field(default_factory=lambda: f"call_{uuid.uuid4().hex[:12]}")
     type: Literal["function"] = "function"
     function: FunctionCall
+    extra_content: Optional[Dict[str, Any]] = None
 
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant", "tool", "function"]
@@ -31,6 +33,7 @@ class ResponsesRequest(BaseModel):
     reasoning: Optional[Dict[str, Any]] = None
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+    parallel_tool_calls: Optional[bool] = None
 
     def to_chat_request(self) -> "ChatCompletionRequest":
         messages: List[ChatMessage] = []
@@ -41,11 +44,39 @@ class ResponsesRequest(BaseModel):
         else:
             for item in self.input:
                 if not isinstance(item, dict):
-                    continue
-                role = item.get("role", "user")
-                if role not in {"system", "user", "assistant", "tool", "function"}:
-                    role = "user"
-                messages.append(ChatMessage(role=role, content=item.get("content")))
+                    raise ValueError("Responses input items must be objects")
+                kind = item.get("type", "message")
+                if kind in ("function_call", "function_call_output") and not item.get("call_id"):
+                    raise ValueError("Responses tool items require a non-empty call_id")
+                if kind == "function_call":
+                    messages.append(ChatMessage(role="assistant", tool_calls=[ToolCall(
+                        id=item["call_id"], function=FunctionCall(name=item["name"], arguments=item["arguments"]),
+                        extra_content=item.get("extra_content"),
+                    )]))
+                elif kind == "function_call_output":
+                    output = item.get("output", "")
+                    messages.append(ChatMessage(role="tool", tool_call_id=item["call_id"],
+                        content=output if isinstance(output, str) else json.dumps(output)))
+                elif kind == "message":
+                    role = item.get("role", "user")
+                    if role == "developer":
+                        role = "system"
+                    content = item.get("content")
+                    if isinstance(content, list):
+                        content = [{**part, "type": "text"} if part.get("type") in ("input_text", "output_text") else part for part in content]
+                    messages.append(ChatMessage(role=role, content=content,
+                        tool_calls=item.get("tool_calls"), tool_call_id=item.get("tool_call_id")))
+                elif kind != "reasoning":
+                    raise ValueError(f"Unsupported Responses input item type: {kind}")
+        tools = None if self.tools is None else [
+            {"type": "function", "function": {k: tool[k] for k in
+                ("name", "description", "parameters", "strict") if k in tool}}
+            if tool.get("type") == "function" and "function" not in tool else tool
+            for tool in self.tools
+        ]
+        choice = self.tool_choice
+        if isinstance(choice, dict) and choice.get("type") == "function" and "name" in choice:
+            choice = {"type": "function", "function": {"name": choice["name"]}}
         return ChatCompletionRequest(
             model=self.model,
             messages=messages,
@@ -54,8 +85,9 @@ class ResponsesRequest(BaseModel):
             max_tokens=self.max_output_tokens,
             stream=self.stream,
             reasoning=self.reasoning,
-            tools=self.tools,
-            tool_choice=self.tool_choice,
+            tools=tools,
+            tool_choice=choice,
+            parallel_tool_calls=self.parallel_tool_calls,
         )
 
 class ChatCompletionRequest(BaseModel):
@@ -77,6 +109,7 @@ class ChatCompletionRequest(BaseModel):
     seed: Optional[int] = None
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+    parallel_tool_calls: Optional[bool] = None
     metadata: Optional[Dict[str, Any]] = None
     reasoning_effort: Optional[str] = None
     reasoning: Optional[Dict[str, Any]] = None

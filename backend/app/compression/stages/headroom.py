@@ -77,7 +77,7 @@ class HeadroomStage(BaseCompressionStage):
             content = self.JSON_ARRAY_RE.sub(_crush_match, content)
 
             if content != orig:
-                compressed_messages.append(ChatMessage(role=msg.role, content=content, name=msg.name))
+                compressed_messages.append(msg.model_copy(update={"content": content}))
             else:
                 compressed_messages.append(msg)
 
