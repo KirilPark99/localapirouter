@@ -124,6 +124,7 @@ export interface Credential {
   rpm_limit?: number;
   tpm_limit?: number;
   max_concurrency?: number;
+  notes?: string | null;
   discovered_models_count: number;
   created_at: string;
 }
@@ -139,6 +140,7 @@ export interface CredentialCreate {
   rpm_limit?: number;
   tpm_limit?: number;
   max_concurrency?: number;
+  notes?: string | null;
 }
 
 export interface CredentialTestResult {
@@ -390,6 +392,7 @@ export interface RouterApiKey {
   expiration_date?: string;
   ip_restrictions: string[];
   last_used_at?: string;
+  notes?: string | null;
   created_at: string;
 }
 
@@ -459,6 +462,7 @@ export interface RouterApiKeyCreate {
   allowed_fusions?: string[];
   allowed_judges?: string[];
   rate_limit_rpm?: number;
+  notes?: string | null;
 }
 
 export interface StatusCodeItem {

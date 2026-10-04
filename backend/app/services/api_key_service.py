@@ -48,6 +48,7 @@ class ApiKeyService:
             total_requests=0,
             expiration_date=getattr(data, "expiration_date", None),
             ip_restrictions=getattr(data, "ip_restrictions", []),
+            notes=getattr(data, "notes", None),
         )
         db.add(key_obj)
         await db.commit()
@@ -70,6 +71,9 @@ class ApiKeyService:
             k.name = data.name
         if data.enabled is not None:
             k.enabled = data.enabled
+        if "notes" in data.model_fields_set:
+            raw_notes = data.notes
+            k.notes = raw_notes.strip() if (raw_notes and isinstance(raw_notes, str) and raw_notes.strip()) else None
         if data.permissions is not None:
             k.permissions = data.permissions
         if data.allowed_models is not None:
@@ -158,5 +162,23 @@ class ApiKeyService:
             expiration_date=k.expiration_date,
             ip_restrictions=k.ip_restrictions,
             last_used_at=k.last_used_at,
+            notes=k.notes,
             created_at=k.created_at,
         )
+
+    @classmethod
+    async def get_key(cls, db: AsyncSession, key_id: int) -> Optional[RouterApiKey]:
+        result = await db.execute(select(RouterApiKey).where(RouterApiKey.id == key_id))
+        return result.scalar_one_or_none()
+
+    @classmethod
+    async def update_key_notes(cls, db: AsyncSession, key_id: int, notes: Optional[str]) -> Optional[str]:
+        result = await db.execute(select(RouterApiKey).where(RouterApiKey.id == key_id))
+        k = result.scalar_one_or_none()
+        if not k:
+            return None
+        clean_notes = notes.strip() if notes and isinstance(notes, str) and notes.strip() else None
+        k.notes = clean_notes
+        await db.commit()
+        await db.refresh(k)
+        return k.notes

@@ -46,6 +46,7 @@ class DiskProfileData(BaseModel):
     proxy_id: Optional[int] = None
     proxy_name: Optional[str] = None
     proxy_url: Optional[str] = None
+    notes: Optional[str] = None
     fields: Dict[str, Any] = Field(default_factory=dict)
     file_path: str = ""
     file_key: str = ""
@@ -73,6 +74,8 @@ def _parse_profile_dict(raw: Dict[str, Any], default_module_id: str, default_nam
 
     proxy_name = raw.get("proxy_name")
     proxy_url = raw.get("proxy_url")
+    raw_notes = raw.get("notes")
+    notes = raw_notes.strip() if raw_notes and isinstance(raw_notes, str) and raw_notes.strip() else None
 
     # Fields can be nested under `fields` or placed at top-level
     raw_fields = raw.get("fields")
@@ -83,7 +86,7 @@ def _parse_profile_dict(raw: Dict[str, Any], default_module_id: str, default_nam
     # Also capture any extra top-level keys that look like credential tokens
     reserved_keys = {
         "module", "module_id", "name", "enabled", "priority", "weight",
-        "proxy_id", "proxy_name", "proxy_url", "fields", "source", "description"
+        "proxy_id", "proxy_name", "proxy_url", "notes", "fields", "source", "description"
     }
     for k, v in raw.items():
         if k not in reserved_keys and k not in fields:
@@ -100,6 +103,7 @@ def _parse_profile_dict(raw: Dict[str, Any], default_module_id: str, default_nam
         proxy_id=proxy_id,
         proxy_name=proxy_name,
         proxy_url=proxy_url,
+        notes=notes,
         fields=fields,
         file_path=file_rel,
         file_key=file_key,
@@ -271,6 +275,8 @@ async def sync_profiles_from_disk(db: AsyncSession, profiles_dir: Optional[Path]
                 target_cred.enabled = p.enabled
                 target_cred.priority = p.priority
                 target_cred.weight = p.weight
+                if p.notes:
+                    target_cred.notes = p.notes
                 if proxy_id:
                     target_cred.proxy_id = proxy_id
                 target_cred.metadata_json = metadata
@@ -291,6 +297,7 @@ async def sync_profiles_from_disk(db: AsyncSession, profiles_dir: Optional[Path]
                     status=CredentialStatus.HEALTHY if p.enabled else CredentialStatus.DISABLED,
                     priority=p.priority,
                     weight=p.weight,
+                    notes=p.notes,
                     consecutive_failures=0,
                     metadata_json=metadata,
                 )
@@ -387,6 +394,8 @@ async def export_profile_to_file(
         "weight": cred.weight,
         "fields": fields,
     }
+    if cred.notes:
+        payload["notes"] = cred.notes
     if cred.proxy_id:
         payload["proxy_id"] = cred.proxy_id
 

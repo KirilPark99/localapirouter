@@ -95,6 +95,7 @@ interface ModuleProfile {
   last_success_at?: string | null;
   last_error?: string | null;
   consecutive_failures: number;
+  notes?: string | null;
 }
 
 export const ModulesPage: React.FC = () => {
@@ -117,6 +118,7 @@ export const ModulesPage: React.FC = () => {
   const [formPriority, setFormPriority] = useState(1);
   const [formWeight, setFormWeight] = useState(1);
   const [formFields, setFormFields] = useState<Record<string, any>>({});
+  const [formProfileNotes, setFormProfileNotes] = useState("");
   const [showPasswordFields, setShowPasswordFields] = useState<Record<string, boolean>>({});
   const [savingProfile, setSavingProfile] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -131,9 +133,13 @@ export const ModulesPage: React.FC = () => {
     modelsFound?: number;
   } | null>(null);
 
-  // Quick Notes modal
+  // Module Notes modal
   const [notesModalOpen, setNotesModalOpen] = useState(false);
   const [notesModule, setNotesModule] = useState<LoadedModule | null>(null);
+
+  // Profile Notes modal
+  const [profileNotesModalOpen, setProfileNotesModalOpen] = useState(false);
+  const [selectedProfileForNotes, setSelectedProfileForNotes] = useState<ModuleProfile | null>(null);
 
   const openNotesModal = (mod: LoadedModule) => {
     setNotesModule(mod);
@@ -170,6 +176,48 @@ export const ModulesPage: React.FC = () => {
     );
     if (selectedModule && selectedModule.manifest.id === notesModule.manifest.id) {
       setSelectedModule({ ...selectedModule, notes: null });
+    }
+  };
+
+  const openProfileNotesModal = (p: ModuleProfile) => {
+    setSelectedProfileForNotes(p);
+    setProfileNotesModalOpen(true);
+  };
+
+  const handleSaveProfileNotes = async (notes: string) => {
+    if (!selectedProfileForNotes || !selectedModule) return;
+    const trimmed = notes.trim();
+    await apiRequest(`/api/admin/modules/${selectedModule.manifest.id}/profiles/${selectedProfileForNotes.id}/notes`, {
+      method: "PUT",
+      body: JSON.stringify({ notes: trimmed }),
+    });
+    setProfiles((prev) =>
+      prev.map((p) =>
+        p.id === selectedProfileForNotes.id ? { ...p, notes: trimmed || null } : p
+      )
+    );
+    setSelectedProfileForNotes((prev) => (prev ? { ...prev, notes: trimmed || null } : null));
+    if (editingProfile && editingProfile.id === selectedProfileForNotes.id) {
+      setEditingProfile({ ...editingProfile, notes: trimmed || null });
+      setFormProfileNotes(trimmed);
+    }
+  };
+
+  const handleClearProfileNotes = async () => {
+    if (!selectedProfileForNotes || !selectedModule) return;
+    await apiRequest(`/api/admin/modules/${selectedModule.manifest.id}/profiles/${selectedProfileForNotes.id}/notes`, {
+      method: "PUT",
+      body: JSON.stringify({ notes: "" }),
+    });
+    setProfiles((prev) =>
+      prev.map((p) =>
+        p.id === selectedProfileForNotes.id ? { ...p, notes: null } : p
+      )
+    );
+    setSelectedProfileForNotes((prev) => (prev ? { ...prev, notes: null } : null));
+    if (editingProfile && editingProfile.id === selectedProfileForNotes.id) {
+      setEditingProfile({ ...editingProfile, notes: null });
+      setFormProfileNotes("");
     }
   };
 
@@ -243,6 +291,7 @@ export const ModulesPage: React.FC = () => {
     setFormProxyId(undefined);
     setFormPriority(1);
     setFormWeight(1);
+    setFormProfileNotes("");
     const initialFields: Record<string, any> = {};
     for (const f of mod.manifest.fields) {
       initialFields[f.key] = f.default !== undefined ? f.default : "";
@@ -259,6 +308,7 @@ export const ModulesPage: React.FC = () => {
     setFormProxyId(profile.proxy_id || undefined);
     setFormPriority(profile.priority);
     setFormWeight(profile.weight);
+    setFormProfileNotes(profile.notes || "");
     setFormFields({ ...(profile.fields || {}) });
     setFormError(null);
     setIsProfileModalOpen(true);
@@ -271,6 +321,7 @@ export const ModulesPage: React.FC = () => {
     setFormError(null);
 
     try {
+      const finalNotes = formProfileNotes.trim() || null;
       if (editingProfile) {
         // Update
         await apiRequest(`/api/admin/modules/${selectedModule.manifest.id}/profiles/${editingProfile.id}`, {
@@ -281,6 +332,7 @@ export const ModulesPage: React.FC = () => {
             priority: formPriority,
             weight: formWeight,
             fields: formFields,
+            notes: finalNotes,
           }),
         });
       } else {
@@ -293,6 +345,7 @@ export const ModulesPage: React.FC = () => {
             priority: formPriority,
             weight: formWeight,
             fields: formFields,
+            notes: finalNotes,
           }),
         });
       }
@@ -697,6 +750,18 @@ export const ModulesPage: React.FC = () => {
                               <span>Успех: {new Date(p.last_success_at).toLocaleTimeString()}</span>
                             )}
                           </div>
+
+                          {p.notes && (
+                            <button
+                              type="button"
+                              onClick={() => openProfileNotesModal(p)}
+                              className="mt-2 flex items-center gap-1.5 text-xs text-amber-300/90 hover:text-amber-200 cursor-pointer max-w-md text-left group/note p-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20"
+                              title={p.notes}
+                            >
+                              <StickyNote size={12} className="shrink-0 text-amber-400 group-hover/note:scale-110 transition-transform" />
+                              <span className="truncate">{p.notes}</span>
+                            </button>
+                          )}
                         </div>
 
                         {/* Actions */}
@@ -723,6 +788,18 @@ export const ModulesPage: React.FC = () => {
                             title="Синхронизировать список моделей из профиля"
                           >
                             <RotateCcw size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openProfileNotesModal(p)}
+                            className={`btn-press p-1.5 rounded-lg text-xs border transition-all cursor-pointer ${
+                              p.notes
+                                ? "bg-amber-500/15 text-amber-300 border-amber-500/30 hover:bg-amber-500/25"
+                                : "bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border-white/[0.06]"
+                            }`}
+                            title={p.notes ? "Заметка" : "Добавить заметку"}
+                          >
+                            <StickyNote size={13} className={p.notes ? "text-amber-400" : "text-slate-400"} />
                           </button>
                           <button
                             onClick={() => openEditModal(p)}
@@ -929,6 +1006,20 @@ export const ModulesPage: React.FC = () => {
               </div>
             )}
 
+            {/* Profile Notes */}
+            <div className="pt-2 border-t border-white/[0.06] space-y-1">
+              <label className="block text-xs font-semibold text-slate-300 mb-1">
+                Заметки
+              </label>
+              <textarea
+                value={formProfileNotes}
+                onChange={(e) => setFormProfileNotes(e.target.value)}
+                placeholder="Личные заметки к этому профилю / ключу модуля..."
+                rows={3}
+                className="w-full px-3 py-2 bg-slate-950 border border-white/[0.08] focus:border-indigo-500 rounded-xl text-xs text-slate-200 placeholder-slate-600 focus:outline-hidden resize-y"
+              />
+            </div>
+
             {/* Modal Actions */}
             <div className="flex items-center justify-end gap-2 pt-4 border-t border-white/[0.06]">
               <button
@@ -963,6 +1054,21 @@ export const ModulesPage: React.FC = () => {
         initialNotes={notesModule?.notes || ""}
         onSave={handleSaveNotes}
         onClear={handleClearNotes}
+      />
+
+      {/* Quick Notes Modal for Module Profile */}
+      <NotesModal
+        isOpen={profileNotesModalOpen}
+        onClose={() => {
+          setProfileNotesModalOpen(false);
+          setSelectedProfileForNotes(null);
+        }}
+        title={`Заметка: ${selectedProfileForNotes?.name || "Профиль"}`}
+        subtitle={`Профиль ID: ${selectedProfileForNotes?.id || ""} • Модуль: ${selectedModule?.manifest.name || ""}`}
+        entityType="module"
+        initialNotes={selectedProfileForNotes?.notes || ""}
+        onSave={handleSaveProfileNotes}
+        onClear={handleClearProfileNotes}
       />
     </div>
   );

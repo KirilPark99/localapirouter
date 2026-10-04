@@ -85,3 +85,99 @@ async def test_module_notes_crud():
         # Clear note
         prov_check.notes = None
         await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_credential_notes_crud():
+    async with AsyncSessionLocal() as db:
+        # Create a provider for testing credential
+        p_slug = f"test-cred-notes-prov-{uuid.uuid4().hex[:8]}"
+        p_create = ProviderCreate(
+            name="Cred Notes Test Prov",
+            slug=p_slug,
+            adapter_type="generic_openai",
+            base_url="https://api.test.com/v1",
+        )
+        prov = await ProviderService.create_provider(db, p_create)
+
+        from app.services.credential_service import CredentialService
+        from app.schemas.entities import CredentialCreate, CredentialUpdate
+
+        # 1. Create credential with notes
+        cred_note = "Account tier: Paid Pro. Exp: 2026-12."
+        cred_create = CredentialCreate(
+            provider_id=prov.id,
+            name="Key With Notes",
+            api_key=f"sk-test-{uuid.uuid4().hex}",
+            notes=cred_note,
+        )
+        created_cred = await CredentialService.create_credential(db, cred_create)
+        assert created_cred.notes == cred_note
+
+        # 2. Get credential and check notes
+        fetched_cred = await CredentialService.get_credential(db, created_cred.id)
+        assert fetched_cred is not None
+        assert fetched_cred.notes == cred_note
+
+        # 3. Update notes via update_credential_notes
+        updated_note = "Updated: billing card replaced, limit increased."
+        res_note = await CredentialService.update_credential_notes(db, created_cred.id, updated_note)
+        assert res_note == updated_note
+
+        fetched_again = await CredentialService.get_credential(db, created_cred.id)
+        assert fetched_again.notes == updated_note
+
+        # 4. Update via general update_credential
+        via_update = "Changed via general CredentialUpdate"
+        up_cred = await CredentialService.update_credential(db, created_cred.id, CredentialUpdate(notes=via_update))
+        assert up_cred.notes == via_update
+
+        # 5. Clear notes
+        cleared = await CredentialService.update_credential_notes(db, created_cred.id, "")
+        assert cleared is None
+
+        # Clean up
+        await CredentialService.delete_credential(db, created_cred.id)
+        await ProviderService.delete_provider(db, prov.id)
+
+
+@pytest.mark.asyncio
+async def test_router_api_key_notes_crud():
+    async with AsyncSessionLocal() as db:
+        from app.services.api_key_service import ApiKeyService
+        from app.schemas.entities import RouterApiKeyCreate, RouterApiKeyUpdate
+
+        # 1. Create key with notes
+        initial_note = "Assigned to client app: Mobile iOS Client v2.3"
+        key_create = RouterApiKeyCreate(
+            name="Test Router Key",
+            permissions=["direct", "routes"],
+            notes=initial_note,
+        )
+        created = await ApiKeyService.create_key(db, key_create)
+        assert created.notes == initial_note
+
+        # 2. Get key
+        fetched = await ApiKeyService.get_key(db, created.id)
+        assert fetched is not None
+        assert fetched.notes == initial_note
+
+        # 3. Update notes via update_key_notes
+        updated_note = "Client moved to enterprise plan. Monthly review."
+        res = await ApiKeyService.update_key_notes(db, created.id, updated_note)
+        assert res == updated_note
+
+        fetched_again = await ApiKeyService.get_key(db, created.id)
+        assert fetched_again.notes == updated_note
+
+        # 4. Update via general update_key
+        via_update = "General update test note"
+        up_res = await ApiKeyService.update_key(db, created.id, RouterApiKeyUpdate(notes=via_update))
+        assert up_res.notes == via_update
+
+        # 5. Clear notes
+        cleared = await ApiKeyService.update_key_notes(db, created.id, "")
+        assert cleared is None
+
+        # Clean up
+        await ApiKeyService.delete_key(db, created.id)

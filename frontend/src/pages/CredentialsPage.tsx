@@ -27,11 +27,13 @@ import {
   FolderInput,
   Download,
   Upload,
+  StickyNote,
 } from "lucide-react";
 import { apiRequest } from "../api/client";
 import { Credential, Provider, Proxy, CredentialTestResult } from "../types";
 import { StatusBadge } from "../components/StatusBadge";
 import { Modal } from "../components/Modal";
+import { NotesModal } from "../components/NotesModal";
 import { getCountryFlag } from "../utils/country";
 import { BackupExportModal, BackupImportModal } from "../components/BackupModals";
 import { useI18n } from "../i18n";
@@ -56,7 +58,12 @@ export const CredentialsPage: React.FC = () => {
   const [formPriority, setFormPriority] = useState(1);
   const [formWeight, setFormWeight] = useState(1);
   const [formRpm, setFormRpm] = useState<string>("");
+  const [formNotes, setFormNotes] = useState<string>("");
   const [isKeyless, setIsKeyless] = useState(false);
+
+  // Notes Modal state
+  const [notesModalOpen, setNotesModalOpen] = useState(false);
+  const [selectedCredForNotes, setSelectedCredForNotes] = useState<Credential | null>(null);
 
   const [testingId, setTestingId] = useState<number | null>(null);
   const [fetchingId, setFetchingId] = useState<number | null>(null);
@@ -422,6 +429,7 @@ export const CredentialsPage: React.FC = () => {
     setFormPriority(1);
     setFormWeight(1);
     setFormRpm("");
+    setFormNotes("");
     setIsModalOpen(true);
   };
 
@@ -435,8 +443,51 @@ export const CredentialsPage: React.FC = () => {
     setFormPriority(c.priority);
     setFormWeight(c.weight);
     setFormRpm(c.rpm_limit ? c.rpm_limit.toString() : "");
+    setFormNotes(c.notes || "");
     setIsKeyless(c.masked_key?.includes("Keyless") || false);
     setIsModalOpen(true);
+  };
+
+  const openNotesModal = (c: Credential) => {
+    setSelectedCredForNotes(c);
+    setNotesModalOpen(true);
+  };
+
+  const handleSaveNotes = async (notes: string) => {
+    if (!selectedCredForNotes) return;
+    const trimmed = notes.trim();
+    await apiRequest(`/api/admin/credentials/${selectedCredForNotes.id}/notes`, {
+      method: "PUT",
+      body: JSON.stringify({ notes: trimmed }),
+    });
+    setCredentials((prev) =>
+      prev.map((c) =>
+        c.id === selectedCredForNotes.id ? { ...c, notes: trimmed || null } : c
+      )
+    );
+    setSelectedCredForNotes((prev) => (prev ? { ...prev, notes: trimmed || null } : null));
+    if (editingCred && editingCred.id === selectedCredForNotes.id) {
+      setEditingCred({ ...editingCred, notes: trimmed || null });
+      setFormNotes(trimmed);
+    }
+  };
+
+  const handleClearNotes = async () => {
+    if (!selectedCredForNotes) return;
+    await apiRequest(`/api/admin/credentials/${selectedCredForNotes.id}/notes`, {
+      method: "PUT",
+      body: JSON.stringify({ notes: "" }),
+    });
+    setCredentials((prev) =>
+      prev.map((c) =>
+        c.id === selectedCredForNotes.id ? { ...c, notes: null } : c
+      )
+    );
+    setSelectedCredForNotes((prev) => (prev ? { ...prev, notes: null } : null));
+    if (editingCred && editingCred.id === selectedCredForNotes.id) {
+      setEditingCred({ ...editingCred, notes: null });
+      setFormNotes("");
+    }
   };
 
   const handleProviderChange = (pid: number) => {
@@ -475,6 +526,7 @@ export const CredentialsPage: React.FC = () => {
     try {
       const finalApiKey = isKeyless ? "no-key" : (formApiKey ? formApiKey.trim() : undefined);
       const finalGroupName = formGroupName.trim() || null;
+      const finalNotes = formNotes.trim() || null;
       if (editingCred) {
         await apiRequest(`/api/admin/credentials/${editingCred.id}`, {
           method: "PUT",
@@ -486,6 +538,7 @@ export const CredentialsPage: React.FC = () => {
             priority: formPriority,
             weight: formWeight,
             rpm_limit: formRpm ? parseInt(formRpm) : null,
+            notes: finalNotes,
           }),
         });
       } else {
@@ -500,6 +553,7 @@ export const CredentialsPage: React.FC = () => {
             priority: formPriority,
             weight: formWeight,
             rpm_limit: formRpm ? parseInt(formRpm) : null,
+            notes: finalNotes,
           }),
         });
       }
@@ -1820,6 +1874,17 @@ export const CredentialsPage: React.FC = () => {
                                                 Priority {c.priority} • Weight {c.weight}
                                                 {c.rpm_limit ? ` • ${c.rpm_limit} RPM` : ""}
                                               </div>
+                                              {c.notes && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() => openNotesModal(c)}
+                                                  className="mt-1 flex items-center gap-1 text-[11px] text-amber-300/90 hover:text-amber-200 cursor-pointer max-w-xs text-left group/note"
+                                                  title={c.notes}
+                                                >
+                                                  <StickyNote size={11} className="shrink-0 text-amber-400 group-hover/note:scale-110 transition-transform" />
+                                                  <span className="truncate">{c.notes}</span>
+                                                </button>
+                                              )}
                                             </div>
                                           </div>
                                         </td>
@@ -1932,6 +1997,18 @@ export const CredentialsPage: React.FC = () => {
                                            <RotateCcw size={13} />
                                          </button>
                                        )}
+                                       <button
+                                         type="button"
+                                         onClick={() => openNotesModal(c)}
+                                         className={`btn-press p-1.5 rounded-lg transition-colors cursor-pointer ${
+                                           c.notes
+                                             ? "text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20"
+                                             : "text-slate-400 hover:text-slate-200 hover:bg-white/[0.06]"
+                                         }`}
+                                         title={c.notes ? "Заметка" : "Добавить заметку"}
+                                       >
+                                         <StickyNote size={13} />
+                                       </button>
                                        <button
                                          onClick={() => openEditModal(c)}
                                          className="btn-press p-1.5 text-slate-400 hover:text-indigo-300 hover:bg-white/[0.06] rounded-lg transition-colors cursor-pointer"
@@ -2238,6 +2315,17 @@ export const CredentialsPage: React.FC = () => {
                 className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:border-indigo-500 focus:outline-none"
               />
             </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-300 mb-1">Заметки</label>
+            <textarea
+              value={formNotes}
+              onChange={(e) => setFormNotes(e.target.value)}
+              placeholder="Личные заметки к этому ключу / аккаунту..."
+              rows={3}
+              className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:border-indigo-500 focus:outline-none resize-y"
+            />
           </div>
 
           <div className="flex justify-end gap-2.5 pt-3 border-t border-slate-800">
@@ -2870,6 +2958,17 @@ export const CredentialsPage: React.FC = () => {
           loadData();
         }}
       />
+
+      {/* Notes Modal */}
+      <NotesModal
+        isOpen={notesModalOpen}
+        onClose={() => setNotesModalOpen(false)}
+        title={`Заметка: ${selectedCredForNotes?.name || ""}`}
+        initialNotes={selectedCredForNotes?.notes || ""}
+        onSave={handleSaveNotes}
+        onClear={handleClearNotes}
+      />
     </div>
   );
 };
+

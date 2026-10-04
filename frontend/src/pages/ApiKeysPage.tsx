@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { Plus, Copy, Check, Trash2, Key, ShieldCheck, AlertCircle } from "lucide-react";
+import { Plus, Copy, Check, Trash2, Key, ShieldCheck, AlertCircle, StickyNote } from "lucide-react";
 import { apiRequest } from "../api/client";
 import { RouterApiKey, RouterApiKeyCreate, RouterApiKeyCreated } from "../types";
 import { Modal } from "../components/Modal";
+import { NotesModal } from "../components/NotesModal";
 import { useI18n } from "../i18n/context";
 
 export const ApiKeysPage: React.FC = () => {
@@ -16,6 +17,11 @@ export const ApiKeysPage: React.FC = () => {
   const [formRoutes, setFormRoutes] = useState(true);
   const [formFusion, setFormFusion] = useState(true);
   const [formRpm, setFormRpm] = useState("");
+  const [formNotes, setFormNotes] = useState("");
+
+  // Notes modal
+  const [notesModalOpen, setNotesModalOpen] = useState(false);
+  const [selectedKeyForNotes, setSelectedKeyForNotes] = useState<RouterApiKey | null>(null);
 
   const [createdKeyData, setCreatedKeyData] = useState<RouterApiKeyCreated | null>(null);
   const [copied, setCopied] = useState(false);
@@ -42,7 +48,42 @@ export const ApiKeysPage: React.FC = () => {
     setFormRoutes(true);
     setFormFusion(true);
     setFormRpm("");
+    setFormNotes("");
     setIsModalOpen(true);
+  };
+
+  const openNotesModal = (k: RouterApiKey) => {
+    setSelectedKeyForNotes(k);
+    setNotesModalOpen(true);
+  };
+
+  const handleSaveNotes = async (notes: string) => {
+    if (!selectedKeyForNotes) return;
+    const trimmed = notes.trim();
+    await apiRequest(`/api/admin/keys/${selectedKeyForNotes.id}/notes`, {
+      method: "PUT",
+      body: JSON.stringify({ notes: trimmed }),
+    });
+    setKeys((prev) =>
+      prev.map((k) =>
+        k.id === selectedKeyForNotes.id ? { ...k, notes: trimmed || null } : k
+      )
+    );
+    setSelectedKeyForNotes((prev) => (prev ? { ...prev, notes: trimmed || null } : null));
+  };
+
+  const handleClearNotes = async () => {
+    if (!selectedKeyForNotes) return;
+    await apiRequest(`/api/admin/keys/${selectedKeyForNotes.id}/notes`, {
+      method: "PUT",
+      body: JSON.stringify({ notes: "" }),
+    });
+    setKeys((prev) =>
+      prev.map((k) =>
+        k.id === selectedKeyForNotes.id ? { ...k, notes: null } : k
+      )
+    );
+    setSelectedKeyForNotes((prev) => (prev ? { ...prev, notes: null } : null));
   };
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -62,6 +103,7 @@ export const ApiKeysPage: React.FC = () => {
           allowed_routes: ["*"],
           allowed_fusions: ["*"],
           rate_limit_rpm: formRpm ? parseInt(formRpm) : null,
+          notes: formNotes.trim() || null,
         }),
       });
       setIsModalOpen(false);
@@ -179,10 +221,21 @@ export const ApiKeysPage: React.FC = () => {
               keys.map((k) => (
                 <tr key={k.id} className="hover:bg-white/[0.03] transition-colors">
                   <td className="py-3.5 px-4 font-medium text-slate-100 flex items-center gap-2.5">
-                    <ShieldCheck size={15} className="text-indigo-400 shrink-0" />
-                    <div>
+                    <ShieldCheck size={15} className="text-indigo-400 shrink-0 self-start mt-1" />
+                    <div className="min-w-0">
                       <div className="font-semibold">{k.name}</div>
                       <div className="text-[10px] text-slate-400 font-mono">{k.key_prefix}...</div>
+                      {k.notes && (
+                        <button
+                          type="button"
+                          onClick={() => openNotesModal(k)}
+                          className="mt-1 flex items-center gap-1 text-[11px] text-amber-300/90 hover:text-amber-200 cursor-pointer max-w-xs text-left group/note"
+                          title={k.notes}
+                        >
+                          <StickyNote size={11} className="shrink-0 text-amber-400 group-hover/note:scale-110 transition-transform" />
+                          <span className="truncate">{k.notes}</span>
+                        </button>
+                      )}
                     </div>
                   </td>
                   <td className="py-3.5 px-4 font-mono text-[11px] text-slate-300">{k.masked_key}</td>
@@ -213,7 +266,19 @@ export const ApiKeysPage: React.FC = () => {
                       {k.enabled ? t.common.active : t.common.disabled}
                     </button>
                   </td>
-                  <td className="py-3.5 px-4 text-right">
+                  <td className="py-3.5 px-4 text-right space-x-1 whitespace-nowrap">
+                    <button
+                      type="button"
+                      onClick={() => openNotesModal(k)}
+                      className={`btn-press p-1.5 rounded-lg transition-colors cursor-pointer ${
+                        k.notes
+                          ? "text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20"
+                          : "text-slate-400 hover:text-slate-200 hover:bg-white/[0.06]"
+                      }`}
+                      title={k.notes ? "Заметка" : "Добавить заметку"}
+                    >
+                      <StickyNote size={13} />
+                    </button>
                     <button
                       onClick={() => handleDelete(k.id, k.name)}
                       className="btn-press p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer"
@@ -294,6 +359,19 @@ export const ApiKeysPage: React.FC = () => {
             />
           </div>
 
+          <div>
+            <label className="block text-xs font-medium text-slate-300 mb-1">
+              Заметки
+            </label>
+            <textarea
+              value={formNotes}
+              onChange={(e) => setFormNotes(e.target.value)}
+              placeholder="Личные заметки к этому ключу роутера..."
+              rows={3}
+              className="w-full px-3 py-2 bg-slate-950/70 border border-white/10 rounded-xl text-slate-100 text-xs focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/40 focus:outline-none transition-all resize-y"
+            />
+          </div>
+
           <div className="flex justify-end gap-2.5 pt-4 border-t border-white/[0.08]">
             <button
               type="button"
@@ -311,6 +389,17 @@ export const ApiKeysPage: React.FC = () => {
           </div>
         </form>
       </Modal>
+
+      {/* Notes Modal */}
+      <NotesModal
+        isOpen={notesModalOpen}
+        onClose={() => setNotesModalOpen(false)}
+        title={`Заметка: ${selectedKeyForNotes?.name || ""}`}
+        initialNotes={selectedKeyForNotes?.notes || ""}
+        onSave={handleSaveNotes}
+        onClear={handleClearNotes}
+      />
     </div>
   );
 };
+

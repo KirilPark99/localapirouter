@@ -61,6 +61,7 @@ class CredentialService:
             rpm_limit=c.rpm_limit,
             tpm_limit=c.tpm_limit,
             max_concurrency=c.max_concurrency,
+            notes=c.notes,
             discovered_models_count=len(c.discovered_models) if c.discovered_models else 0,
             created_at=c.created_at,
         )
@@ -131,6 +132,7 @@ class CredentialService:
             rpm_limit=data.rpm_limit,
             tpm_limit=data.tpm_limit,
             max_concurrency=data.max_concurrency,
+            notes=getattr(data, "notes", None),
             consecutive_failures=0,
             metadata_json={},
         )
@@ -154,6 +156,9 @@ class CredentialService:
         if "group_name" in data.model_fields_set:
             raw_g = data.group_name
             cred.group_name = raw_g.strip() if (raw_g and isinstance(raw_g, str) and raw_g.strip()) else None
+        if "notes" in data.model_fields_set:
+            raw_notes = data.notes
+            cred.notes = raw_notes.strip() if (raw_notes and isinstance(raw_notes, str) and raw_notes.strip()) else None
         if data.api_key is not None:
             clean_key = data.api_key.strip()
             if clean_key.lower() in ("no-key", "none", "empty", "keyless", ""):
@@ -384,3 +389,14 @@ class CredentialService:
             )
             db.add(pref)
         await db.commit()
+
+    @classmethod
+    async def update_credential_notes(cls, db: AsyncSession, credential_id: int, notes: Optional[str]) -> Optional[str]:
+        cred = await cls.get_credential(db, credential_id)
+        if not cred:
+            return None
+        clean_notes = notes.strip() if notes and isinstance(notes, str) and notes.strip() else None
+        cred.notes = clean_notes
+        await db.commit()
+        await db.refresh(cred)
+        return cred.notes

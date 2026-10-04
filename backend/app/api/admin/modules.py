@@ -25,6 +25,7 @@ class ModuleProfileCreate(BaseModel):
     priority: int = 1
     weight: int = 1
     fields: Dict[str, Any] = Field(default_factory=dict)
+    notes: Optional[str] = None
 
 
 class ModuleProfileUpdate(BaseModel):
@@ -34,6 +35,7 @@ class ModuleProfileUpdate(BaseModel):
     weight: Optional[int] = None
     enabled: Optional[bool] = None
     fields: Optional[Dict[str, Any]] = None
+    notes: Optional[str] = None
 
 
 @router.get("", response_model=List[Dict[str, Any]])
@@ -226,6 +228,7 @@ async def list_module_profiles(module_id: str, db: AsyncSession = Depends(get_db
             "last_success_at": c.last_success_at.isoformat() if c.last_success_at else None,
             "last_error": c.last_error,
             "consecutive_failures": c.consecutive_failures,
+            "notes": c.notes,
         })
 
     return output
@@ -294,6 +297,7 @@ async def create_module_profile(
         status=CredentialStatus.HEALTHY,
         priority=data.priority,
         weight=data.weight,
+        notes=(data.notes.strip() if data.notes and data.notes.strip() else None),
         consecutive_failures=0,
         metadata_json=data.fields,
     )
@@ -310,6 +314,7 @@ async def create_module_profile(
         "proxy_id": cred.proxy_id,
         "priority": cred.priority,
         "weight": cred.weight,
+        "notes": cred.notes,
     }
 
 
@@ -340,6 +345,9 @@ async def update_module_profile(
         cred.enabled = data.enabled
     if "proxy_id" in data.model_fields_set:
         cred.proxy_id = data.proxy_id
+    if "notes" in data.model_fields_set:
+        raw_notes = data.notes
+        cred.notes = raw_notes.strip() if (raw_notes and isinstance(raw_notes, str) and raw_notes.strip()) else None
 
     # If new fields were submitted, merge and re-encrypt
     if data.fields is not None:
@@ -383,7 +391,32 @@ async def update_module_profile(
         "proxy_id": cred.proxy_id,
         "priority": cred.priority,
         "weight": cred.weight,
+        "notes": cred.notes,
     }
+
+
+@router.put("/{module_id}/profiles/{profile_id}/notes")
+async def update_module_profile_notes(
+    module_id: str,
+    profile_id: int,
+    data: ModuleNotesUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update plain text notes for a module profile (credential).
+    """
+    cred = (await db.execute(
+        select(ProviderCredential).where(ProviderCredential.id == profile_id)
+    )).scalar_one_or_none()
+
+    if not cred:
+        raise HTTPException(status_code=404, detail=f"Profile with ID {profile_id} not found")
+
+    clean_notes = data.notes.strip() if data.notes and data.notes.strip() else None
+    cred.notes = clean_notes
+    await db.commit()
+    await db.refresh(cred)
+    return {"profile_id": profile_id, "notes": cred.notes}
 
 
 @router.delete("/{module_id}/profiles/{profile_id}")

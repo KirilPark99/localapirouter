@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.api.deps import get_current_admin
 from app.services.api_key_service import ApiKeyService
-from app.schemas.entities import RouterApiKeyCreate, RouterApiKeyUpdate, RouterApiKeyRead, RouterApiKeyCreated
+from app.schemas.entities import RouterApiKeyCreate, RouterApiKeyUpdate, RouterApiKeyRead, RouterApiKeyCreated, NotesUpdate
 
 router = APIRouter(prefix="/keys", tags=["Admin Router API Keys"])
 
@@ -34,6 +34,18 @@ async def update_key(
     if not updated:
         raise HTTPException(status_code=404, detail="Key not found")
     return updated
+
+@router.put("/{key_id}/notes")
+async def update_key_notes(
+    key_id: int,
+    data: NotesUpdate,
+    username: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    notes = await ApiKeyService.update_key_notes(db, key_id, data.notes)
+    if notes is None and not await ApiKeyService.get_key(db, key_id):
+        raise HTTPException(status_code=404, detail="Key not found")
+    return {"message": "Notes updated", "notes": notes}
 
 @router.delete("/{key_id}")
 async def delete_key(

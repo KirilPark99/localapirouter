@@ -138,6 +138,7 @@ class CredentialCreate(BaseModel):
     rpm_limit: Optional[int] = None
     tpm_limit: Optional[int] = None
     max_concurrency: Optional[int] = None
+    notes: Optional[str] = None
 
 class CredentialUpdate(BaseModel):
     name: Optional[str] = None
@@ -150,6 +151,7 @@ class CredentialUpdate(BaseModel):
     rpm_limit: Optional[int] = None
     tpm_limit: Optional[int] = None
     max_concurrency: Optional[int] = None
+    notes: Optional[str] = None
 
 class CredentialBulkAssignProxy(BaseModel):
     credential_ids: List[int]
@@ -183,6 +185,7 @@ class CredentialRead(BaseModel):
     tpm_limit: Optional[int] = None
     max_concurrency: Optional[int] = None
     discovered_models_count: int = 0
+    notes: Optional[str] = None
     created_at: datetime
 
 class CredentialTestResult(BaseModel):
@@ -713,6 +716,7 @@ class RouterApiKeyCreate(BaseModel):
     request_limit: Optional[int] = None
     expiration_date: Optional[datetime] = None
     ip_restrictions: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
 
 class RouterApiKeyUpdate(BaseModel):
     name: Optional[str] = None
@@ -727,6 +731,7 @@ class RouterApiKeyUpdate(BaseModel):
     request_limit: Optional[int] = None
     expiration_date: Optional[datetime] = None
     ip_restrictions: Optional[List[str]] = None
+    notes: Optional[str] = None
 
 class RouterApiKeyRead(BaseModel):
     id: int
@@ -745,6 +750,7 @@ class RouterApiKeyRead(BaseModel):
     total_requests: int
     expiration_date: Optional[datetime] = None
     ip_restrictions: List[str]
+    notes: Optional[str] = None
     last_used_at: Optional[datetime] = None
     created_at: datetime
 

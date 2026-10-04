@@ -88,6 +88,7 @@ class ProviderCredential(Base, TimestampMixin):
     rpm_limit: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     tpm_limit: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     max_concurrency: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
     provider: Mapped["Provider"] = relationship("Provider", back_populates="credentials")
@@ -301,6 +302,7 @@ class RouterApiKey(Base, TimestampMixin):
     total_requests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     expiration_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     ip_restrictions: Mapped[List[str]] = mapped_column(JSON, default=list, nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 class RequestLog(Base, TimestampMixin):

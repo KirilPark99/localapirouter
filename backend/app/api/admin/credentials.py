@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.api.deps import get_current_admin
 from app.services.credential_service import CredentialService
-from app.schemas.entities import CredentialCreate, CredentialUpdate, CredentialRead, CredentialTestResult, CredentialBulkAssignProxy, CredentialBulkAssignGroup
+from app.schemas.entities import CredentialCreate, CredentialUpdate, CredentialRead, CredentialTestResult, CredentialBulkAssignProxy, CredentialBulkAssignGroup, NotesUpdate
 
 router = APIRouter(prefix="/credentials", tags=["Admin Credentials"])
 
@@ -99,3 +99,15 @@ async def set_model_preferences(
     model_ids = payload.get("model_ids", [])
     await CredentialService.set_model_preferences(db, credential_id, model_ids)
     return {"message": "Model preferences saved"}
+
+@router.put("/{credential_id}/notes")
+async def update_credential_notes(
+    credential_id: int,
+    data: NotesUpdate,
+    username: str = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    notes = await CredentialService.update_credential_notes(db, credential_id, data.notes)
+    if notes is None and not await CredentialService.get_credential(db, credential_id):
+        raise HTTPException(status_code=404, detail="Credential not found")
+    return {"message": "Notes updated", "notes": notes}
