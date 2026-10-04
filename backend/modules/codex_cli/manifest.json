@@ -1,0 +1,161 @@
+{
+  "id": "codex_cli",
+  "name": "OpenAI Codex CLI",
+  "version": "1.0.0",
+  "description": "OpenAI Codex CLI integration with auto-discovery from ~/.codex/auth.json, ChatGPT Responses API routing, and the current Codex model catalog.",
+  "author": "Omniroute Port",
+  "icon": "Terminal",
+  "auth_type": "custom_fields",
+  "fields": [
+    {
+      "key": "auto_detect_local",
+      "label": "Auto-detect Local CLI Auth",
+      "type": "select",
+      "required": false,
+      "default": "true",
+      "options": [
+        { "label": "Yes (Read from ~/.codex/auth.json)", "value": "true" },
+        { "label": "No (Use pasted credentials only)", "value": "false" }
+      ],
+      "description": "Automatically load tokens and account ID from local Codex CLI installation on this computer"
+    },
+    {
+      "key": "auth_json",
+      "label": "Pasted Codex auth.json (Optional)",
+      "type": "textarea",
+      "required": false,
+      "placeholder": "Paste contents of ~/.codex/auth.json...",
+      "description": "Raw JSON configuration exported from ~/.codex/auth.json"
+    },
+    {
+      "key": "access_token",
+      "label": "Access Token (Optional override)",
+      "type": "password",
+      "required": false,
+      "placeholder": "ey...",
+      "description": "ChatGPT access token"
+    },
+    {
+      "key": "refresh_token",
+      "label": "Refresh Token (Optional override)",
+      "type": "password",
+      "required": false,
+      "placeholder": "ey...",
+      "description": "OAuth refresh token for automatic token renewals"
+    },
+    {
+      "key": "account_id",
+      "label": "ChatGPT Account / Workspace ID (Optional override)",
+      "type": "text",
+      "required": false,
+      "placeholder": "e.g. 4e009262-855b-4472-be81-59e1c750b71e",
+      "description": "ChatGPT workspace ID sent via ChatGPT-Account-Id header"
+    }
+  ],
+  "default_models": [
+    {
+      "id": "gpt-6.1-sol",
+      "name": "GPT-6.1-Sol",
+      "context_length": 272000,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-6-astra",
+      "name": "GPT-6-Astra",
+      "context_length": 272000,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-6-sol",
+      "name": "GPT-6-Sol",
+      "context_length": 272000,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-6-luna",
+      "name": "GPT-6-Luna",
+      "context_length": 272000,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "name": "GPT-5.6-Sol",
+      "context_length": 272000,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "name": "GPT-5.6-Terra",
+      "context_length": 272000,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "name": "GPT-5.6-Luna",
+      "context_length": 272000,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "name": "GPT-5.5",
+      "context_length": 272000,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    }
+  ]
+}

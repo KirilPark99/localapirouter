@@ -25,8 +25,8 @@ import {
   CheckCircle2,
   AlertCircle,
   HelpCircle,
-  ChevronRight,
   ShieldCheck,
+  Database,
 } from "lucide-react";
 import { apiRequest } from "../api/client";
 import { Modal } from "../components/Modal";
@@ -35,6 +35,7 @@ import {
   CompressionGlobalSettings,
   CompressionPreviewResponse,
   StageConfigField,
+  CacheStats,
 } from "../types";
 
 export const CompressionPage: React.FC = () => {
@@ -44,6 +45,11 @@ export const CompressionPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  // Cache stats & operations
+  const [cacheStats, setCacheStats] = useState<CacheStats | null>(null);
+  const [loadingCache, setLoadingCache] = useState<boolean>(false);
+  const [clearingCache, setClearingCache] = useState<boolean>(false);
+
   // Global settings
   const [globalSettings, setGlobalSettings] = useState<CompressionGlobalSettings>({
     enabled: true,
@@ -52,6 +58,7 @@ export const CompressionPage: React.FC = () => {
     preserve_recent_turns: 1,
     enable_telemetry: true,
     fail_open: true,
+    preserve_system_prompt_mode: "when_caching",
   });
 
   // Stages
@@ -98,16 +105,50 @@ export const CompressionPage: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
-      const [settingsData, stagesData] = await Promise.all([
+      const [settingsData, stagesData, statsData] = await Promise.all([
         apiRequest<CompressionGlobalSettings>("/api/admin/compression/settings"),
         apiRequest<CompressionStageItem[]>("/api/admin/compression/stages"),
+        apiRequest<CacheStats>("/api/admin/cache/stats").catch(() => null),
       ]);
       setGlobalSettings(settingsData);
       setStages(stagesData);
+      if (statsData) setCacheStats(statsData);
     } catch (err: any) {
       setError(err?.message || "Ошибка загрузки настроек оптимизации");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchCacheStats = async () => {
+    try {
+      setLoadingCache(true);
+      const data = await apiRequest<CacheStats>("/api/admin/cache/stats");
+      setCacheStats(data);
+    } catch (err: any) {
+      console.error("Failed to load cache stats", err);
+    } finally {
+      setLoadingCache(false);
+    }
+  };
+
+  const handleClearCache = async () => {
+    if (!window.confirm("Очистить все записи из L1 памяти и L2 SQLite базы кэша ответов?")) {
+      return;
+    }
+    try {
+      setClearingCache(true);
+      const res = await apiRequest<{ message: string; l1_cleared: boolean; l2_cleared_entries: number }>(
+        "/api/admin/cache/clear",
+        { method: "POST" }
+      );
+      setSuccessMsg(res.message || "Кэш ответов успешно очищен");
+      setTimeout(() => setSuccessMsg(null), 3000);
+      await fetchCacheStats();
+    } catch (err: any) {
+      setError(err?.message || "Ошибка очистки кэша");
+    } finally {
+      setClearingCache(false);
     }
   };
 
@@ -377,7 +418,7 @@ export const CompressionPage: React.FC = () => {
       )}
 
       {/* Global Configuration Parameters Bar */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-slate-900/40 border border-white/[0.06] p-4 rounded-2xl backdrop-blur-md">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 bg-slate-900/40 border border-white/[0.06] p-4 rounded-2xl backdrop-blur-md">
         <div>
           <label className="text-[11px] font-medium text-slate-400 block mb-1.5">
             Порог активации (токенов)
@@ -430,6 +471,32 @@ export const CompressionPage: React.FC = () => {
         </div>
 
         <div>
+          <label className="text-[11px] font-medium text-slate-400 block mb-1.5 flex items-center gap-1">
+            <Zap size={12} className="text-emerald-400" />
+            <span>Защита системного промпта</span>
+          </label>
+          <select
+            value={globalSettings.preserve_system_prompt_mode || "when_caching"}
+            onChange={(e) => {
+              const val = e.target.value as any;
+              setGlobalSettings({
+                ...globalSettings,
+                preserve_system_prompt_mode: val,
+              });
+              handleSaveGlobal({ preserve_system_prompt_mode: val });
+            }}
+            className="w-full bg-slate-950/60 border border-white/[0.08] rounded-xl px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50"
+          >
+            <option value="when_caching">Авто (при кэшировании у провайдера)</option>
+            <option value="always">Всегда сохранять (байт-в-байт)</option>
+            <option value="never">Сжимать наравне с остальными</option>
+          </select>
+          <span className="text-[10px] text-slate-500 mt-1 block">
+            Защита для KV-кэша (Anthropic, DeepSeek, OpenAI, Gemini)
+          </span>
+        </div>
+
+        <div>
           <label className="text-[11px] font-medium text-slate-400 block mb-1.5">
             Мин. экономия отката (Bailout %)
           </label>
@@ -476,6 +543,95 @@ export const CompressionPage: React.FC = () => {
             />
             <span>Безопасный пропуск сбоев (Fail-Open)</span>
           </label>
+        </div>
+      </div>
+
+      {/* Response Cache & KV-Affinity Stats Bar */}
+      <div className="bg-slate-900/40 border border-white/[0.06] p-4 rounded-2xl backdrop-blur-md space-y-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 shrink-0">
+              <Zap size={16} />
+            </div>
+            <div>
+              <h3 className="text-xs font-bold text-slate-100 flex items-center gap-2">
+                Двухуровневый кэш ответов (L1 Memory + L2 SQLite)
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-emerald-950/70 border border-emerald-800/60 text-emerald-300">
+                  temperature ≤ 0.05
+                </span>
+              </h3>
+              <p className="text-[11px] text-slate-400">
+                Детерминированный кэш для мгновенных синтетических SSE-ответов и синхронизация KV-кэша с провайдерами
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={fetchCacheStats}
+              disabled={loadingCache}
+              className="px-2.5 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 text-xs border border-white/[0.06] transition-all flex items-center gap-1.5 cursor-pointer"
+              title="Обновить метрики кэша"
+            >
+              <RotateCcw size={13} className={loadingCache ? "animate-spin" : ""} />
+              <span>Обновить</span>
+            </button>
+            <button
+              onClick={handleClearCache}
+              disabled={clearingCache}
+              className="px-2.5 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 text-xs border border-rose-500/30 transition-all flex items-center gap-1.5 cursor-pointer"
+              title="Очистить память L1 и базу L2"
+            >
+              <Trash2 size={13} />
+              <span>{clearingCache ? "Очистка..." : "Очистить кэш ответов"}</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 pt-1">
+          <div className="bg-slate-950/50 border border-white/[0.05] p-2.5 rounded-xl">
+            <span className="text-[10px] text-slate-400 uppercase font-mono block">L1 RAM Кэш</span>
+            <div className="text-sm font-bold text-slate-100 font-mono mt-0.5">
+              {cacheStats ? `${cacheStats.l1_memory_entries} / ${cacheStats.l1_max_size}` : "—"}
+            </div>
+            <span className="text-[10px] text-slate-500">LRU в памяти</span>
+          </div>
+          <div className="bg-slate-950/50 border border-white/[0.05] p-2.5 rounded-xl">
+            <span className="text-[10px] text-slate-400 uppercase font-mono block">L2 SQLite Кэш</span>
+            <div className="text-sm font-bold text-slate-100 font-mono mt-0.5">
+              {cacheStats ? `${cacheStats.l2_db_entries} записей` : "—"}
+            </div>
+            <span className="text-[10px] text-slate-500">Дисковый кэш</span>
+          </div>
+          <div className="bg-slate-950/50 border border-white/[0.05] p-2.5 rounded-xl">
+            <span className="text-[10px] text-slate-400 uppercase font-mono block">Hit Rate</span>
+            <div className="text-sm font-bold text-emerald-400 font-mono mt-0.5">
+              {cacheStats ? `${cacheStats.hit_rate_pct}%` : "0%"}
+            </div>
+            <span className="text-[10px] text-slate-500">
+              {cacheStats ? `${cacheStats.total_hits} hit / ${cacheStats.total_misses} miss` : "0 hit / 0 miss"}
+            </span>
+          </div>
+          <div className="bg-slate-950/50 border border-white/[0.05] p-2.5 rounded-xl">
+            <span className="text-[10px] text-slate-400 uppercase font-mono block">Всего попаданий</span>
+            <div className="text-sm font-bold text-slate-100 font-mono mt-0.5">
+              {cacheStats ? cacheStats.total_hits : 0}
+            </div>
+            <span className="text-[10px] text-slate-500">Мгновенный ответ</span>
+          </div>
+          <div className="bg-slate-950/50 border border-white/[0.05] p-2.5 rounded-xl">
+            <span className="text-[10px] text-slate-400 uppercase font-mono block">Сэкономлено токенов</span>
+            <div className="text-sm font-bold text-indigo-400 font-mono mt-0.5">
+              {cacheStats ? Number(cacheStats.tokens_saved).toLocaleString() : 0}
+            </div>
+            <span className="text-[10px] text-slate-500">Без запроса к LLM</span>
+          </div>
+          <div className="bg-slate-950/50 border border-white/[0.05] p-2.5 rounded-xl">
+            <span className="text-[10px] text-slate-400 uppercase font-mono block">Экономия средств</span>
+            <div className="text-sm font-bold text-emerald-300 font-mono mt-0.5">
+              {cacheStats ? `$${cacheStats.cost_saved_usd.toFixed(4)}` : "$0.0000"}
+            </div>
+            <span className="text-[10px] text-slate-500">Оценка в USD</span>
+          </div>
         </div>
       </div>
 

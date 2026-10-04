@@ -14,6 +14,10 @@ from app.models.entities import (
     RequestAttempt,
     UsageRecord,
     AppSetting,
+    CompressionGlobalSetting,
+    CompressionStage,
+    ResponseCacheEntry,
+    CacheMetric,
 )
 
 __all__ = [
@@ -32,4 +36,8 @@ __all__ = [
     "RequestAttempt",
     "UsageRecord",
     "AppSetting",
+    "CompressionGlobalSetting",
+    "CompressionStage",
+    "ResponseCacheEntry",
+    "CacheMetric",
 ]

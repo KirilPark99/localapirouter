@@ -380,6 +380,7 @@ class CompressionGlobalSetting(Base, TimestampMixin):
     trigger_token_threshold: Mapped[int] = mapped_column(Integer, default=1000, nullable=False)
     min_savings_bailout_percent: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     preserve_recent_turns: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    preserve_system_prompt_mode: Mapped[str] = mapped_column(String(50), default="when_caching", nullable=False)  # when_caching, always, never
     enable_telemetry: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     fail_open: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
@@ -396,4 +397,57 @@ class CompressionStage(Base, TimestampMixin):
     is_builtin: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     config_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     custom_rules: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(JSON, nullable=True)
+
+class ResponseCacheEntry(Base, TimestampMixin):
+    __tablename__ = "response_cache_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signature: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    model: Mapped[str] = mapped_column(String(150), index=True, nullable=False)
+    response_json: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    hit_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    last_hit_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class CacheMetric(Base):
+    __tablename__ = "cache_metrics"
+
+    key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    value: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class SecurityConfig(Base, TimestampMixin):
+    __tablename__ = "security_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+
+    # Prompt injection guardrail
+    injection_guard_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    injection_mode: Mapped[str] = mapped_column(String(20), default="warn", nullable=False)  # "block", "warn", "log"
+    injection_threshold: Mapped[str] = mapped_column(String(20), default="high", nullable=False)  # "high", "medium", "low"
+    max_injection_scan_bytes: Mapped[int] = mapped_column(Integer, default=16384, nullable=False)  # 16 KB bounded scan
+    custom_injection_patterns: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(JSON, default=list, nullable=True)
+
+    # Credential masker guardrail (bidirectional)
+    credential_masking_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # opt-in
+    mask_inbound: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    mask_outbound: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    custom_credential_patterns: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(JSON, default=list, nullable=True)
+
+    # DuckDuckGo fallback web search
+    duckduckgo_fallback_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # OIDC login gate
+    oidc_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    oidc_disable_password_login: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    oidc_issuer: Mapped[Optional[str]] = mapped_column(String(500), default="", nullable=True)
+    oidc_client_id: Mapped[Optional[str]] = mapped_column(String(255), default="", nullable=True)
+    oidc_client_secret: Mapped[Optional[str]] = mapped_column(String(500), default="", nullable=True)
+    oidc_scopes: Mapped[Optional[List[str]]] = mapped_column(JSON, default=lambda: ["openid", "profile", "email"], nullable=True)
+    oidc_allowed_emails: Mapped[Optional[List[str]]] = mapped_column(JSON, default=list, nullable=True)
+
 

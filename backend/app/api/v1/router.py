@@ -273,6 +273,37 @@ async def chat_completions(
     req_id = f"req_{uuid.uuid4().hex[:16]}"
     model_str = payload.model.strip()
 
+    # 0. Security Guardrails Pre-Call (Prompt Injection & Credential Masking)
+    sec_db = db if db is not None else AsyncSessionLocal()
+    try:
+        from app.security.registry import GuardrailRegistry
+        sec_result = await GuardrailRegistry.run_pre_call_hooks(
+            payload=payload,
+            headers=dict(request.headers),
+            model_id=model_str,
+            db=sec_db,
+        )
+        if sec_result.block:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "message": sec_result.block_reason or "Security Violation: Request blocked by security guardrails.",
+                        "type": "guardrail_violation",
+                        "code": "prompt_injection_blocked",
+                    }
+                },
+            )
+        if sec_result.warnings:
+            response.headers["X-Guardrail-Warning"] = ",".join(sec_result.warnings)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.debug(f"Guardrail pre-call error: {e}")
+    finally:
+        if db is None:
+            await _safe_close_session(sec_db)
+
     # Context Optimization (Token Compression Pipeline)
     compression_summary = None
     compression_db = db if db is not None else AsyncSessionLocal()
@@ -295,10 +326,6 @@ async def chat_completions(
         if db is None:
             await _safe_close_session(compression_db)
 
-    def _make_streaming_response(stream_generator) -> StreamingResponse:
-        stream_headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
-        return StreamingResponse(stream_generator, media_type="text/event-stream", headers=stream_headers)
-
     is_fusion, model_str = await _resolve_is_fusion(model_str, db)
     payload.model = model_str
 
@@ -306,6 +333,163 @@ async def chat_completions(
     if not is_fusion:
         is_judge, model_str = await _resolve_is_judge(model_str, db)
         payload.model = model_str
+
+    # 2. Local Response Cache Check
+    cache_signature = None
+    req_headers = dict(request.headers)
+    is_cacheable = False
+    try:
+        from app.cache.response_cache import ResponseCacheService
+        is_cacheable = ResponseCacheService.is_cacheable(payload, req_headers)
+        if is_cacheable:
+            cache_signature = ResponseCacheService.generate_signature(
+                model=model_str,
+                messages=payload.messages,
+                temperature=payload.temperature,
+                top_p=payload.top_p,
+                tools=payload.tools,
+                router_key_id=router_key.id if router_key else None,
+            )
+            cache_db = db if db is not None else AsyncSessionLocal()
+            try:
+                cached_payload = await ResponseCacheService.get_response(cache_db, cache_signature)
+            finally:
+                if db is None:
+                    await _safe_close_session(cache_db)
+
+            if cached_payload:
+                response.headers["X-Cache"] = "HIT"
+                response.headers["X-Cache-Latency"] = "synthetic"
+                if payload.stream:
+                    stream_headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
+                    stream_gen = ResponseCacheService.synthesize_sse_stream(cached_payload, req_id)
+                    return StreamingResponse(stream_gen, media_type="text/event-stream", headers=stream_headers)
+                else:
+                    return ChatCompletionResponse(**cached_payload)
+            else:
+                response.headers["X-Cache"] = "MISS"
+    except Exception as e:
+        logger.debug(f"Response cache lookup error: {e}")
+
+    async def _save_to_cache(resp_obj: ChatCompletionResponse):
+        if not is_cacheable or not cache_signature:
+            return
+        c_db = db if db is not None else AsyncSessionLocal()
+        try:
+            from app.cache.response_cache import ResponseCacheService
+            p_tok = resp_obj.usage.prompt_tokens if resp_obj.usage else 0
+            c_tok = resp_obj.usage.completion_tokens if resp_obj.usage else 0
+            cost = getattr(resp_obj, "estimated_cost_usd", 0.0) or 0.0
+            await ResponseCacheService.set_response(
+                c_db,
+                signature=cache_signature,
+                model=model_str,
+                response_json=resp_obj.model_dump(),
+                input_tokens=p_tok,
+                output_tokens=c_tok,
+                estimated_cost_usd=cost,
+            )
+        except Exception:
+            pass
+        finally:
+            if db is None:
+                await _safe_close_session(c_db)
+
+    async def _process_outbound_response(resp_obj: ChatCompletionResponse) -> ChatCompletionResponse:
+        try:
+            from app.security.registry import GuardrailRegistry
+            sec_cfg = await GuardrailRegistry.get_security_config()
+            if sec_cfg.get("credential_masking_enabled") and sec_cfg.get("mask_outbound"):
+                if resp_obj.choices:
+                    for ch in resp_obj.choices:
+                        if ch.message and ch.message.content:
+                            ch.message.content = GuardrailRegistry.mask_text_sync(ch.message.content)
+        except Exception:
+            pass
+        await _save_to_cache(resp_obj)
+        return resp_obj
+
+    async def _wrap_streaming_with_cache(stream_gen):
+        from app.security.registry import GuardrailRegistry
+        sec_cfg = await GuardrailRegistry.get_security_config()
+        mask_outbound = sec_cfg.get("credential_masking_enabled", False) and sec_cfg.get("mask_outbound", True)
+
+        full_content = []
+        finish_reason = "stop"
+        usage = None
+        async for chunk in stream_gen:
+            out_chunk = chunk
+            if mask_outbound and chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
+                try:
+                    cdata = json.loads(chunk[6:])
+                    ch = cdata.get("choices", [])
+                    if ch:
+                        delta = ch[0].get("delta", {})
+                        if delta.get("content"):
+                            delta["content"] = GuardrailRegistry.mask_text_sync(delta["content"])
+                            out_chunk = f"data: {json.dumps(cdata)}\n\n"
+                except Exception:
+                    pass
+
+            yield out_chunk
+
+            if not (is_cacheable and cache_signature):
+                continue
+
+            if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
+                try:
+                    cdata = json.loads(chunk[6:])
+                    ch = cdata.get("choices", [])
+                    if ch:
+                        delta = ch[0].get("delta", {})
+                        if delta.get("content"):
+                            full_content.append(delta["content"])
+                        if ch[0].get("finish_reason"):
+                            finish_reason = ch[0]["finish_reason"]
+                    if "usage" in cdata and cdata["usage"]:
+                        usage = cdata["usage"]
+                except Exception:
+                    pass
+
+        try:
+            from app.cache.response_cache import ResponseCacheService
+            text_result = "".join(full_content)
+            assembled = {
+                "id": req_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model_str,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": text_result},
+                        "finish_reason": finish_reason,
+                    }
+                ],
+            }
+            if usage:
+                assembled["usage"] = usage
+            in_tok = usage.get("prompt_tokens", 0) if usage else 0
+            out_tok = usage.get("completion_tokens", max(1, len(text_result) // 4)) if usage else max(1, len(text_result) // 4)
+            c_db = AsyncSessionLocal()
+            try:
+                await ResponseCacheService.set_response(
+                    c_db,
+                    signature=cache_signature,
+                    model=model_str,
+                    response_json=assembled,
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                )
+            finally:
+                await _safe_close_session(c_db)
+        except Exception:
+            pass
+
+    def _make_streaming_response(stream_generator) -> StreamingResponse:
+        wrapped_gen = _wrap_streaming_with_cache(stream_generator)
+        stream_headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
+        return StreamingResponse(wrapped_gen, media_type="text/event-stream", headers=stream_headers)
 
     try:
         if is_fusion:
@@ -316,15 +500,17 @@ async def chat_completions(
                 return _make_streaming_response(stream_gen)
             else:
                 if db is not None:
-                    return await FusionEngine.execute_fusion(
+                    res = await FusionEngine.execute_fusion(
                         db=db, request=payload, router_key=router_key, request_id=req_id
                     )
+                    return await _process_outbound_response(res)
                 else:
                     session = AsyncSessionLocal()
                     try:
-                        return await FusionEngine.execute_fusion(
+                        res = await FusionEngine.execute_fusion(
                             db=session, request=payload, router_key=router_key, request_id=req_id
                         )
+                        return await _process_outbound_response(res)
                     finally:
                         await _safe_close_session(session)
         elif is_judge:
@@ -335,15 +521,17 @@ async def chat_completions(
                 return _make_streaming_response(stream_gen)
             else:
                 if db is not None:
-                    return await JudgeEngine.execute_judge(
+                    res = await JudgeEngine.execute_judge(
                         db=db, request=payload, router_key=router_key, request_id=req_id
                     )
+                    return await _process_outbound_response(res)
                 else:
                     session = AsyncSessionLocal()
                     try:
-                        return await JudgeEngine.execute_judge(
+                        res = await JudgeEngine.execute_judge(
                             db=session, request=payload, router_key=router_key, request_id=req_id
                         )
+                        return await _process_outbound_response(res)
                     finally:
                         await _safe_close_session(session)
         else:
@@ -439,15 +627,17 @@ async def chat_completions(
                 return _make_streaming_response(stream_gen)
             else:
                 if db is not None:
-                    return await RoutingEngine.route_chat_completions(
+                    res = await RoutingEngine.route_chat_completions(
                         db=db, request=payload, router_key=router_key, request_id=req_id
                     )
+                    return await _process_outbound_response(res)
                 else:
                     session = AsyncSessionLocal()
                     try:
-                        return await RoutingEngine.route_chat_completions(
+                        res = await RoutingEngine.route_chat_completions(
                             db=session, request=payload, router_key=router_key, request_id=req_id
                         )
+                        return await _process_outbound_response(res)
                     finally:
                         await _safe_close_session(session)
     except RouterException as re:

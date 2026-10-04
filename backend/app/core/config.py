@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 import os
 from pathlib import Path
 
@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # Admin Credentials. There is no safe default password.
     ADMIN_USERNAME: str = "admin"
     ADMIN_PASSWORD: str
+
+    # Native OAuth application credentials are deployment-local.
+    ANTIGRAVITY_OAUTH_CLIENT_ID: str = ""
+    ANTIGRAVITY_OAUTH_CLIENT_SECRET: SecretStr = SecretStr("")
 
     # Privacy & Logging
     LOG_REQUEST_CONTENT: bool = False

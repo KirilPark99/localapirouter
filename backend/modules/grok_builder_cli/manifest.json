@@ -1,0 +1,101 @@
+{
+  "id": "grok_builder_cli",
+  "name": "xAI Grok Builder CLI",
+  "version": "1.0.0",
+  "description": "xAI Grok Build CLI integration with auto-discovery from ~/.grok/auth.json, Responses API routing, and the current Grok Build model catalog.",
+  "author": "Omniroute Port",
+  "icon": "Cpu",
+  "auth_type": "custom_fields",
+  "fields": [
+    {
+      "key": "auto_detect_local",
+      "label": "Auto-detect Local Grok Auth",
+      "type": "select",
+      "required": false,
+      "default": "true",
+      "options": [
+        { "label": "Yes (Read from ~/.grok/auth.json)", "value": "true" },
+        { "label": "No (Use pasted credentials only)", "value": "false" }
+      ],
+      "description": "Automatically load tokens from local Grok CLI installation on this computer"
+    },
+    {
+      "key": "auth_json",
+      "label": "Pasted Grok auth.json (Optional)",
+      "type": "textarea",
+      "required": false,
+      "placeholder": "Paste contents of ~/.grok/auth.json...",
+      "description": "Raw JSON configuration exported from ~/.grok/auth.json"
+    },
+    {
+      "key": "access_token",
+      "label": "Access Token / Key (Optional override)",
+      "type": "password",
+      "required": false,
+      "placeholder": "ey...",
+      "description": "xAI Grok access token (JWT or key)"
+    },
+    {
+      "key": "refresh_token",
+      "label": "Refresh Token (Optional override)",
+      "type": "password",
+      "required": false,
+      "placeholder": "OAuth refresh token...",
+      "description": "OAuth refresh token for auto-refresh against auth.x.ai"
+    }
+  ],
+  "default_models": [
+    {
+      "id": "grok-4.7",
+      "name": "Grok 4.7",
+      "context_length": 256000,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": "unknown",
+        "tools": true,
+        "reasoning": "unknown"
+      }
+    },
+    {
+      "id": "grok-4.7-build-fast",
+      "name": "Grok 4.7 Fast",
+      "context_length": 256000,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": "unknown",
+        "tools": true,
+        "reasoning": "unknown"
+      }
+    },
+    {
+      "id": "grok-4.6",
+      "name": "Grok 4.6",
+      "context_length": 256000,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": "unknown",
+        "tools": true,
+        "reasoning": "unknown"
+      }
+    },
+    {
+      "id": "grok-4.5",
+      "name": "Grok 4.5",
+      "context_length": 256000,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": "unknown",
+        "tools": true,
+        "reasoning": "unknown"
+      }
+    }
+  ]
+}

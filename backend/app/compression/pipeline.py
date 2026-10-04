@@ -11,6 +11,9 @@ from app.compression.tokenizer import count_messages_tokens
 
 logger = logging.getLogger(__name__)
 
+from app.compression.caching_aware import should_preserve_system_prompt
+
+
 class CompressionPipelineService:
 
     @classmethod
@@ -23,6 +26,7 @@ class CompressionPipelineService:
                 trigger_token_threshold=1000,
                 min_savings_bailout_percent=0.0,
                 preserve_recent_turns=1,
+                preserve_system_prompt_mode="when_caching",
                 enable_telemetry=True,
                 fail_open=True,
             )
@@ -42,6 +46,8 @@ class CompressionPipelineService:
             settings.min_savings_bailout_percent = float(data["min_savings_bailout_percent"])
         if "preserve_recent_turns" in data:
             settings.preserve_recent_turns = int(data["preserve_recent_turns"])
+        if "preserve_system_prompt_mode" in data:
+            settings.preserve_system_prompt_mode = str(data["preserve_system_prompt_mode"])
         if "enable_telemetry" in data:
             settings.enable_telemetry = bool(data["enable_telemetry"])
         if "fail_open" in data:
@@ -161,11 +167,18 @@ class CompressionPipelineService:
         if not active_stages:
             return messages, {"compressed": False, "no_active_stages": True}
 
+        preserve_sys_prompt = should_preserve_system_prompt(
+            mode=getattr(global_cfg, "preserve_system_prompt_mode", "when_caching"),
+            model_id=model_id,
+            request_headers=headers,
+        )
+
         ctx = CompressionContext(
             model_id=model_id,
             supports_vision=supports_vision,
             original_tokens=initial_tokens,
             preserve_recent_turns=global_cfg.preserve_recent_turns,
+            preserve_system_prompt=preserve_sys_prompt,
             request_headers=headers,
         )
 
@@ -198,7 +211,12 @@ class CompressionPipelineService:
                         continue
 
                 if res.compressed:
-                    current_messages = res.messages
+                    if ctx.preserve_system_prompt:
+                        orig_sys = [m for m in current_messages if m.role == "system"]
+                        res_non_sys = [m for m in res.messages if m.role != "system"]
+                        current_messages = orig_sys + res_non_sys
+                    else:
+                        current_messages = res.messages
 
                 stage_breakdown.append({
                     "stage_id": stage_rec.id,

@@ -29,6 +29,8 @@ from app.api.admin.settings import router as admin_settings_router
 from app.api.admin.backup import router as admin_backup_router
 from app.api.admin.modules import router as admin_modules_router
 from app.api.admin.compression import router as admin_compression_router
+from app.api.admin.cache import router as admin_cache_router
+from app.api.admin.security import router as admin_security_router
 from app.api.ollama import router as ollama_router
 from app.modules.loader import ModuleLoader
 from app.compression.registry import StageRegistry
@@ -82,6 +84,8 @@ app.include_router(admin_settings_router, prefix="/api/admin")
 app.include_router(admin_backup_router, prefix="/api/admin")
 app.include_router(admin_modules_router, prefix="/api/admin")
 app.include_router(admin_compression_router, prefix="/api/admin")
+app.include_router(admin_cache_router, prefix="/api/admin")
+app.include_router(admin_security_router, prefix="/api/admin")
 
 # Mount Ollama Compatibility API (/api/show, /api/tags, /api/version)
 app.include_router(ollama_router, prefix="/api")

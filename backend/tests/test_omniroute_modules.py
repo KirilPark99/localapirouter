@@ -65,6 +65,9 @@ def test_all_modules_discovery():
         "lmarena",
         "notion_web",
         "zai_web",
+        "agy_cli",
+        "codex_cli",
+        "grok_builder_cli",
     ]
     for mid in expected_modules:
         assert mid in modules, f"Module {mid} was not discovered"

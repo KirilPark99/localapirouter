@@ -16,6 +16,7 @@ class GlobalSettingsUpdate(BaseModel):
     trigger_token_threshold: Optional[int] = None
     min_savings_bailout_percent: Optional[float] = None
     preserve_recent_turns: Optional[int] = None
+    preserve_system_prompt_mode: Optional[str] = None
     enable_telemetry: Optional[bool] = None
     fail_open: Optional[bool] = None
 
@@ -55,6 +56,7 @@ async def get_settings(
         "trigger_token_threshold": settings.trigger_token_threshold,
         "min_savings_bailout_percent": settings.min_savings_bailout_percent,
         "preserve_recent_turns": settings.preserve_recent_turns,
+        "preserve_system_prompt_mode": getattr(settings, "preserve_system_prompt_mode", "when_caching"),
         "enable_telemetry": settings.enable_telemetry,
         "fail_open": settings.fail_open,
     }
@@ -74,6 +76,7 @@ async def update_settings(
             "trigger_token_threshold": settings.trigger_token_threshold,
             "min_savings_bailout_percent": settings.min_savings_bailout_percent,
             "preserve_recent_turns": settings.preserve_recent_turns,
+            "preserve_system_prompt_mode": getattr(settings, "preserve_system_prompt_mode", "when_caching"),
             "enable_telemetry": settings.enable_telemetry,
             "fail_open": settings.fail_open,
         },

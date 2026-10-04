@@ -350,7 +350,7 @@ class RoutingProfileCreate(BaseModel):
     name: str
     slug: str
     description: Optional[str] = None
-    strategy: Literal["priority", "round_robin", "least_latency"] = "priority"
+    strategy: Literal["priority", "cache-optimized", "round_robin", "least_latency"] = "priority"
     retry_count: int = 3
     timeout_seconds: float = 60.0
     fallback_conditions: List[str] = Field(default_factory=lambda: ["RATE_LIMIT", "TIMEOUT", "NETWORK_ERROR", "UPSTREAM_5XX", "MODEL_NOT_FOUND"])
@@ -375,7 +375,7 @@ class RoutingProfileUpdate(BaseModel):
     name: Optional[str] = None
     slug: Optional[str] = None
     description: Optional[str] = None
-    strategy: Optional[Literal["priority", "round_robin", "least_latency"]] = None
+    strategy: Optional[Literal["priority", "cache-optimized", "round_robin", "least_latency"]] = None
     retry_count: Optional[int] = None
     timeout_seconds: Optional[float] = None
     fallback_conditions: Optional[List[str]] = None

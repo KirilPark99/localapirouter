@@ -238,7 +238,7 @@ export interface RoutingProfile {
   name: string;
   slug: string;
   description?: string;
-  strategy: "priority" | "round_robin" | "least_latency";
+  strategy: "priority" | "cache-optimized" | "round_robin" | "least_latency";
   retry_count: number;
   timeout_seconds: number;
   fallback_conditions: string[];
@@ -808,6 +808,18 @@ export interface CompressionGlobalSettings {
   preserve_recent_turns: number;
   enable_telemetry: boolean;
   fail_open: boolean;
+  preserve_system_prompt_mode?: "when_caching" | "always" | "never";
+}
+
+export interface CacheStats {
+  l1_memory_entries: number;
+  l1_max_size: number;
+  l2_db_entries: number;
+  total_hits: number;
+  total_misses: number;
+  hit_rate_pct: number;
+  tokens_saved: number;
+  cost_saved_usd: number;
 }
 
 export interface CompressionPreviewStep {

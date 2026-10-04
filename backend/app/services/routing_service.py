@@ -90,11 +90,15 @@ class RoutingService:
                 )
             else:
                 raw_cg = getattr(c, "credential_group", None)
+                eff_prov_id = c.provider_id
+                if not eff_prov_id and c.model_id:
+                    m_res = await db.execute(select(DiscoveredModel.provider_id).where(DiscoveredModel.id == c.model_id))
+                    eff_prov_id = m_res.scalar_one_or_none()
                 cand = RoutingCandidate(
                     profile_id=profile.id,
                     candidate_type="model",
                     target_profile_id=None,
-                    provider_id=c.provider_id,
+                    provider_id=eff_prov_id,
                     credential_id=c.credential_id,
                     credential_group=(raw_cg.strip() if raw_cg and raw_cg.strip() else None),
                     model_id=c.model_id,
@@ -166,11 +170,15 @@ class RoutingService:
                     )
                 else:
                     raw_cg = getattr(c, "credential_group", None)
+                    eff_prov_id = c.provider_id
+                    if not eff_prov_id and c.model_id:
+                        m_res = await db.execute(select(DiscoveredModel.provider_id).where(DiscoveredModel.id == c.model_id))
+                        eff_prov_id = m_res.scalar_one_or_none()
                     cand = RoutingCandidate(
                         profile_id=profile_id,
                         candidate_type="model",
                         target_profile_id=None,
-                        provider_id=c.provider_id,
+                        provider_id=eff_prov_id,
                         credential_id=c.credential_id,
                         credential_group=(raw_cg.strip() if raw_cg and raw_cg.strip() else None),
                         model_id=c.model_id,

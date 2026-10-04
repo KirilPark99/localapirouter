@@ -62,14 +62,15 @@ class JevEngine:
 
     @classmethod
     def _check_permissions(cls, router_key: RouterApiKey, model_str: str):
+        has_all = "*" in router_key.permissions
         if model_str.startswith("route/"):
-            if "routes" not in router_key.permissions:
+            if not has_all and "routes" not in router_key.permissions:
                 raise RouterException("This API key lacks permission to access routing profiles", ErrorCategory.AUTH_ERROR, status_code=403)
             slug = model_str.removeprefix("route/")
             if "*" not in router_key.allowed_routes and slug not in router_key.allowed_routes:
                 raise RouterException(f"Route '{slug}' is not in allowed routes for this API key", ErrorCategory.AUTH_ERROR, status_code=403)
         else:
-            if "direct" not in router_key.permissions:
+            if not has_all and "direct" not in router_key.permissions:
                 raise RouterException("This API key lacks permission for direct model access", ErrorCategory.AUTH_ERROR, status_code=403)
             if "*" not in router_key.allowed_models and model_str not in router_key.allowed_models:
                 raise RouterException(f"Model '{model_str}' is not in allowed models for this API key", ErrorCategory.AUTH_ERROR, status_code=403)

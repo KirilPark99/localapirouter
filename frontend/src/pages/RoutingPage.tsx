@@ -56,7 +56,7 @@ export const RoutingPage: React.FC = () => {
 
   const [formName, setFormName] = useState("");
   const [formSlug, setFormSlug] = useState("");
-  const [formStrategy, setFormStrategy] = useState<"priority" | "round_robin" | "least_latency">("priority");
+  const [formStrategy, setFormStrategy] = useState<"priority" | "cache-optimized" | "round_robin" | "least_latency">("priority");
   const [formRetryCount, setFormRetryCount] = useState(3);
   const [formTimeout, setFormTimeout] = useState(60.0);
   const [formThinkingEffort, setFormThinkingEffort] = useState<string>("inherit");
@@ -173,7 +173,7 @@ export const RoutingPage: React.FC = () => {
     setEditingProfile(p);
     setFormName(p.name);
     setFormSlug(p.slug);
-    setFormStrategy(p.strategy);
+    setFormStrategy((p.strategy as any) || "priority");
     setFormRetryCount(p.retry_count);
     setFormTimeout(p.timeout_seconds);
 
@@ -503,6 +503,11 @@ export const RoutingPage: React.FC = () => {
                           <Shuffle size={10} /> {t.routing.randomize}
                         </span>
                       )}
+                      {p.strategy === "cache-optimized" && (
+                        <span className="flex items-center gap-1 text-[10px] bg-emerald-500/15 text-emerald-300 px-2 py-0.5 rounded-lg border border-emerald-500/30 font-mono" title="Prompt Cache Affinity (Rendezvous Hashing)">
+                          <Zap size={10} className="text-emerald-400" /> Cache-Optimized
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -707,7 +712,20 @@ export const RoutingPage: React.FC = () => {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1">Стратегия маршрутизации</label>
+              <select
+                value={formStrategy}
+                onChange={(e) => setFormStrategy(e.target.value as any)}
+                className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs focus:border-indigo-500 focus:outline-none"
+              >
+                <option value="priority">Priority (По цепочке)</option>
+                <option value="cache-optimized">⚡ Cache-Optimized (Prompt Affinity)</option>
+                <option value="round_robin">Round Robin</option>
+                <option value="least_latency">Least Latency</option>
+              </select>
+            </div>
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-1">Max Retries</label>
               <input
@@ -727,6 +745,16 @@ export const RoutingPage: React.FC = () => {
               />
             </div>
           </div>
+
+          {formStrategy === "cache-optimized" && (
+            <div className="flex items-start gap-2.5 p-3 rounded-xl bg-emerald-950/30 border border-emerald-800/40 text-xs text-emerald-300">
+              <Zap size={15} className="shrink-0 text-emerald-400 mt-0.5" />
+              <div className="leading-relaxed">
+                <span className="font-semibold text-emerald-200">Prompt Cache Affinity (Rendezvous Hashing):</span>{" "}
+                Запросы с одинаковым системным промптом или префиксом автоматически направляются к одному и тому же кандидату и API-ключу для 100% утилизации KV-кэша (Anthropic Prompt Caching, DeepSeek Context Caching, OpenAI, Gemini).
+              </div>
+            </div>
+          )}
 
           {/* Profile-level Thinking Effort */}
           <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-2">

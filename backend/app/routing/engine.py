@@ -118,20 +118,28 @@ class RoutingEngine:
 
     @classmethod
     def _check_permissions(cls, router_key: RouterApiKey, model_str: str):
+        has_all = "*" in router_key.permissions
         if model_str.startswith("route/"):
-            if "routes" not in router_key.permissions:
+            if not has_all and "routes" not in router_key.permissions:
                 raise RouterException("This API key lacks permission to access routing profiles", ErrorCategory.AUTH_ERROR, status_code=403)
             slug = model_str.removeprefix("route/")
             if "*" not in router_key.allowed_routes and slug not in router_key.allowed_routes:
                 raise RouterException(f"Route '{slug}' is not in allowed routes for this API key", ErrorCategory.AUTH_ERROR, status_code=403)
         elif model_str.startswith("fusion/"):
-            if "fusion" not in router_key.permissions:
+            if not has_all and "fusion" not in router_key.permissions:
                 raise RouterException("This API key lacks permission to access fusion profiles", ErrorCategory.AUTH_ERROR, status_code=403)
             slug = model_str.removeprefix("fusion/")
             if "*" not in router_key.allowed_fusions and slug not in router_key.allowed_fusions:
                 raise RouterException(f"Fusion profile '{slug}' is not in allowed fusions for this key", ErrorCategory.AUTH_ERROR, status_code=403)
+        elif model_str.startswith("judge/") or model_str.startswith("smart/"):
+            if not has_all and "judges" not in router_key.permissions and "routes" not in router_key.permissions:
+                raise RouterException("This API key lacks permission to access judge profiles", ErrorCategory.AUTH_ERROR, status_code=403)
+            slug = model_str.split("/", 1)[1]
+            allowed_judges = getattr(router_key, "allowed_judges", ["*"]) or ["*"]
+            if "*" not in allowed_judges and slug not in allowed_judges:
+                raise RouterException(f"Judge profile '{slug}' is not in allowed judges for this key", ErrorCategory.AUTH_ERROR, status_code=403)
         else:
-            if "direct" not in router_key.permissions:
+            if not has_all and "direct" not in router_key.permissions:
                 raise RouterException("This API key lacks permission for direct model access", ErrorCategory.AUTH_ERROR, status_code=403)
             if "*" not in router_key.allowed_models and model_str not in router_key.allowed_models:
                 raise RouterException(f"Model '{model_str}' is not in allowed models for this API key", ErrorCategory.AUTH_ERROR, status_code=403)
@@ -209,6 +217,10 @@ class RoutingEngine:
         candidates = await cls._get_candidate_credentials_for_model(db, model_str)
         if not candidates:
             await cls._raise_no_candidates(db, model_str, req_id)
+
+        if len(candidates) > 1:
+            from app.routing.cache_affinity import apply_prompt_cache_affinity
+            candidates, _ = apply_prompt_cache_affinity(candidates, request)
 
         attempts_trace = []
         last_exception = None
@@ -353,6 +365,10 @@ class RoutingEngine:
         candidates = await cls._get_candidate_credentials_for_model(db, model_str)
         if not candidates:
             await cls._raise_no_candidates(db, model_str, req_id)
+
+        if len(candidates) > 1:
+            from app.routing.cache_affinity import apply_prompt_cache_affinity
+            candidates, _ = apply_prompt_cache_affinity(candidates, request)
 
         last_exception = None
         attempts_trace = []
@@ -601,6 +617,9 @@ class RoutingEngine:
         if getattr(profile, "randomize_candidates", False) and len(candidates) > 1:
             candidates = list(candidates)
             random.shuffle(candidates)
+        elif getattr(profile, "strategy", "priority") == "cache-optimized" and len(candidates) > 1:
+            from app.routing.cache_affinity import apply_prompt_cache_affinity
+            candidates, _affinity_info = apply_prompt_cache_affinity(candidates, request)
 
         active_visited = set(visited_profile_ids or set())
         is_sub_route = bool(visited_profile_ids) or not record_log
@@ -964,6 +983,9 @@ class RoutingEngine:
         if getattr(profile, "randomize_candidates", False) and len(candidates) > 1:
             candidates = list(candidates)
             random.shuffle(candidates)
+        elif getattr(profile, "strategy", "priority") == "cache-optimized" and len(candidates) > 1:
+            from app.routing.cache_affinity import apply_prompt_cache_affinity
+            candidates, _affinity_info = apply_prompt_cache_affinity(candidates, request)
 
         is_sub_route = bool(visited_profile_ids) or not record_log
         effective_root_model = root_model_str or model_str

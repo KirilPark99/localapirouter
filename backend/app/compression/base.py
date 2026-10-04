@@ -22,6 +22,7 @@ class CompressionContext(BaseModel):
     supports_vision: bool = False
     original_tokens: int = 0
     preserve_recent_turns: int = 1
+    preserve_system_prompt: bool = False
     request_headers: Dict[str, str] = Field(default_factory=dict)
     principal_id: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)

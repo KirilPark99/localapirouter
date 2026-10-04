@@ -70,7 +70,7 @@ class JudgeEngine:
     @classmethod
     def _check_permissions(cls, router_key: RouterApiKey, slug: str):
         permissions = getattr(router_key, "permissions", [])
-        if "judge" not in permissions and "routes" not in permissions:
+        if "*" not in permissions and "judge" not in permissions and "judges" not in permissions and "routes" not in permissions:
             raise RouterException(
                 "This API key lacks permission to access judge routing profiles",
                 ErrorCategory.AUTH_ERROR,

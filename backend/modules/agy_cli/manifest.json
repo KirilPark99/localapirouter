@@ -1,0 +1,239 @@
+{
+  "id": "agy_cli",
+  "name": "Antigravity CLI (agy)",
+  "version": "1.0.0",
+  "description": "Google Antigravity CLI OAuth integration with auto-discovery from ~/.gemini/antigravity-cli, token auto-refresh, and Cloud Code Assist runtime.",
+  "author": "Omniroute Port",
+  "icon": "Zap",
+  "auth_type": "custom_fields",
+  "fields": [
+    {
+      "key": "auto_detect_local",
+      "label": "Auto-detect Local CLI Token",
+      "type": "select",
+      "required": false,
+      "default": "true",
+      "options": [
+        { "label": "Yes (Read from ~/.gemini/antigravity-cli)", "value": "true" },
+        { "label": "No (Use pasted credentials only)", "value": "false" }
+      ],
+      "description": "Automatically load tokens from local Antigravity CLI installation on this computer"
+    },
+    {
+      "key": "auth_json",
+      "label": "Pasted agy Token JSON (Optional)",
+      "type": "textarea",
+      "required": false,
+      "placeholder": "Paste contents of ~/.gemini/antigravity-cli/antigravity-oauth-token...",
+      "description": "Raw JSON exported from agy CLI"
+    },
+    {
+      "key": "access_token",
+      "label": "Access Token (Optional override)",
+      "type": "password",
+      "required": false,
+      "placeholder": "ya29.a0...",
+      "description": "Direct Google OAuth access token"
+    },
+    {
+      "key": "refresh_token",
+      "label": "Refresh Token (Optional override)",
+      "type": "password",
+      "required": false,
+      "placeholder": "1//0...",
+      "description": "OAuth refresh token for automatic token renewals"
+    },
+    {
+      "key": "project_id",
+      "label": "GCP Project ID (Optional)",
+      "type": "text",
+      "required": false,
+      "placeholder": "e.g. my-project-12345",
+      "description": "Google Cloud Project ID for Code Assist routing"
+    }
+  ],
+  "default_models": [
+    {
+      "id": "gemini-3.8-flash-high",
+      "name": "Gemini 3.8 Flash (High)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": "unknown",
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.8-flash-medium",
+      "name": "Gemini 3.8 Flash (Medium)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": "unknown",
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.8-flash-low",
+      "name": "Gemini 3.8 Flash (Low)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": "unknown",
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.7-flash-high",
+      "name": "Gemini 3.7 Flash (High)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": "unknown",
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.7-flash-medium",
+      "name": "Gemini 3.7 Flash (Medium)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": "unknown",
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.7-flash-low",
+      "name": "Gemini 3.7 Flash (Low)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": "unknown",
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.6-flash-high",
+      "name": "Gemini 3.6 Flash (High)",
+      "context_length": 1048576,
+      "max_output_tokens": 65536,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.6-flash-medium",
+      "name": "Gemini 3.6 Flash (Medium)",
+      "context_length": 1048576,
+      "max_output_tokens": 65536,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.6-flash-low",
+      "name": "Gemini 3.6 Flash (Low)",
+      "context_length": 1048576,
+      "max_output_tokens": 65536,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.1-pro-high",
+      "name": "Gemini 3.1 Pro (High)",
+      "context_length": 1048576,
+      "max_output_tokens": 65535,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gemini-3.1-pro-low",
+      "name": "Gemini 3.1 Pro (Low)",
+      "context_length": 1048576,
+      "max_output_tokens": 65535,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "name": "Claude Sonnet 4.6 (Thinking)",
+      "context_length": 250000,
+      "max_output_tokens": 64000,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "claude-opus-4-6-thinking",
+      "name": "Claude Opus 4.6 (Thinking)",
+      "context_length": 250000,
+      "max_output_tokens": 64000,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-oss-120b-medium",
+      "name": "GPT-OSS 120B (Medium)",
+      "context_length": 131072,
+      "max_output_tokens": 32768,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": "unknown",
+        "tools": true,
+        "reasoning": true
+      }
+    }
+  ]
+}
