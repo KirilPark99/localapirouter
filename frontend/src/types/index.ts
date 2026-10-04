@@ -349,6 +349,8 @@ export interface JudgeProfile {
   judge_temperature?: number | null;
   system_prompt?: string;
   fallback_candidate_id?: number | null;
+  fallback_strongest_on_overflow?: boolean;
+  context_length?: number | null;
   timeout_seconds: number;
   enabled: boolean;
   candidates: JudgeCandidate[];

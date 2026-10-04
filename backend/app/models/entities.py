@@ -244,6 +244,8 @@ class JudgeProfile(Base, TimestampMixin):
     judge_temperature: Mapped[Optional[float]] = mapped_column(Float, default=0.1, nullable=True)
     system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     fallback_candidate_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    fallback_strongest_on_overflow: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    context_length: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     timeout_seconds: Mapped[float] = mapped_column(Float, default=60.0, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

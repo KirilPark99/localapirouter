@@ -159,6 +159,8 @@ class JudgeService:
             judge_temperature=data.judge_temperature,
             system_prompt=data.system_prompt,
             fallback_candidate_id=data.fallback_candidate_id,
+            fallback_strongest_on_overflow=data.fallback_strongest_on_overflow,
+            context_length=data.context_length,
             timeout_seconds=data.timeout_seconds,
             enabled=data.enabled,
         )
@@ -231,6 +233,10 @@ class JudgeService:
             profile.system_prompt = data.system_prompt
         if data.fallback_candidate_id is not None:
             profile.fallback_candidate_id = data.fallback_candidate_id
+        if data.fallback_strongest_on_overflow is not None:
+            profile.fallback_strongest_on_overflow = data.fallback_strongest_on_overflow
+        if data.context_length is not None:
+            profile.context_length = data.context_length if data.context_length > 0 else None
         if data.timeout_seconds is not None:
             profile.timeout_seconds = data.timeout_seconds
         if data.enabled is not None:
@@ -351,6 +357,8 @@ class JudgeService:
             judge_temperature=p.judge_temperature,
             system_prompt=p.system_prompt,
             fallback_candidate_id=p.fallback_candidate_id,
+            fallback_strongest_on_overflow=bool(p.fallback_strongest_on_overflow),
+            context_length=p.context_length,
             timeout_seconds=p.timeout_seconds,
             enabled=p.enabled,
             candidates=candidates_read,

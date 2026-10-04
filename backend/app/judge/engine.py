@@ -137,6 +137,47 @@ class JudgeEngine:
         return "\n\n".join(lines)
 
     @classmethod
+    def _find_strongest_candidate(cls, candidates: List[JudgeCandidate]) -> int:
+        """
+        Determines the index of the strongest candidate based on:
+        1. Complexity level:
+           - olympiad / extreme / maximum / hard / high / высокая / максимальная (score 100)
+           - выше среднего / above average / upper-medium / advanced (score 75)
+           - medium / средняя (score 50)
+           - low / низкая / basic / simple (score 25)
+           - all / auto / любая (score 30)
+           - any other custom string (score 60)
+        2. Thinking effort bonus (high/maximum/auto gives +10, any non-empty gives +5)
+        3. Model context length (if model attached, higher is better)
+        4. Lower priority_order (0 is higher priority than 1)
+        """
+        if not candidates:
+            return 0
+
+        def score_candidate(idx: int, c: JudgeCandidate) -> Tuple[int, int, int, int]:
+            c_level = (c.complexity_level or "").strip().lower()
+            if any(w in c_level for w in ("olympiad", "олимпиад", "extreme", "maximum", "максимальн", "hard", "high", "высок")):
+                c_score = 100
+            elif any(w in c_level for w in ("выше среднего", "выше средне", "upper-medium", "above average", "advanced")):
+                c_score = 75
+            elif any(w in c_level for w in ("medium", "средн")):
+                c_score = 50
+            elif any(w in c_level for w in ("low", "низк", "simple", "минимальн")):
+                c_score = 25
+            elif c_level in ("all", "любая", "auto", ""):
+                c_score = 30
+            else:
+                c_score = 60
+
+            t_score = 10 if c.thinking_effort in ("high", "maximum", "auto") else (5 if c.thinking_effort else 0)
+            ctx_len = (c.model.context_length if c.model and c.model.context_length else 0)
+            p_order = -c.priority_order
+            return (c_score, t_score, ctx_len, p_order)
+
+        ranked = sorted(range(len(candidates)), key=lambda i: score_candidate(i, candidates[i]), reverse=True)
+        return ranked[0]
+
+    @classmethod
     async def evaluate_judge(
         cls,
         db: AsyncSession,
@@ -176,6 +217,36 @@ class JudgeEngine:
                 if c.id == profile.fallback_candidate_id:
                     fallback_idx = idx
                     break
+
+        # Check if fallback to strongest on context overflow is enabled
+        if getattr(profile, "fallback_strongest_on_overflow", False):
+            judge_ctx_limit = getattr(profile, "context_length", None)
+            if not judge_ctx_limit and profile.judge_model and profile.judge_model.context_length:
+                judge_ctx_limit = profile.judge_model.context_length
+            elif not judge_ctx_limit and profile.judge_routing_profile and profile.judge_routing_profile.context_length:
+                judge_ctx_limit = profile.judge_routing_profile.context_length
+            elif not judge_ctx_limit and profile.judge_model and profile.judge_model.capabilities:
+                raw_cap_ctx = profile.judge_model.capabilities.get("context_length") or profile.judge_model.capabilities.get("context_window")
+                if isinstance(raw_cap_ctx, int) and raw_cap_ctx > 0:
+                    judge_ctx_limit = raw_cap_ctx
+
+            if judge_ctx_limit and judge_ctx_limit > 0:
+                approx_tokens = max(len(prompt_text) // 3, len(prompt_text.split()))
+                buffer_tokens = min(500, max(50, int(judge_ctx_limit * 0.15)))
+                effective_limit = max(50, judge_ctx_limit - buffer_tokens)
+                if approx_tokens > effective_limit:
+                    strongest_idx = cls._find_strongest_candidate(active_candidates)
+                    strongest_cand = active_candidates[strongest_idx]
+                    lat = round((time.perf_counter() - t0) * 1000, 2)
+                    meta = {
+                        "selected_candidate_index": strongest_idx,
+                        "estimated_complexity": strongest_cand.complexity_level,
+                        "detected_task_type": "context_overflow_bypass",
+                        "reasoning": f"Prompt length (~{approx_tokens} tokens) exceeds judge context window ({judge_ctx_limit} tokens). Automatically routed to strongest candidate '{strongest_cand.label}' (complexity: {strongest_cand.complexity_level}) as configured in profile settings.",
+                        "judge_model": judge_model_name,
+                        "context_overflow": True,
+                    }
+                    return strongest_idx, meta, lat, "CONTEXT_OVERFLOW_BYPASS", None
 
         try:
             # 1. JEV Model Evaluation
@@ -345,6 +416,33 @@ class JudgeEngine:
         except Exception as e:
             lat = round((time.perf_counter() - t0) * 1000, 2)
             err_str = str(e)
+
+            is_context_limit = False
+            if isinstance(e, RouterException) and e.category == ErrorCategory.CONTEXT_LIMIT:
+                is_context_limit = True
+            elif any(kw in err_str.lower() for kw in (
+                "maximum context", "context length", "context window",
+                "too many tokens", "prompt is too long", "context_length_exceeded",
+                "context limit", "exceeds the context"
+            )):
+                is_context_limit = True
+
+            if getattr(profile, "fallback_strongest_on_overflow", False) and is_context_limit:
+                strongest_idx = cls._find_strongest_candidate(active_candidates)
+                strongest_cand = active_candidates[strongest_idx]
+                logger.warning(
+                    f"Judge evaluation exceeded context limit: {err_str}; auto-routing to strongest candidate '{strongest_cand.label}' (#{strongest_idx})"
+                )
+                meta = {
+                    "selected_candidate_index": strongest_idx,
+                    "estimated_complexity": strongest_cand.complexity_level,
+                    "detected_task_type": "context_overflow_fallback",
+                    "reasoning": f"Judge evaluation exceeded context window limit ({err_str}). Automatically selected strongest candidate '{strongest_cand.label}' as configured in profile settings.",
+                    "judge_model": judge_model_name,
+                    "context_overflow": True,
+                }
+                return strongest_idx, meta, lat, "CONTEXT_OVERFLOW_FALLBACK", err_str
+
             logger.warning(f"Judge evaluation failed: {err_str}; falling back to candidate #{fallback_idx}")
             meta = {
                 "selected_candidate_index": fallback_idx,
@@ -399,9 +497,9 @@ class JudgeEngine:
                 "provider_name": "JudgeRouter",
                 "credential_name": "JudgeEvaluator",
                 "model_name": f"[Judge] {judge_meta.get('judge_model', 'unknown')}",
-                "status": "SUCCESS" if judge_status in ("SUCCESS", "BYPASSED") else "FALLBACK",
+                "status": "SUCCESS" if judge_status in ("SUCCESS", "BYPASSED", "CONTEXT_OVERFLOW_BYPASS") else ("OVERFLOW_FALLBACK" if judge_status == "CONTEXT_OVERFLOW_FALLBACK" else "FALLBACK"),
                 "latency_ms": judge_lat,
-                "http_status": 200 if judge_status in ("SUCCESS", "BYPASSED") else 500,
+                "http_status": 200 if judge_status in ("SUCCESS", "BYPASSED", "CONTEXT_OVERFLOW_BYPASS") else 500,
                 "error_message": judge_err,
                 "error_category": "JUDGE_EVAL_ERROR" if judge_err else None,
             }
@@ -508,7 +606,7 @@ class JudgeEngine:
                 request_id=req_id,
                 requested_model=f"judge/{profile.slug}",
                 mode="JUDGE",
-                status="SUCCESS" if judge_status in ("SUCCESS", "BYPASSED") else "JUDGE_FALLBACK_SUCCESS",
+                status="SUCCESS" if judge_status in ("SUCCESS", "BYPASSED", "CONTEXT_OVERFLOW_BYPASS") else ("OVERFLOW_FALLBACK_SUCCESS" if judge_status == "CONTEXT_OVERFLOW_FALLBACK" else "JUDGE_FALLBACK_SUCCESS"),
                 status_code=200,
                 latency_ms=total_lat,
                 router_key_id=router_key.id if router_key else None,
@@ -672,7 +770,7 @@ class JudgeEngine:
                     request_id=req_id,
                     requested_model=f"judge/{profile.slug}",
                     mode="JUDGE",
-                    status="SUCCESS" if judge_status in ("SUCCESS", "BYPASSED") else "JUDGE_FALLBACK_SUCCESS",
+                    status="SUCCESS" if judge_status in ("SUCCESS", "BYPASSED", "CONTEXT_OVERFLOW_BYPASS") else ("OVERFLOW_FALLBACK_SUCCESS" if judge_status == "CONTEXT_OVERFLOW_FALLBACK" else "JUDGE_FALLBACK_SUCCESS"),
                     status_code=200,
                     latency_ms=total_lat,
                     router_key_id=router_key.id if router_key else None,

@@ -608,6 +608,8 @@ class JudgeProfileCreate(BaseModel):
     judge_temperature: Optional[float] = 0.1
     system_prompt: Optional[str] = None
     fallback_candidate_id: Optional[int] = None
+    fallback_strongest_on_overflow: bool = False
+    context_length: Optional[int] = None
     timeout_seconds: float = 60.0
     enabled: bool = True
     candidates: List[JudgeCandidateInput] = Field(default_factory=list)
@@ -636,6 +638,8 @@ class JudgeProfileUpdate(BaseModel):
     judge_temperature: Optional[float] = None
     system_prompt: Optional[str] = None
     fallback_candidate_id: Optional[int] = None
+    fallback_strongest_on_overflow: Optional[bool] = None
+    context_length: Optional[int] = None
     timeout_seconds: Optional[float] = None
     enabled: Optional[bool] = None
     candidates: Optional[List[JudgeCandidateInput]] = None
@@ -672,6 +676,8 @@ class JudgeProfileRead(BaseModel):
     judge_temperature: Optional[float] = None
     system_prompt: Optional[str] = None
     fallback_candidate_id: Optional[int] = None
+    fallback_strongest_on_overflow: bool = False
+    context_length: Optional[int] = None
     timeout_seconds: float
     enabled: bool
     candidates: List[JudgeCandidateRead] = Field(default_factory=list)

@@ -767,3 +767,155 @@ async def test_judge_streaming_routing():
             assert "world!" in chunks
             assert "[DONE]" in chunks
 
+
+@pytest.mark.asyncio
+async def test_judge_overflow_to_strongest_candidate():
+    """Tests automatic routing to the strongest candidate when prompt exceeds judge context window."""
+    run_id = uuid.uuid4().hex[:8]
+    from app.judge.engine import JudgeEngine
+    from app.core.errors import RouterException, ErrorCategory
+
+    async with AsyncSessionLocal() as db:
+        p = await get_or_create_provider(db, f"prov-overflow-{run_id}")
+        c = await CredentialService.create_credential(
+            db,
+            data=type("Obj", (), {
+                "provider_id": p.id,
+                "name": f"Cred {run_id}",
+                "api_key": "sk-mock-key",
+                "priority": 1,
+                "weight": 1,
+                "group_name": None,
+                "proxy_id": None,
+                "rpm_limit": None,
+                "tpm_limit": None,
+                "max_concurrency": None,
+            })(),
+        )
+
+        judge_model = DiscoveredModel(
+            provider_id=p.id,
+            credential_id=c.id,
+            provider_model_id="judge-llm-small-ctx",
+            display_name="Small Ctx Judge",
+            canonical_slug=f"openai/small-judge-{run_id}",
+            capabilities={"chat": True},
+            supported_endpoints=["/chat/completions"],
+            model_type="openai",
+            context_length=200,  # small context
+            enabled=True,
+            available=True,
+            is_visible=True,
+        )
+        cand_low = DiscoveredModel(
+            provider_id=p.id,
+            credential_id=c.id,
+            provider_model_id="cand-low",
+            display_name="Cand Low",
+            canonical_slug=f"openai/cand-low-{run_id}",
+            capabilities={"chat": True},
+            supported_endpoints=["/chat/completions"],
+            model_type="openai",
+            enabled=True,
+            available=True,
+            is_visible=True,
+        )
+        cand_high = DiscoveredModel(
+            provider_id=p.id,
+            credential_id=c.id,
+            provider_model_id="cand-high",
+            display_name="Cand High",
+            canonical_slug=f"openai/cand-high-{run_id}",
+            capabilities={"chat": True},
+            supported_endpoints=["/chat/completions"],
+            model_type="openai",
+            enabled=True,
+            available=True,
+            is_visible=True,
+        )
+        db.add_all([judge_model, cand_low, cand_high])
+        await db.commit()
+
+        # Create profile with fallback_strongest_on_overflow=True
+        profile = JudgeProfile(
+            name=f"Overflow Test {run_id}",
+            slug=f"overflow-test-{run_id}",
+            strategy="auto",
+            judge_type="model",
+            judge_provider_id=p.id,
+            judge_credential_id=c.id,
+            judge_model_id=judge_model.id,
+            fallback_strongest_on_overflow=True,
+            context_length=200,
+            enabled=True,
+        )
+        db.add(profile)
+        await db.flush()
+
+        cand1 = JudgeCandidate(
+            profile_id=profile.id,
+            candidate_type="model",
+            provider_id=p.id,
+            credential_id=c.id,
+            model_id=cand_low.id,
+            priority_order=0,
+            label="Candidate Weak",
+            task_types=["chat"],
+            complexity_level="low",
+            is_active=True,
+        )
+        cand2 = JudgeCandidate(
+            profile_id=profile.id,
+            candidate_type="model",
+            provider_id=p.id,
+            credential_id=c.id,
+            model_id=cand_high.id,
+            priority_order=1,
+            label="Candidate Strongest",
+            task_types=["reasoning"],
+            complexity_level="high",
+            is_active=True,
+        )
+        db.add_all([cand1, cand2])
+        await db.commit()
+
+        # Reload with relationships using JudgeService
+        from app.services.judge_service import JudgeService
+        full_prof = await JudgeService.get_profile_by_slug(db, profile.slug)
+        candidates = full_prof.candidates
+
+        # 1. Test pre-flight overflow: prompt is large (> 200 tokens)
+        long_prompt = "Hello world this is a test prompt with lots of content. " * 80
+        winning_idx, meta, lat, status, err = await JudgeEngine.evaluate_judge(
+            db=db,
+            profile=full_prof,
+            prompt_text=long_prompt,
+            active_candidates=candidates,
+            req_id="test-overflow-1",
+        )
+        assert status == "CONTEXT_OVERFLOW_BYPASS"
+        assert winning_idx == 1  # cand2 (high complexity)
+        assert meta["selected_candidate_index"] == 1
+        assert "exceeds judge context window" in meta["reasoning"]
+
+        # 2. Test runtime overflow fallback when judge fails with CONTEXT_LIMIT
+        short_prompt = "Short query"
+        async def mock_fail_context(*args, **kwargs):
+            raise RouterException("Context limit exceeded: prompt is too long", ErrorCategory.CONTEXT_LIMIT, status_code=400)
+
+        # Clear explicit context_length on profile to test runtime exception catch
+        full_prof.context_length = None
+        full_prof.judge_model.context_length = None
+        with patch("app.adapters.openai.GenericOpenAIAdapter.chat_completions", side_effect=mock_fail_context):
+            winning_idx2, meta2, lat2, status2, err2 = await JudgeEngine.evaluate_judge(
+                db=db,
+                profile=full_prof,
+                prompt_text=short_prompt,
+                active_candidates=candidates,
+                req_id="test-overflow-2",
+            )
+            assert status2 == "CONTEXT_OVERFLOW_FALLBACK"
+            assert winning_idx2 == 1  # cand2 (strongest)
+            assert "exceeded context window limit" in meta2["reasoning"]
+
+

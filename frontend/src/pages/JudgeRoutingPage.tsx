@@ -114,6 +114,8 @@ export const JudgeRoutingPage: React.FC = () => {
   const [formJudgeCustomTemp, setFormJudgeCustomTemp] = useState<string>("");
   const [formSystemPrompt, setFormSystemPrompt] = useState("");
   const [formFallbackCandidateId, setFormFallbackCandidateId] = useState<number | undefined>(undefined);
+  const [formFallbackStrongestOnOverflow, setFormFallbackStrongestOnOverflow] = useState(false);
+  const [formContextLength, setFormContextLength] = useState<string>("");
 
   // Candidates list state in modal
   const [formCandidates, setFormCandidates] = useState<JudgeCandidate[]>([]);
@@ -336,6 +338,8 @@ export const JudgeRoutingPage: React.FC = () => {
     setFormJudgeCustomTemp("");
     setFormSystemPrompt("");
     setFormFallbackCandidateId(undefined);
+    setFormFallbackStrongestOnOverflow(false);
+    setFormContextLength("");
     setFormCandidates([]);
 
     setCandComplexityPreset("all");
@@ -408,6 +412,8 @@ export const JudgeRoutingPage: React.FC = () => {
 
     setFormSystemPrompt(p.system_prompt || "");
     setFormFallbackCandidateId(p.fallback_candidate_id || undefined);
+    setFormFallbackStrongestOnOverflow(Boolean(p.fallback_strongest_on_overflow));
+    setFormContextLength(p.context_length ? String(p.context_length) : "");
     setFormCandidates([...p.candidates]);
 
     setCandComplexityPreset("all");
@@ -651,6 +657,8 @@ export const JudgeRoutingPage: React.FC = () => {
       judge_temperature: effJudgeTemp,
       system_prompt: formSystemPrompt.trim() || null,
       fallback_candidate_id: formFallbackCandidateId || null,
+      fallback_strongest_on_overflow: formFallbackStrongestOnOverflow,
+      context_length: formContextLength.trim() ? parseInt(formContextLength.trim(), 10) : null,
       timeout_seconds: formTimeout,
       enabled: formEnabled,
       candidates: formCandidates.map((c, idx) => ({
@@ -877,6 +885,15 @@ export const JudgeRoutingPage: React.FC = () => {
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20">
                         {p.strategy === "auto" ? "Авто (Сложность + Тип)" : p.strategy}
                       </span>
+                      {p.fallback_strongest_on_overflow && (
+                        <span
+                          className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-400/10 text-amber-400 border border-amber-400/25 flex items-center gap-1"
+                          title={`При переполнении контекста судьи (${p.context_length ? p.context_length + ' токенов' : 'из модели'}) автоматически выбирается сильнейший кандидат`}
+                        >
+                          <Zap size={10} />
+                          <span>Контекст → Сильнейший</span>
+                        </span>
+                      )}
                     </div>
                     {p.description && <p className="text-xs text-slate-400">{p.description}</p>}
                   </div>
@@ -1324,6 +1341,49 @@ export const JudgeRoutingPage: React.FC = () => {
                   ))}
                 </select>
               </div>
+            </div>
+
+            <div className="pt-2 border-t border-white/[0.06] space-y-3">
+              <div className="flex items-start justify-between gap-4 p-3 bg-white/[0.02] border border-white/[0.06] rounded-xl hover:border-amber-500/30 transition-all">
+                <div className="space-y-0.5">
+                  <label className="text-xs font-semibold text-slate-200 flex items-center gap-1.5 cursor-pointer" htmlFor="toggle-overflow-strongest">
+                    <Zap size={14} className="text-amber-400" />
+                    Выбирать сильнейшего кандидата при переполнении контекста
+                  </label>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Если промпт превышает контекстное окно судьи (или модель возвращает ошибку переполнения контекста), запрос автоматически отдаётся самому сильному кандидату без вызова судьи.
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  id="toggle-overflow-strongest"
+                  checked={formFallbackStrongestOnOverflow}
+                  onChange={(e) => setFormFallbackStrongestOnOverflow(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 rounded border-white/20 bg-slate-900 text-amber-500 focus:ring-amber-500 focus:ring-offset-slate-900 cursor-pointer"
+                />
+              </div>
+
+              {formFallbackStrongestOnOverflow && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pl-1">
+                  <div>
+                    <label className="block text-slate-400 font-medium mb-1 text-[11px]">
+                      Кастомный лимит контекста судьи (токенов, опционально)
+                    </label>
+                    <input
+                      type="number"
+                      min="100"
+                      step="100"
+                      value={formContextLength}
+                      onChange={(e) => setFormContextLength(e.target.value)}
+                      placeholder="Автоматически из модели (напр. 8192, 32768)"
+                      className="w-full bg-slate-900 border border-white/[0.09] rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-500 text-xs font-mono"
+                    />
+                    <span className="text-[10px] text-slate-500 mt-1 block">
+                      Оставьте пустым, чтобы брать лимит из спецификации модели судьи
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div>
