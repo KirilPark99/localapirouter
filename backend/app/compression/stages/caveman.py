@@ -84,7 +84,7 @@ class CavemanStage(BaseCompressionStage):
         rules_applied_count = 0
 
         for msg in messages:
-            if not isinstance(msg.content, str):
+            if msg.role in {"system", "developer", "user", "tool", "function"} or not isinstance(msg.content, str):
                 compressed_messages.append(msg)
                 continue
 

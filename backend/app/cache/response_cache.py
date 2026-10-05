@@ -1,36 +1,50 @@
-"""Two-Tier Response Cache (L1 Memory LRU + L2 SQLite).
-Caches deterministic LLM responses to eliminate latency (<5ms) and reduce external API costs to $0.
-Supports both non-streaming and synthetic streaming responses.
-"""
+"""Process-local LRU backed by SQLite; cache only completed, policy-safe responses."""
 import asyncio
 from collections import OrderedDict
-from datetime import datetime, timezone
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+import math
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update, delete, func
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.database import AsyncSessionLocal, _safe_close_session
-from app.models.entities import ResponseCacheEntry, CacheMetric
+from app.models.entities import ResponseCacheEntry
 from app.schemas.chat import ChatMessage, ChatCompletionRequest
 
 logger = logging.getLogger(__name__)
 
 
-class ResponseCacheService:
-    _lock = asyncio.Lock()
-    _memory_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
-    _max_memory_items: int = 500
+def _utc_naive(value: datetime) -> datetime:
+    return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
 
-    # In-memory metrics buffer for fast increments
-    _mem_metrics = {
-        "hits": 0,
-        "misses": 0,
-        "tokens_saved": 0,
-        "cost_saved_usd": 0.0,
-    }
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _json_value(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    return value
+
+
+class ResponseCacheService:
+    # ponytail: one process-wide lock includes SQLite I/O; split locks only if throughput requires it.
+    # Cross-process invalidation needs a shared generation; this cache currently runs in one worker.
+    _lock = asyncio.Lock()
+    _generation = 0
+    _memory_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+    _max_memory_items = 500
+    _metrics_started_at = datetime.now(timezone.utc).isoformat()
+    _mem_metrics = {"hits": 0, "misses": 0, "tokens_saved": 0, "cost_saved_usd": 0.0}
 
     @classmethod
     def generate_signature(
@@ -41,125 +55,98 @@ class ResponseCacheService:
         top_p: Optional[float] = None,
         tools: Optional[Any] = None,
         router_key_id: Optional[int] = None,
+        *,
+        request: Optional[ChatCompletionRequest] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
+        """Hash the full effective request, principal and effective policy/route context.
+
+        The legacy positional form remains supported, but has a separate namespace
+        and cannot share entries with full-request callers. Full-request callers
+        must supply authenticated router_key_id (or context['principal']) and a
+        nonempty context fingerprint. Only transport streaming options are omitted.
         """
-        Generates a deterministic SHA-256 signature for the request.
-        """
-        normalized_messages = []
-        for m in messages:
-            if isinstance(m, dict):
-                role = m.get("role") or "user"
-                content = m.get("content")
-                tool_calls = m.get("tool_calls")
-            else:
-                role = getattr(m, "role", "user") or "user"
-                content = getattr(m, "content", None)
-                tool_calls = getattr(m, "tool_calls", None)
-
-            msg_dict = {"role": str(role)}
-            if content is not None:
-                if isinstance(content, str):
-                    msg_dict["content"] = content.strip()
-                else:
-                    msg_dict["content"] = content
-            if tool_calls:
-                msg_dict["tool_calls"] = [
-                    tc.model_dump() if hasattr(tc, "model_dump") else tc
-                    for tc in tool_calls
-                ]
-            normalized_messages.append(msg_dict)
-
-        eff_temp = round(temperature, 2) if temperature is not None else 0.0
-        eff_top_p = round(top_p, 2) if top_p is not None else 1.0
-
-        key_dict = {
-            "model": model.strip().lower(),
-            "messages": normalized_messages,
-            "temperature": eff_temp,
-            "top_p": eff_top_p,
-            "tools": tools or [],
-        }
-        serialized = json.dumps(key_dict, sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        if request is not None:
+            if not context or (router_key_id is None and context.get("principal") is None):
+                raise ValueError("Full request cache signatures require principal and policy/route context")
+            payload = _json_value(request)
+            payload = {key: value for key, value in payload.items() if key not in ("stream", "stream_options")}
+        else:
+            payload = _json_value(dict(model=model, messages=messages, temperature=temperature, top_p=top_p, tools=tools))
+        serialized = json.dumps({
+            "namespace": "response-cache-v2-full" if request is not None else "response-cache-v2-legacy",
+            "request": payload, "router_key_id": router_key_id, "context": _json_value(context),
+        }, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        # Keep the existing 64-character DB column, with an unmistakable non-hex version prefix.
+        return "v2:" + hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:61]
 
     @classmethod
     def is_cacheable(cls, request: ChatCompletionRequest, headers: Dict[str, str]) -> bool:
-        """
-        Determines if the request is eligible for response caching.
-        Follows OmniRoute semantic cache doctrine:
-        - Must NOT have bypass header (x-bypass-cache, x-no-cache)
-        - Requires explicit deterministic temperature (temperature == 0.0 or <= 0.05)
-          Omitted temperature is treated as non-deterministic and not cached.
-        """
-        # Bypass headers
-        for k, v in headers.items():
-            if k.lower() in ("x-bypass-cache", "x-no-cache") and str(v).lower() in ("true", "1"):
+        for key, value in headers.items():
+            if key.lower() in ("x-bypass-cache", "x-no-cache") and str(value).lower() in ("true", "1"):
                 return False
-
-        # Requires explicit deterministic temperature
         temp = getattr(request, "temperature", None)
-        if temp is None or float(temp) > 0.05:
-            return False
-
-        return True
+        return temp is not None and math.isfinite(float(temp)) and 0 <= float(temp) <= 0.05
 
     @classmethod
-    async def get_response(
-        cls, db: AsyncSession, signature: str
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Looks up response in L1 (Memory) then L2 (SQLite).
-        """
-        # 1. L1 Memory Lookup
+    def get_generation(cls) -> int:
+        """Capture before upstream work; pass to set_response to reject writes across clear."""
+        return cls._generation
+
+    @classmethod
+    def _remember(cls, signature: str, entry: Dict[str, Any]) -> None:
+        cls._memory_cache[signature] = entry
+        cls._memory_cache.move_to_end(signature)
+        while len(cls._memory_cache) > cls._max_memory_items:
+            cls._memory_cache.popitem(last=False)
+
+    @classmethod
+    def _hit(cls, entry: Dict[str, Any]) -> Dict[str, Any]:
+        cls._mem_metrics["hits"] += 1
+        cls._mem_metrics["tokens_saved"] += entry["input_tokens"] + entry["output_tokens"]
+        cls._mem_metrics["cost_saved_usd"] += entry["estimated_cost_usd"]
+        # Callers apply outbound policies; never let them mutate our stored response.
+        return deepcopy(entry["response_json"])
+
+    @classmethod
+    async def get_response(cls, db: AsyncSession, signature: str) -> Optional[Dict[str, Any]]:
+        generation = cls._generation
         async with cls._lock:
-            if signature in cls._memory_cache:
-                entry = cls._memory_cache[signature]
-                # Move to end (most recently used)
-                cls._memory_cache.move_to_end(signature)
-                cls._mem_metrics["hits"] += 1
-                cls._mem_metrics["tokens_saved"] += entry.get("input_tokens", 0) + entry.get("output_tokens", 0)
-                cls._mem_metrics["cost_saved_usd"] += entry.get("estimated_cost_usd", 0.0)
-                return entry["response_json"]
-
-        # 2. L2 SQLite Lookup
-        try:
-            stmt = select(ResponseCacheEntry).where(ResponseCacheEntry.signature == signature)
-            res = await db.execute(stmt)
-            db_entry = res.scalar_one_or_none()
-
-            if db_entry:
-                now = datetime.now(timezone.utc)
-                if db_entry.expires_at and db_entry.expires_at < now:
-                    await db.delete(db_entry)
-                    await db.commit()
-                    cls._mem_metrics["misses"] += 1
-                    return None
-
-                # Update hit stats
-                db_entry.hit_count += 1
-                db_entry.last_hit_at = now
-                await db.commit()
-
-                # Promote to L1
-                async with cls._lock:
-                    cls._memory_cache[signature] = {
-                        "response_json": db_entry.response_json,
-                        "input_tokens": db_entry.input_tokens,
-                        "output_tokens": db_entry.output_tokens,
-                        "estimated_cost_usd": db_entry.estimated_cost_usd,
-                    }
-                    if len(cls._memory_cache) > cls._max_memory_items:
-                        cls._memory_cache.popitem(last=False)
-                    cls._mem_metrics["hits"] += 1
-                    cls._mem_metrics["tokens_saved"] += db_entry.input_tokens + db_entry.output_tokens
-                    cls._mem_metrics["cost_saved_usd"] += db_entry.estimated_cost_usd
-
-                return db_entry.response_json
-        except Exception as e:
-            logger.warning(f"Error reading L2 response cache: {e}")
-
-        cls._mem_metrics["misses"] += 1
-        return None
+            if not signature or generation != cls._generation:
+                cls._mem_metrics["misses"] += 1
+                return None
+            entry = cls._memory_cache.get(signature)
+            if entry is not None:
+                expires = entry.get("expires_at")
+                if expires is None or _utc_naive(expires) > _now():
+                    cls._memory_cache.move_to_end(signature)
+                    return cls._hit(entry)
+                del cls._memory_cache[signature]
+            try:
+                result = await db.execute(select(ResponseCacheEntry).where(ResponseCacheEntry.signature == signature)
+                    .execution_options(populate_existing=True))
+                stored = result.scalar_one_or_none()
+                if stored is not None:
+                    expires = _utc_naive(stored.expires_at) if stored.expires_at is not None else None
+                    if expires is not None and expires <= _now():
+                        await db.execute(delete(ResponseCacheEntry).where(ResponseCacheEntry.signature == signature))
+                        await db.commit()
+                    else:
+                        entry = dict(response_json=deepcopy(stored.response_json), input_tokens=stored.input_tokens,
+                            output_tokens=stored.output_tokens, estimated_cost_usd=stored.estimated_cost_usd, expires_at=expires)
+                        await db.execute(update(ResponseCacheEntry).where(ResponseCacheEntry.signature == signature)
+                            .values(hit_count=ResponseCacheEntry.hit_count + 1, last_hit_at=_now()))
+                        await db.commit()
+                        cls._remember(signature, entry)
+                        return cls._hit(entry)
+            except BaseException as exc:
+                await db.rollback()
+                if not isinstance(exc, Exception):
+                    raise
+                # Do not log SQL parameter dumps: cached responses may contain sensitive content.
+                logger.warning("L2 response cache read failed (%s)", type(exc).__name__)
+            cls._mem_metrics["misses"] += 1
+            return None
 
     @classmethod
     async def set_response(
@@ -172,213 +159,105 @@ class ResponseCacheService:
         output_tokens: int = 0,
         estimated_cost_usd: float = 0.0,
         ttl_seconds: Optional[int] = None,
+        *,
+        expected_generation: Optional[int] = None,
     ) -> None:
-        """
-        Stores response in both L1 (Memory) and L2 (SQLite).
-        """
+        generation = cls._generation if expected_generation is None else expected_generation
+        if not signature:
+            return
         expires_at = None
-        if ttl_seconds:
-            expires_at = datetime.fromtimestamp(
-                datetime.now(timezone.utc).timestamp() + ttl_seconds, tz=timezone.utc
-            )
-
-        # Store in L1 Memory
+        if ttl_seconds is not None:
+            try:
+                if isinstance(ttl_seconds, bool) or not math.isfinite(ttl_seconds) or ttl_seconds < 0:
+                    raise ValueError("TTL must be finite and nonnegative")
+                expires_at = _now() + timedelta(seconds=ttl_seconds)
+            except (OverflowError, TypeError) as exc:
+                raise ValueError("TTL exceeds supported datetime range") from exc
+        entry = dict(response_json=deepcopy(response_json), input_tokens=input_tokens, output_tokens=output_tokens,
+            estimated_cost_usd=estimated_cost_usd, expires_at=expires_at)
         async with cls._lock:
-            cls._memory_cache[signature] = {
-                "response_json": response_json,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "estimated_cost_usd": estimated_cost_usd,
-            }
-            if len(cls._memory_cache) > cls._max_memory_items:
-                cls._memory_cache.popitem(last=False)
-
-        # Store in L2 SQLite
-        try:
-            stmt = select(ResponseCacheEntry).where(ResponseCacheEntry.signature == signature)
-            res = await db.execute(stmt)
-            existing = res.scalar_one_or_none()
-
-            if existing:
-                existing.response_json = response_json
-                existing.input_tokens = input_tokens
-                existing.output_tokens = output_tokens
-                existing.estimated_cost_usd = estimated_cost_usd
-                existing.expires_at = expires_at
-                existing.last_hit_at = datetime.now(timezone.utc)
-            else:
-                new_entry = ResponseCacheEntry(
-                    signature=signature,
-                    model=model,
-                    response_json=response_json,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    estimated_cost_usd=estimated_cost_usd,
-                    hit_count=1,
-                    expires_at=expires_at,
-                )
-                db.add(new_entry)
-            await db.commit()
-        except Exception as e:
-            logger.warning(f"Error persisting response cache to L2 SQLite: {e}")
+            if generation != cls._generation:
+                return
+            try:
+                values = dict(signature=signature, model=model, **entry, hit_count=0, last_hit_at=_now())
+                stmt = insert(ResponseCacheEntry).values(**values)
+                await db.execute(stmt.on_conflict_do_update(index_elements=[ResponseCacheEntry.signature], set_={
+                    key: value for key, value in values.items() if key not in ("signature", "hit_count")
+                }))
+                await db.commit()
+            except BaseException as exc:
+                await db.rollback()
+                if not isinstance(exc, Exception):
+                    raise
+                logger.warning("L2 response cache write failed (%s)", type(exc).__name__)
+                return
+            cls._remember(signature, entry)
 
     @classmethod
     async def synthesize_sse_stream(
-        cls, cached_response: Dict[str, Any], req_id: str
+        cls, cached_response: Dict[str, Any], req_id: str, include_usage: bool = False,
     ) -> AsyncGenerator[str, None]:
-        """
-        Synthesizes standard OpenAI SSE chunks from a cached JSON response.
-        Allows instant streaming with 0 external API cost and <5ms latency.
-        """
-        choices = cached_response.get("choices", [])
-        if not choices:
-            yield "data: [DONE]\n\n"
-            return
-
-        choice = choices[0]
-        msg = choice.get("message", {})
-        content = msg.get("content") or ""
-        role = msg.get("role") or "assistant"
-        tool_calls = msg.get("tool_calls")
-        model = cached_response.get("model", "cached-model")
-
-        # 1. Role chunk
-        role_chunk = {
-            "id": req_id,
-            "object": "chat.completion.chunk",
-            "created": int(datetime.now(timezone.utc).timestamp()),
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": role},
-                    "finish_reason": None,
-                }
-            ],
-        }
-        yield f"data: {json.dumps(role_chunk, ensure_ascii=False)}\n\n"
-        await asyncio.sleep(0.001)
-
-        # 2. Content chunk(s)
-        if content:
-            # Send in small chunks for realistic streaming feel
-            chunk_size = 32
-            for i in range(0, len(content), chunk_size):
-                text_slice = content[i : i + chunk_size]
-                content_chunk = {
-                    "id": req_id,
-                    "object": "chat.completion.chunk",
-                    "created": int(datetime.now(timezone.utc).timestamp()),
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": text_slice},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(content_chunk, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(0.001)
-
-        # 3. Tool calls chunk if present
-        if tool_calls:
-            tc_chunk = {
-                "id": req_id,
-                "object": "chat.completion.chunk",
-                "created": int(datetime.now(timezone.utc).timestamp()),
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"tool_calls": tool_calls},
-                        "finish_reason": None,
-                    }
-                ],
-            }
-            yield f"data: {json.dumps(tc_chunk, ensure_ascii=False)}\n\n"
-
-        # 4. Finish chunk
-        finish_chunk = {
-            "id": req_id,
-            "object": "chat.completion.chunk",
-            "created": int(datetime.now(timezone.utc).timestamp()),
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": choice.get("finish_reason") or "stop",
-                }
-            ],
-        }
-        yield f"data: {json.dumps(finish_chunk, ensure_ascii=False)}\n\n"
-
-        # 5. Usage chunk if available
-        if "usage" in cached_response:
-            usage_chunk = {
-                "id": req_id,
-                "object": "chat.completion.chunk",
-                "created": int(datetime.now(timezone.utc).timestamp()),
-                "model": model,
-                "choices": [],
-                "usage": cached_response["usage"],
-            }
-            yield f"data: {json.dumps(usage_chunk, ensure_ascii=False)}\n\n"
-
+        """Replay every choice with lossless message deltas and indexed tool calls."""
+        base = {key: deepcopy(value) for key, value in cached_response.items()
+                if key not in ("id", "object", "choices", "usage")}
+        base.update(id=req_id, object="chat.completion.chunk")
+        base.setdefault("created", int(datetime.now(timezone.utc).timestamp()))
+        base.setdefault("model", "cached-model")
+        for position, choice in enumerate(cached_response.get("choices") or []):
+            delta = deepcopy(choice.get("message") or {})
+            delta.setdefault("role", "assistant")
+            if delta.get("tool_calls"):
+                delta["tool_calls"] = [{**call, "index": index} for index, call in enumerate(delta["tool_calls"])]
+            index = choice.get("index", position)
+            chunk = {**base, "choices": [{"index": index, "delta": delta, "finish_reason": None}]}
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            finished = {**choice, "index": index, "delta": {}}
+            finished.pop("message", None)
+            chunk = {**base, "choices": [finished]}
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        if include_usage is True and cached_response.get("usage") is not None:
+            yield f"data: {json.dumps({**base, 'choices': [], 'usage': cached_response['usage']}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     @classmethod
     async def get_metrics(cls, db: AsyncSession) -> Dict[str, Any]:
-        """Returns consolidated metrics: hits, misses, hit rate, tokens and cost saved."""
-        total_hits = cls._mem_metrics["hits"]
-        total_misses = cls._mem_metrics["misses"]
-        tokens_saved = cls._mem_metrics["tokens_saved"]
-        cost_saved = cls._mem_metrics["cost_saved_usd"]
-
-        try:
-            res = await db.execute(select(ResponseCacheEntry))
-            entries = res.scalars().all()
-            total_entries = len(entries)
-            db_hits = sum(e.hit_count - 1 for e in entries)
-            db_tokens_saved = sum((e.hit_count - 1) * (e.input_tokens + e.output_tokens) for e in entries)
-            db_cost_saved = sum((e.hit_count - 1) * e.estimated_cost_usd for e in entries)
-
-            # Combine memory metrics with persistent historical records
-            effective_hits = max(total_hits, db_hits)
-            effective_tokens = max(tokens_saved, db_tokens_saved)
-            effective_cost = max(cost_saved, db_cost_saved)
-        except Exception:
-            total_entries = len(cls._memory_cache)
-            effective_hits = total_hits
-            effective_tokens = tokens_saved
-            effective_cost = cost_saved
-
-        total_lookups = effective_hits + total_misses
-        hit_rate = round((effective_hits / max(1, total_lookups)) * 100, 2)
-
-        return {
-            "total_entries": total_entries,
-            "l2_db_entries": total_entries,
-            "memory_entries": len(cls._memory_cache),
-            "l1_memory_entries": len(cls._memory_cache),
-            "l1_max_size": cls._max_memory_items,
-            "hits": effective_hits,
-            "total_hits": effective_hits,
-            "misses": total_misses,
-            "total_misses": total_misses,
-            "hit_rate_percent": hit_rate,
-            "hit_rate_pct": hit_rate,
-            "tokens_saved": effective_tokens,
-            "cost_saved_usd": round(effective_cost, 4),
-        }
+        """Counters are since process start; savings are estimates, not billing records."""
+        async with cls._lock:
+            now = _now()
+            for signature, entry in list(cls._memory_cache.items()):
+                if entry.get("expires_at") is not None and _utc_naive(entry["expires_at"]) <= now:
+                    del cls._memory_cache[signature]
+            try:
+                count = await db.scalar(select(func.count()).select_from(ResponseCacheEntry).where(
+                    ResponseCacheEntry.signature.like("v2:%"),
+                    (ResponseCacheEntry.expires_at.is_(None)) | (ResponseCacheEntry.expires_at > now),
+                ))
+            except BaseException as exc:
+                await db.rollback()
+                if not isinstance(exc, Exception):
+                    raise
+                count = None
+            hits, misses = cls._mem_metrics["hits"], cls._mem_metrics["misses"]
+            rate = round(100 * hits / max(1, hits + misses), 2)
+            memory_count = len(cls._memory_cache)
+            return dict(total_entries=count, l2_db_entries=count, memory_entries=memory_count,
+                l1_memory_entries=memory_count, l1_max_size=cls._max_memory_items,
+                hits=hits, total_hits=hits, misses=misses, total_misses=misses,
+                hit_rate_percent=rate, hit_rate_pct=rate, tokens_saved=cls._mem_metrics["tokens_saved"],
+                cost_saved_usd=round(cls._mem_metrics["cost_saved_usd"], 4),
+                metrics_scope="since_process_start", metrics_started_at=cls._metrics_started_at,
+                cost_saved_is_estimate=True, cost_estimate_note="Only caller-supplied price estimates; zero may mean unavailable",
+                l2_available=count is not None, cache_namespace="v2")
 
     @classmethod
     async def clear_cache(cls, db: AsyncSession) -> Dict[str, Any]:
-        """Clears both L1 memory cache and L2 SQLite cache table."""
         async with cls._lock:
+            try:
+                await db.execute(delete(ResponseCacheEntry))
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+            cls._generation += 1
             cls._memory_cache.clear()
-
-        await db.execute(delete(ResponseCacheEntry))
-        await db.commit()
-        return {"message": "Response cache cleared successfully"}
+            return {"message": "Response cache cleared successfully", "generation": cls._generation}

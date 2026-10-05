@@ -1,4 +1,5 @@
 import time
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy import select
@@ -8,6 +9,8 @@ from app.schemas.chat import ChatMessage
 from app.compression.base import CompressionContext, StageExecutionResult
 from app.compression.registry import StageRegistry
 from app.compression.tokenizer import count_messages_tokens
+from app.compression.safety import execute_stage
+from app.compression.validation import validate_stage_config, validate_globals
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ class CompressionPipelineService:
 
     @classmethod
     async def update_global_settings(cls, db: AsyncSession, data: Dict[str, Any]) -> CompressionGlobalSetting:
+        validate_globals(data)
         settings = await cls.get_global_settings(db)
         if "enabled" in data:
             settings.enabled = bool(data["enabled"])
@@ -69,6 +73,11 @@ class CompressionPipelineService:
         if not stage:
             return None
 
+        impl = StageRegistry.get_stage(stage_id, stage)
+        if "config_json" in data:
+            await asyncio.to_thread(validate_stage_config, impl, data["config_json"])
+        if "custom_rules" in data:
+            await asyncio.to_thread(validate_stage_config, impl, {"rules": data["custom_rules"]})
         if "enabled" in data:
             stage.enabled = bool(data["enabled"])
         if "priority_order" in data:
@@ -81,6 +90,7 @@ class CompressionPipelineService:
             stage.description = str(data["description"])
         if "custom_rules" in data:
             stage.custom_rules = data["custom_rules"]
+            stage.config_json = {**(stage.config_json or {}), "rules": data["custom_rules"]}
 
         await db.commit()
         await db.refresh(stage)
@@ -107,6 +117,8 @@ class CompressionPipelineService:
 
         config_json = {"rules": rules, "guard_code_blocks": data.get("guard_code_blocks", True)}
 
+        from app.compression.stages.custom_regex import CustomRegexStage
+        await asyncio.to_thread(validate_stage_config, CustomRegexStage(), config_json)
         stage = CompressionStage(
             id=stage_id,
             name=name,
@@ -141,7 +153,10 @@ class CompressionPipelineService:
         messages: List[ChatMessage],
         model_id: str = "",
         request_headers: Optional[Dict[str, str]] = None,
-        supports_vision: bool = False,
+        supports_vision: Optional[bool] = None,
+        provider_name: Optional[str] = None,
+        stage_ids_filter: Optional[List[str]] = None,
+        config_overrides: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[ChatMessage], Dict[str, Any]]:
         """
         Executes active compression stages on incoming messages.
@@ -163,13 +178,14 @@ class CompressionPipelineService:
             return messages, {"compressed": False, "below_threshold": True, "tokens": initial_tokens}
 
         stages = await cls.get_stages(db)
-        active_stages = [s for s in stages if s.enabled]
+        active_stages = [s for s in stages if s.enabled and (stage_ids_filter is None or s.id in stage_ids_filter)]
         if not active_stages:
             return messages, {"compressed": False, "no_active_stages": True}
 
         preserve_sys_prompt = should_preserve_system_prompt(
             mode=getattr(global_cfg, "preserve_system_prompt_mode", "when_caching"),
             model_id=model_id,
+            provider_name=provider_name,
             request_headers=headers,
         )
 
@@ -180,6 +196,7 @@ class CompressionPipelineService:
             preserve_recent_turns=global_cfg.preserve_recent_turns,
             preserve_system_prompt=preserve_sys_prompt,
             request_headers=headers,
+            metadata={"latest_user_query": next((m.content for m in reversed(messages) if m.role == "user" and isinstance(m.content, str)), "")},
         )
 
         current_messages = list(messages)
@@ -193,7 +210,9 @@ class CompressionPipelineService:
 
             stage_before = count_messages_tokens(current_messages)
             try:
-                res = await stage_impl.compress(current_messages, stage_rec.config_json, ctx)
+                cfg = {**(stage_rec.config_json or {}), **((config_overrides or {}).get(stage_rec.id, {}))}
+                await asyncio.to_thread(validate_stage_config, stage_impl, cfg)
+                res = await execute_stage(stage_impl, current_messages, cfg, ctx)
                 # Bailout check
                 if res.compressed and global_cfg.min_savings_bailout_percent > 0:
                     if res.savings_percent < global_cfg.min_savings_bailout_percent:
@@ -211,12 +230,7 @@ class CompressionPipelineService:
                         continue
 
                 if res.compressed:
-                    if ctx.preserve_system_prompt:
-                        orig_sys = [m for m in current_messages if m.role == "system"]
-                        res_non_sys = [m for m in res.messages if m.role != "system"]
-                        current_messages = orig_sys + res_non_sys
-                    else:
-                        current_messages = res.messages
+                    current_messages = res.messages
 
                 stage_breakdown.append({
                     "stage_id": stage_rec.id,
@@ -227,6 +241,8 @@ class CompressionPipelineService:
                     "duration_ms": res.duration_ms,
                     "advanced": res.compressed,
                     "rules": res.rules_applied,
+                    "warning": res.warning,
+                    "icon": stage_rec.icon,
                 })
             except Exception as e:
                 logger.error(f"Compression stage {stage_rec.id} failed: {e}", exc_info=True)
@@ -255,71 +271,43 @@ class CompressionPipelineService:
             "savings_percent": total_savings,
             "duration_ms": total_duration,
             "breakdown": stage_breakdown,
+            "token_count_is_estimate": True,
+            "enable_telemetry": getattr(global_cfg, "enable_telemetry", True),
         }
         return current_messages, summary
 
     @classmethod
     async def preview_compression(
-        cls,
-        db: AsyncSession,
-        messages: List[ChatMessage],
+        cls, db: AsyncSession, messages: List[ChatMessage],
         stage_ids_filter: Optional[List[str]] = None,
         config_overrides: Optional[Dict[str, Any]] = None,
+        model_id: str = "", supports_vision: Optional[bool] = None,
+        provider_name: Optional[str] = None,
+        request_headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        """
-        Playground preview without modifying live session state.
-        """
-        initial_tokens = count_messages_tokens(messages)
-        stages = await cls.get_stages(db)
-        if stage_ids_filter is not None:
-            active_stages = [s for s in stages if s.id in stage_ids_filter]
-        else:
-            active_stages = [s for s in stages if s.enabled]
-
-        overrides = config_overrides or {}
-        ctx = CompressionContext(
-            model_id="playground",
-            supports_vision=False,
-            original_tokens=initial_tokens,
-            preserve_recent_turns=1,
+        if config_overrides is not None:
+            stages = {s.id: s for s in await cls.get_stages(db)}
+            for stage_id, override in config_overrides.items():
+                if stage_id not in stages or not isinstance(override, dict):
+                    raise ValueError("Invalid preview override")
+                record = stages[stage_id]
+                await asyncio.to_thread(validate_stage_config, StageRegistry.get_stage(stage_id, record),
+                                        {**(record.config_json or {}), **override})
+        output, summary = await cls.optimize_messages(
+            db, messages, model_id=model_id, supports_vision=supports_vision,
+            provider_name=provider_name, request_headers=request_headers,
+            stage_ids_filter=stage_ids_filter, config_overrides=config_overrides,
         )
-
-        current_messages = list(messages)
-        step_results = []
-        t0 = time.perf_counter()
-
-        for stage_rec in active_stages:
-            stage_impl = StageRegistry.get_stage(stage_rec.id, stage_rec)
-            if not stage_impl:
-                continue
-
-            cfg = {**stage_rec.config_json, **overrides.get(stage_rec.id, {})}
-            before_tok = count_messages_tokens(current_messages)
-            res = await stage_impl.compress(current_messages, cfg, ctx)
-
-            step_results.append({
-                "stage_id": stage_rec.id,
-                "stage_name": stage_rec.name,
-                "icon": stage_rec.icon,
-                "tokens_before": res.tokens_before,
-                "tokens_after": res.tokens_after,
-                "savings_percent": res.savings_percent,
-                "duration_ms": res.duration_ms,
-                "compressed": res.compressed,
-                "rules": res.rules_applied,
-            })
-            if res.compressed:
-                current_messages = res.messages
-
-        final_tokens = count_messages_tokens(current_messages)
-        total_duration = round((time.perf_counter() - t0) * 1000, 2)
-
+        initial = count_messages_tokens(messages)
+        final = count_messages_tokens(output)
         return {
-            "initial_tokens": initial_tokens,
-            "final_tokens": final_tokens,
-            "tokens_saved": max(0, initial_tokens - final_tokens),
-            "savings_percent": max(0.0, round(((initial_tokens - final_tokens) / max(1, initial_tokens)) * 100, 2)),
-            "duration_ms": total_duration,
-            "steps": step_results,
-            "compressed_messages": [m.model_dump() for m in current_messages],
+            "initial_tokens": initial, "final_tokens": final,
+            "tokens_saved": max(0, initial-final),
+            "savings_percent": summary.get("savings_percent", 0),
+            "duration_ms": summary.get("duration_ms", 0),
+            "steps": [{**step, "compressed": step.get("advanced", False)}
+                      for step in summary.get("breakdown", [])],
+            "compressed_messages": [m.model_dump() for m in output],
+            "token_count_is_estimate": True,
+            "policy": summary,
         }

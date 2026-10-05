@@ -111,12 +111,14 @@ async def start(module_id: str, owner: str, proxy_id: int | None, proxy_url: str
 async def _start(module_id: str, owner: str, proxy_id: int | None, proxy_url: str | None):
     if module_id not in CONFIG:
         raise HTTPException(400, "Browser OAuth is not supported for this module")
+    config = CONFIG[module_id]
+    if not config["client_id"] or (module_id == "agy_cli" and not config.get("client_secret")):
+        raise HTTPException(503, "OAuth application credentials are not configured; set the module's OAuth environment variables")
     for sid, existing in list(sessions.items()):
         if existing.expires_at <= time.monotonic() or (existing.owner == owner and existing.module_id == module_id):
             await cancel(sid)
     if len(sessions) >= 32:
         raise HTTPException(429, "Too many pending OAuth sessions")
-    config = CONFIG[module_id]
     session = OAuthSession(module_id, owner, proxy_id, proxy_url)
     session_id = secrets.token_urlsafe(32)
     port = config["port"]

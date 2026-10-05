@@ -30,7 +30,7 @@ class CustomRegexStage(BaseCompressionStage):
                 label="Защищать блоки кода от замен",
                 type="boolean",
                 default_value=True,
-                description="Не применять пользовательские замены внутри кода (```...```)",
+                description="Protection of code, math, URLs and quoted literals is mandatory; this legacy setting is retained for compatibility",
             ),
         ]
 
@@ -43,62 +43,29 @@ class CustomRegexStage(BaseCompressionStage):
         t0 = time.perf_counter()
         initial_tokens = count_messages_tokens(messages)
 
-        guard_code = config.get("guard_code_blocks", True)
-        raw_rules = config.get("rules", [])
-        if isinstance(raw_rules, str):
-            import json
-            try:
-                raw_rules = json.loads(raw_rules)
-            except Exception:
-                raw_rules = []
-
-        compiled_rules = []
-        for r in raw_rules:
-            if isinstance(r, dict) and "pattern" in r:
-                try:
-                    flags = 0 if r.get("case_sensitive", False) else re.IGNORECASE
-                    compiled_rules.append((re.compile(r["pattern"], flags), r.get("replacement", "")))
-                except Exception:
-                    pass
-
-        if not compiled_rules:
-            return StageExecutionResult(
-                stage_id=self.id,
-                stage_name=self.name,
-                messages=messages,
-                compressed=False,
-                tokens_before=initial_tokens,
-                tokens_after=initial_tokens,
-            )
-
-        compressed_messages: List[ChatMessage] = []
+        import asyncio
+        from app.core.safe_regex import subn
+        from app.compression.validation import validate_rules
+        raw_rules = await asyncio.to_thread(validate_rules, config.get("rules", []))
+        compressed_messages = []
         replacements_made = 0
-
         for msg in messages:
-            if not isinstance(msg.content, str):
+            if msg.role in {"system", "developer", "user", "tool", "function"} or not isinstance(msg.content, str):
                 compressed_messages.append(msg)
                 continue
-
-            content = msg.content
-            if guard_code:
-                text_to_process, preserved = PreservationGuards.extract(content)
-            else:
-                text_to_process, preserved = content, []
-
-            orig_proc = text_to_process
-            for pat, repl in compiled_rules:
-                text_to_process, count = pat.subn(repl, text_to_process)
-                replacements_made += count
-
-            if guard_code:
-                restored = PreservationGuards.restore(text_to_process, preserved)
-            else:
-                restored = text_to_process
-
-            if restored != content:
-                compressed_messages.append(msg.model_copy(update={"content": restored}))
-            else:
-                compressed_messages.append(msg)
+            masked, blocks = PreservationGuards.extract(msg.content)
+            separators = {b.placeholder for b in blocks}
+            parts = re.split('(' + '|'.join(re.escape(p) for p in separators) + ')', masked) if separators else [masked]
+            for i, part in enumerate(parts):
+                if part in separators:
+                    continue
+                for rule in raw_rules:
+                    part, count = await asyncio.to_thread(subn, rule['pattern'], rule.get('replacement', ''), part,
+                                                         flags=0 if rule.get('case_sensitive', False) else re.IGNORECASE)
+                    replacements_made += count
+                parts[i] = part
+            restored = PreservationGuards.restore(''.join(parts), blocks)
+            compressed_messages.append(msg.model_copy(update={"content": restored}))
 
         final_tokens = count_messages_tokens(compressed_messages)
         savings = max(0.0, round(((initial_tokens - final_tokens) / max(1, initial_tokens)) * 100, 2))
@@ -113,5 +80,6 @@ class CustomRegexStage(BaseCompressionStage):
             tokens_after=final_tokens,
             savings_percent=savings,
             duration_ms=duration,
+            warning="Protected spans are mandatory; guard_code_blocks=False ignored" if config.get("guard_code_blocks") is False else None,
             rules_applied=[f"custom_rules_applied:{replacements_made}"] if replacements_made > 0 else [],
         )

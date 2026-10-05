@@ -4,12 +4,18 @@ Redacts API keys, secret tokens, private keys, database URIs, and credentials
 from inbound requests (messages, tools) and outbound responses (JSON, SSE streams).
 """
 import re
-import copy
+import asyncio
+from app.core.safe_regex import subn
+from pydantic import BaseModel
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 from app.security.base import BaseGuardrail, GuardrailContext, GuardrailResult
 
 logger = logging.getLogger("app.security.credential_masker")
+
+# Protocol identifiers and opaque provider signatures must survive round trips.
+OPAQUE_FIELDS = {"id", "tool_call_id", "call_id", "item_id", "thoughtSignature",
+                 "thought_signature", "signature", "encrypted_content"}
 
 CREDENTIAL_PATTERNS = [
     # LLM provider keys
@@ -87,14 +93,9 @@ def redact_credentials(
             replacement = cp.get("replacement", "[REDACTED:secret]")
             if not pat_str:
                 continue
-            try:
-                rx = re.compile(pat_str, re.IGNORECASE)
-                m = rx.findall(result)
-                if m:
-                    result = rx.sub(replacement, result)
-                    detections.append({"type": cp.get("name", f"custom_{idx}"), "count": len(m)})
-            except Exception as e:
-                logger.warning(f"Error applying custom credential pattern '{pat_str}': {e}")
+            result, count = subn(pat_str, replacement, result, flags=re.IGNORECASE)
+            if count:
+                detections.append({"type": cp.get("name", f"custom_{idx}"), "count": count})
 
     modified = result != text
     return result, detections, modified
@@ -126,23 +127,20 @@ def walk_and_redact(
         any_mod = False
         new_dict = {}
         for k, v in value.items():
+            if k in OPAQUE_FIELDS:
+                new_dict[k] = v
+                continue
             new_v, mod = walk_and_redact(v, detections, custom_patterns)
             if mod:
                 any_mod = True
             new_dict[k] = new_v
         return new_dict, any_mod
 
-    # Objects with model_dump or __dict__
-    if hasattr(value, "content") and hasattr(value, "role"):
-        # ChatMessage or similar object
-        content = getattr(value, "content")
-        new_content, mod = walk_and_redact(content, detections, custom_patterns)
-        if mod:
-            try:
-                setattr(value, "content", new_content)
-                return value, True
-            except Exception:
-                pass
+    if isinstance(value, BaseModel):
+        fields = {name: getattr(value, name) for name in type(value).model_fields}
+        fields.update(value.model_extra or {})
+        updates, mod = walk_and_redact(fields, detections, custom_patterns)
+        return (value.model_copy(update=updates) if mod else value), mod
 
     return value, False
 
@@ -165,35 +163,17 @@ class CredentialMaskerGuardrail(BaseGuardrail):
         if not self.enabled or not self.mask_inbound:
             return GuardrailResult(block=False)
 
-        disabled = [d.lower().strip() for d in context.disabled_guardrails]
+        disabled = [d.lower().strip() for d in context.disabled_guardrails] if context.trusted_bypass else []
         if "credential-masker" in disabled or "credential_masker" in disabled or "all" in disabled:
             return GuardrailResult(block=False)
 
         detections: List[Dict[str, Any]] = []
-        messages = getattr(payload, "messages", None)
-        if messages is not None:
-            new_messages, modified = walk_and_redact(messages, detections, self.custom_patterns)
-            if modified:
-                setattr(payload, "messages", new_messages)
-                count = sum(d["count"] for d in detections)
-                logger.info(f"Redacted {count} leaked credentials from inbound payload")
-                return GuardrailResult(
-                    block=False,
-                    modified=True,
-                    modified_payload=payload,
-                    meta={"credentials_redacted": detections, "count": count},
-                )
-        elif isinstance(payload, dict) and "messages" in payload:
-            new_messages, modified = walk_and_redact(payload["messages"], detections, self.custom_patterns)
-            if modified:
-                payload["messages"] = new_messages
-                count = sum(d["count"] for d in detections)
-                return GuardrailResult(
-                    block=False,
-                    modified=True,
-                    modified_payload=payload,
-                    meta={"credentials_redacted": detections, "count": count},
-                )
+        new_payload, modified = await asyncio.to_thread(walk_and_redact, payload, detections, self.custom_patterns)
+        if modified:
+            return GuardrailResult(
+                modified=True, modified_payload=new_payload,
+                meta={"credentials_redacted": detections, "count": sum(d["count"] for d in detections)},
+            )
 
         return GuardrailResult(block=False)
 
@@ -202,19 +182,19 @@ class CredentialMaskerGuardrail(BaseGuardrail):
         if not self.enabled or not self.mask_outbound:
             return GuardrailResult(block=False)
 
-        disabled = [d.lower().strip() for d in context.disabled_guardrails]
+        disabled = [d.lower().strip() for d in context.disabled_guardrails] if context.trusted_bypass else []
         if "credential-masker" in disabled or "credential_masker" in disabled or "all" in disabled:
             return GuardrailResult(block=False)
 
         detections: List[Dict[str, Any]] = []
-        new_val, modified = walk_and_redact(content, detections, self.custom_patterns)
+        new_val, modified = await asyncio.to_thread(walk_and_redact, content, detections, self.custom_patterns)
         if modified:
             count = sum(d["count"] for d in detections)
             logger.info(f"Redacted {count} leaked credentials from outbound response")
             return GuardrailResult(
                 block=False,
                 modified=True,
-                modified_content=new_val if isinstance(new_val, str) else None,
+                modified_content=new_val,
                 meta={"credentials_redacted": detections, "count": count},
             )
 

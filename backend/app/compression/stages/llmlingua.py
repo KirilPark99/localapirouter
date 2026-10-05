@@ -58,7 +58,7 @@ class LlmLinguaStage(BaseCompressionStage):
         preserve_start = max(0, num_msgs - max(1, context.preserve_recent_turns * 2))
 
         for idx, msg in enumerate(messages):
-            if msg.role == "system" or not isinstance(msg.content, str) or idx >= preserve_start:
+            if msg.role in {"system", "developer", "user", "tool", "function"} or not isinstance(msg.content, str) or idx >= preserve_start:
                 compressed_messages.append(msg)
                 continue
 

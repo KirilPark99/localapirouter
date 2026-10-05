@@ -3,6 +3,7 @@ import time
 import logging
 from typing import Any, Dict, List, Optional
 from sqlalchemy import select
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.security.base import BaseGuardrail, GuardrailContext, GuardrailResult
@@ -38,6 +39,12 @@ def parse_disabled_guardrails(headers: Dict[str, str], metadata: Optional[Dict[s
     return list(set(disabled))
 
 
+def may_bypass_guardrails(principal: Any) -> bool:
+    """The caller supplies an authenticated object, never request metadata."""
+    permissions = getattr(principal, "permissions", None)
+    return isinstance(permissions, list) and "guardrails_bypass" in permissions
+
+
 class GuardrailRegistry:
     @classmethod
     def invalidate_cache(cls):
@@ -49,8 +56,8 @@ class GuardrailRegistry:
     async def get_security_config(cls, db: Optional[AsyncSession] = None) -> Dict[str, Any]:
         global _CONFIG_CACHE, _CACHE_TIMESTAMP
         now = time.time()
-        if _CONFIG_CACHE is not None and (now - _CACHE_TIMESTAMP) < CACHE_TTL_SECONDS:
-            return _CONFIG_CACHE
+        # Database-backed policies are read from their actual database, never a
+        # process-global policy belonging to another session/engine.
 
         default_config = {
             "injection_guard_enabled": True,
@@ -79,11 +86,8 @@ class GuardrailRegistry:
             res = await db.execute(select(SecurityConfig).where(SecurityConfig.id == 1))
             cfg = res.scalar_one_or_none()
             if cfg is None:
-                # Initialize default config row in database
-                cfg = SecurityConfig(id=1)
-                db.add(cfg)
-                await db.commit()
-                await db.refresh(cfg)
+                # An empty migrated table is valid and retains opt-in defaults.
+                return default_config
 
             loaded = {
                 "injection_guard_enabled": cfg.injection_guard_enabled,
@@ -108,32 +112,44 @@ class GuardrailRegistry:
             _CACHE_TIMESTAMP = now
             return loaded
         except Exception as e:
-            logger.debug(f"Could not load security config from DB, using defaults: {e}")
-            return default_config
+            logger.error("Security configuration unavailable: %s", type(e).__name__)
+            raise HTTPException(status_code=503, detail="Security configuration unavailable; check security_configs migration") from e
+
+    @classmethod
+    async def check_readiness(cls, db: AsyncSession) -> bool:
+        """Uncached read-only schema/config readiness probe; does not create rows."""
+        try:
+            await db.execute(select(SecurityConfig).where(SecurityConfig.id == 1))
+        except Exception as e:
+            raise HTTPException(status_code=503, detail="Security configuration unavailable; check security_configs migration") from e
+        return True
 
     @classmethod
     async def build_guardrails(cls, db: Optional[AsyncSession] = None) -> List[BaseGuardrail]:
         cfg = await cls.get_security_config(db)
         guardrails: List[BaseGuardrail] = []
 
-        # 1. Prompt injection guardrail
-        inj = PromptInjectionGuardrail(
-            enabled=cfg.get("injection_guard_enabled", True),
-            mode=cfg.get("injection_mode", "warn"),
-            threshold=cfg.get("injection_threshold", "high"),
-            max_scan_bytes=cfg.get("max_injection_scan_bytes", 16384),
-            custom_patterns=cfg.get("custom_injection_patterns", []),
-        )
-        guardrails.append(inj)
+        try:
+            # 1. Prompt injection guardrail
+            inj = PromptInjectionGuardrail(
+                enabled=cfg.get("injection_guard_enabled", True),
+                mode=cfg.get("injection_mode", "warn"),
+                threshold=cfg.get("injection_threshold", "high"),
+                max_scan_bytes=cfg.get("max_injection_scan_bytes", 16384),
+                custom_patterns=cfg.get("custom_injection_patterns", []),
+            )
+            guardrails.append(inj)
 
-        # 2. Credential masker guardrail
-        masker = CredentialMaskerGuardrail(
-            enabled=cfg.get("credential_masking_enabled", False),
-            mask_inbound=cfg.get("mask_inbound", True),
-            mask_outbound=cfg.get("mask_outbound", True),
-            custom_patterns=cfg.get("custom_credential_patterns", []),
-        )
-        guardrails.append(masker)
+            # 2. Credential masker guardrail
+            masker = CredentialMaskerGuardrail(
+                enabled=cfg.get("credential_masking_enabled", False),
+                mask_inbound=cfg.get("mask_inbound", True),
+                mask_outbound=cfg.get("mask_outbound", True),
+                custom_patterns=cfg.get("custom_credential_patterns", []),
+            )
+            guardrails.append(masker)
+        except Exception as e:
+            raise HTTPException(status_code=503, detail="Invalid security policy") from e
 
         # Sort by priority ascending (lower number runs first)
         guardrails.sort(key=lambda g: g.priority)
@@ -146,14 +162,20 @@ class GuardrailRegistry:
         headers: Dict[str, str],
         model_id: str = "",
         db: Optional[AsyncSession] = None,
+        router_key: Any = None,
+        principal: Any = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> GuardrailResult:
         """Run all pre_call security hooks sequentially."""
-        metadata = getattr(payload, "metadata", None)
-        disabled = parse_disabled_guardrails(headers, metadata)
+        metadata = metadata or (payload.get("metadata") if isinstance(payload, dict) else getattr(payload, "metadata", None))
+        trusted = may_bypass_guardrails(router_key if router_key is not None else principal)
+        disabled = parse_disabled_guardrails(headers, metadata) if trusted else []
         context = GuardrailContext(
             model_id=model_id,
             request_headers=headers,
             disabled_guardrails=disabled,
+            trusted_bypass=trusted,
+            router_key_id=getattr(router_key, "id", None),
             metadata=metadata if isinstance(metadata, dict) else {},
         )
 
@@ -162,7 +184,10 @@ class GuardrailRegistry:
         combined_meta: Dict[str, Any] = {}
 
         for guardrail in guardrails:
-            res = await guardrail.pre_call(payload, context)
+            try:
+                res = await guardrail.pre_call(payload, context)
+            except Exception as e:
+                raise HTTPException(status_code=503, detail="Security guardrail unavailable") from e
             if res.block:
                 return res
             if res.warnings:
@@ -187,36 +212,95 @@ class GuardrailRegistry:
         headers: Dict[str, str],
         model_id: str = "",
         db: Optional[AsyncSession] = None,
+        router_key: Any = None,
+        principal: Any = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> GuardrailResult:
         """Run all post_call security hooks on response content."""
-        disabled = parse_disabled_guardrails(headers)
+        trusted = may_bypass_guardrails(router_key if router_key is not None else principal)
+        disabled = parse_disabled_guardrails(headers, metadata) if trusted else []
         context = GuardrailContext(
             model_id=model_id,
             request_headers=headers,
             disabled_guardrails=disabled,
+            trusted_bypass=trusted,
+            router_key_id=getattr(router_key, "id", None),
         )
 
         guardrails = await cls.build_guardrails(db)
+        modified = False
         # Reverse order for post-call hooks
         for guardrail in reversed(guardrails):
-            res = await guardrail.post_call(content, context)
+            try:
+                res = await guardrail.post_call(content, context)
+            except Exception as e:
+                raise HTTPException(status_code=503, detail="Security guardrail unavailable") from e
             if res.block:
                 return res
             if res.modified and res.modified_content is not None:
                 content = res.modified_content
+                modified = True
 
         return GuardrailResult(
             block=False,
-            modified_content=content if isinstance(content, str) else None,
+            modified_content=content,
+            modified=modified,
         )
 
     @classmethod
+    async def wrap_stream(
+        cls, source, model: str, headers: Dict[str, str],
+        db: Optional[AsyncSession] = None, router_key: Any = None,
+        include_usage: bool = False, principal: Any = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        """Secure native chat SSE before compatibility adapters or cache writes.
+
+        Unmasked output is exact passthrough. Masking buffers a complete bounded
+        stream, redacts assembled content/reasoning/tool arguments, then emits
+        native chat SSE retaining choices, tool IDs/signatures and usage.
+        No partial raw output escapes on assembly/redaction errors.
+        """
+        cfg = await cls.get_security_config(db)
+        trusted = may_bypass_guardrails(router_key if router_key is not None else principal)
+        disabled = parse_disabled_guardrails(headers, metadata) if trusted else []
+        masking = cfg.get("credential_masking_enabled", False) and cfg.get("mask_outbound", True)
+        masking = masking and not any(name in disabled for name in ("all", "credential-masker", "credential_masker"))
+        if not masking:
+            async for chunk in source:
+                yield chunk
+            return
+
+        # ponytail: full 8 MiB buffering when masking; incremental release would
+        # need a credential grammar (especially PEM), not a short suffix window.
+        from app.modules.base import collect_chat_completion
+        from app.cache.response_cache import ResponseCacheService
+        try:
+            response = await collect_chat_completion(source, model, require_complete=True)
+            result = await cls.run_post_call_hooks(
+                response, headers, model_id=model, db=db, router_key=router_key,
+                principal=principal, metadata=metadata,
+            )
+            if result.block:
+                raise ValueError("Outbound security rejected stream")
+            safe = result.modified_content
+        except Exception as e:
+            raise HTTPException(status_code=503, detail="Security stream assembly or redaction failed") from e
+        async for chunk in ResponseCacheService.synthesize_sse_stream(
+            safe.model_dump(mode="json"), safe.id, include_usage=include_usage,
+        ):
+            yield chunk
+
+    @classmethod
     def mask_text_sync(cls, text: str, custom_patterns: Optional[List[Dict[str, Any]]] = None) -> str:
-        """Synchronously mask credentials from text chunk using the cached pattern set."""
+        """Mask one complete text using the last loaded policy; not split SSE.
+
+        Streaming callers must use wrap_stream, which assembles secret fields.
+        """
         if not text:
             return text
         cfg = _CONFIG_CACHE
-        if cfg and not cfg.get("credential_masking_enabled", False):
+        if not cfg or not cfg.get("credential_masking_enabled", False):
             return text
         if cfg and not cfg.get("mask_outbound", True):
             return text

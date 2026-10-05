@@ -1,8 +1,11 @@
 import uuid
 import json
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 from typing import AsyncGenerator, Optional
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -262,6 +265,106 @@ async def _resolve_is_judge(model_str: str, db: Optional[AsyncSession] = None) -
             await _safe_close_session(session)
     return False, model_str
 
+async def _prepare_chat_payload(payload, request, response, db, router_key, *, compress=True):
+    """Shared request boundary for Chat, Responses, Messages and decisions."""
+    import hashlib
+    from app.security.registry import GuardrailRegistry, may_bypass_guardrails, parse_disabled_guardrails
+    from app.compression.pipeline import CompressionPipelineService
+    session = db if db is not None else AsyncSessionLocal()
+    payload = payload.model_copy(deep=True)
+    headers = dict(request.headers)
+    try:
+        fusion, payload.model = await _resolve_is_fusion(payload.model.strip(), session)
+        judge = False
+        if not fusion:
+            judge, payload.model = await _resolve_is_judge(payload.model, session)
+        if router_key is not None:
+            RoutingEngine._check_permissions(router_key, payload.model)
+        sec_cfg = await GuardrailRegistry.get_security_config(session)
+
+        async def guard():
+            result = await GuardrailRegistry.run_pre_call_hooks(
+                payload=payload, headers=headers, model_id=payload.model, db=session, router_key=router_key,
+            )
+            if result.block:
+                return JSONResponse(status_code=400, content={"error": {
+                    "message": result.block_reason or "Request blocked by security guardrails",
+                    "type": "guardrail_violation", "code": "prompt_injection_blocked",
+                }})
+            if result.warnings:
+                response.headers["X-Guardrail-Warning"] = ",".join(sorted(set(result.warnings)))
+            if result.modified_payload is not None:
+                return result.modified_payload
+            return payload
+
+        checked = await guard()
+        if isinstance(checked, Response):
+            return checked
+        payload = checked
+        payload, context = await RoutingEngine.prepare_effective_request(session, payload, router_key)
+        context = dict(context)
+        context["is_fusion"], context["is_judge"] = fusion, judge
+        context["skip_response_cache"] = context.get("skip_response_cache", False) or router_key is None
+        safe_policy = {k: v for k, v in sec_cfg.items() if k.startswith(("injection_", "mask_", "custom_")) or k in (
+            "credential_masking_enabled", "max_injection_scan_bytes",
+        )}
+        context["guardrail_overrides"] = (parse_disabled_guardrails(headers, getattr(payload, "metadata", None))
+            if may_bypass_guardrails(router_key) else [])
+        context["security_policy"] = hashlib.sha256(json.dumps(safe_policy, sort_keys=True, default=str).encode()).hexdigest()
+        context["authorization"] = {k: getattr(router_key, k, None) for k in (
+            "permissions", "allowed_models", "allowed_routes", "allowed_fusions", "allowed_judges",
+        )} if router_key is not None else {"principal": "uncached"}
+        if compress:
+            global_cfg = await CompressionPipelineService.get_global_settings(session)
+            try:
+                payload.messages, summary = await CompressionPipelineService.optimize_messages(
+                    db=session, messages=payload.messages, model_id=payload.model,
+                    request_headers=headers, supports_vision=context.get("supports_vision"), provider_name=context.get("provider_name"),
+                )
+            except Exception as exc:
+                if not global_cfg.fail_open:
+                    raise HTTPException(status_code=503, detail="Required compression failed") from exc
+                logger.warning("Optional compression failed: %s", type(exc).__name__)
+                summary = {"compressed": False}
+            if summary.get("compressed"):
+                for field in ("before", "after", "saved"):
+                    response.headers[f"X-Tokens-{field.title()}"] = str(summary[f"tokens_{field}"])
+                response.headers["X-Compression-Savings"] = f"{summary['savings_percent']}%"
+            # Transformations may expose patterns that were obfuscated on input.
+            checked = await guard()
+            if isinstance(checked, Response):
+                return checked
+            payload = checked
+        return payload, context
+    except (HTTPException, RouterException):
+        raise
+    except Exception as exc:
+        logger.error("Request preprocessing failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Request safety preprocessing is unavailable") from exc
+    finally:
+        if db is None:
+            await _safe_close_session(session)
+
+
+async def _secure_outbound(content, request, db, router_key, model_id):
+    from app.security.registry import GuardrailRegistry
+    session = db if db is not None else AsyncSessionLocal()
+    try:
+        result = await GuardrailRegistry.run_post_call_hooks(
+            content=content, headers=dict(request.headers), model_id=model_id, db=session, router_key=router_key,
+        )
+        if result.block:
+            raise HTTPException(status_code=503, detail="Response blocked by safety policy")
+        return result.modified_content if result.modified_content is not None else content
+    except (HTTPException, RouterException):
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Response safety processing failed") from exc
+    finally:
+        if db is None:
+            await _safe_close_session(session)
+
+
 @router.post("/chat/completions")
 async def chat_completions(
     payload: ChatCompletionRequest,
@@ -271,225 +374,112 @@ async def chat_completions(
     router_key: Optional[RouterApiKey] = Depends(get_router_key_dep),
 ):
     req_id = f"req_{uuid.uuid4().hex[:16]}"
-    model_str = payload.model.strip()
-
-    # 0. Security Guardrails Pre-Call (Prompt Injection & Credential Masking)
-    sec_db = db if db is not None else AsyncSessionLocal()
     try:
-        from app.security.registry import GuardrailRegistry
-        sec_result = await GuardrailRegistry.run_pre_call_hooks(
-            payload=payload,
-            headers=dict(request.headers),
-            model_id=model_str,
-            db=sec_db,
-        )
-        if sec_result.block:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": {
-                        "message": sec_result.block_reason or "Security Violation: Request blocked by security guardrails.",
-                        "type": "guardrail_violation",
-                        "code": "prompt_injection_blocked",
-                    }
-                },
-            )
-        if sec_result.warnings:
-            response.headers["X-Guardrail-Warning"] = ",".join(sec_result.warnings)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.debug(f"Guardrail pre-call error: {e}")
-    finally:
-        if db is None:
-            await _safe_close_session(sec_db)
-
-    # Context Optimization (Token Compression Pipeline)
-    compression_summary = None
-    compression_db = db if db is not None else AsyncSessionLocal()
-    try:
-        from app.compression.pipeline import CompressionPipelineService
-        payload.messages, compression_summary = await CompressionPipelineService.optimize_messages(
-            db=compression_db,
-            messages=payload.messages,
-            model_id=model_str,
-            request_headers=dict(request.headers),
-        )
-        if compression_summary and compression_summary.get("compressed"):
-            response.headers["X-Tokens-Before"] = str(compression_summary["tokens_before"])
-            response.headers["X-Tokens-After"] = str(compression_summary["tokens_after"])
-            response.headers["X-Tokens-Saved"] = str(compression_summary["tokens_saved"])
-            response.headers["X-Compression-Savings"] = f"{compression_summary['savings_percent']}%"
-    except Exception:
-        pass
-    finally:
-        if db is None:
-            await _safe_close_session(compression_db)
-
-    is_fusion, model_str = await _resolve_is_fusion(model_str, db)
-    payload.model = model_str
-
-    is_judge = False
-    if not is_fusion:
-        is_judge, model_str = await _resolve_is_judge(model_str, db)
-        payload.model = model_str
-
-    # 2. Local Response Cache Check
-    cache_signature = None
+        prepared = await _prepare_chat_payload(payload, request, response, db, router_key)
+    except RouterException as exc:
+        return JSONResponse(status_code=exc.status_code, content=exc.to_openai_dict(request_id=req_id))
+    if isinstance(prepared, Response):
+        return prepared
+    payload, cache_context = prepared
+    model_str = payload.model
+    is_fusion, is_judge = cache_context["is_fusion"], cache_context["is_judge"]
+    from app.cache.response_cache import ResponseCacheService
+    from app.modules.base import ChatStreamAccumulator
     req_headers = dict(request.headers)
-    is_cacheable = False
-    try:
-        from app.cache.response_cache import ResponseCacheService
-        is_cacheable = ResponseCacheService.is_cacheable(payload, req_headers)
-        if is_cacheable:
-            cache_signature = ResponseCacheService.generate_signature(
-                model=model_str,
-                messages=payload.messages,
-                temperature=payload.temperature,
-                top_p=payload.top_p,
-                tools=payload.tools,
-                router_key_id=router_key.id if router_key else None,
-            )
-            cache_db = db if db is not None else AsyncSessionLocal()
-            try:
-                cached_payload = await ResponseCacheService.get_response(cache_db, cache_signature)
-            finally:
-                if db is None:
-                    await _safe_close_session(cache_db)
-
-            if cached_payload:
-                response.headers["X-Cache"] = "HIT"
-                response.headers["X-Cache-Latency"] = "synthetic"
-                if payload.stream:
-                    stream_headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
-                    stream_gen = ResponseCacheService.synthesize_sse_stream(cached_payload, req_id)
-                    return StreamingResponse(stream_gen, media_type="text/event-stream", headers=stream_headers)
-                else:
-                    return ChatCompletionResponse(**cached_payload)
-            else:
-                response.headers["X-Cache"] = "MISS"
-    except Exception as e:
-        logger.debug(f"Response cache lookup error: {e}")
-
-    async def _save_to_cache(resp_obj: ChatCompletionResponse):
-        if not is_cacheable or not cache_signature:
-            return
-        c_db = db if db is not None else AsyncSessionLocal()
+    include_usage = bool(payload.stream_options and payload.stream_options.get("include_usage"))
+    cache_signature = None
+    cache_generation = ResponseCacheService.get_generation()
+    is_cacheable = (not cache_context.get("skip_response_cache") and
+                    ResponseCacheService.is_cacheable(payload, req_headers))
+    if is_cacheable:
+        cache_signature = ResponseCacheService.generate_signature(
+            model=model_str, messages=payload.messages, temperature=payload.temperature,
+            top_p=payload.top_p, tools=payload.tools, router_key_id=router_key.id if router_key is not None else None,
+            request=payload, context=cache_context,
+        )
+        cache_db = db if db is not None else AsyncSessionLocal()
         try:
-            from app.cache.response_cache import ResponseCacheService
-            p_tok = resp_obj.usage.prompt_tokens if resp_obj.usage else 0
-            c_tok = resp_obj.usage.completion_tokens if resp_obj.usage else 0
-            cost = getattr(resp_obj, "estimated_cost_usd", 0.0) or 0.0
-            await ResponseCacheService.set_response(
-                c_db,
-                signature=cache_signature,
-                model=model_str,
-                response_json=resp_obj.model_dump(),
-                input_tokens=p_tok,
-                output_tokens=c_tok,
-                estimated_cost_usd=cost,
-            )
-        except Exception:
-            pass
+            cached = await ResponseCacheService.get_response(cache_db, cache_signature)
         finally:
             if db is None:
-                await _safe_close_session(c_db)
+                await _safe_close_session(cache_db)
+        if cached:
+            # Old and new cache entries both cross the current outbound boundary.
+            safe = await _secure_outbound(ChatCompletionResponse.model_validate(cached), request, db, router_key, model_str)
+            response.headers["X-Cache"] = "HIT"
+            response.headers["X-Cache-Latency"] = "local"
+            if not payload.stream:
+                return safe
+            headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
+            return StreamingResponse(
+                ResponseCacheService.synthesize_sse_stream(safe.model_dump(), req_id, include_usage=include_usage),
+                media_type="text/event-stream", headers=headers,
+            )
+        response.headers["X-Cache"] = "MISS"
 
-    async def _process_outbound_response(resp_obj: ChatCompletionResponse) -> ChatCompletionResponse:
+    async def _save_to_cache(resp_obj):
+        if not is_cacheable or not cache_signature or not resp_obj.choices or any(
+            ch.finish_reason not in ("stop", "tool_calls", "function_call") for ch in resp_obj.choices
+        ):
+            return
+        cache_db = db if db is not None else AsyncSessionLocal()
         try:
-            from app.security.registry import GuardrailRegistry
-            sec_cfg = await GuardrailRegistry.get_security_config()
-            if sec_cfg.get("credential_masking_enabled") and sec_cfg.get("mask_outbound"):
-                if resp_obj.choices:
-                    for ch in resp_obj.choices:
-                        if ch.message and ch.message.content:
-                            ch.message.content = GuardrailRegistry.mask_text_sync(ch.message.content)
-        except Exception:
-            pass
-        await _save_to_cache(resp_obj)
-        return resp_obj
+            usage = resp_obj.usage
+            p_tok, c_tok = (usage.prompt_tokens, usage.completion_tokens) if usage else (0, 0)
+            input_price, output_price = cache_context.get("input_price_per_1m"), cache_context.get("output_price_per_1m")
+            cost = ((p_tok * input_price + c_tok * output_price) / 1_000_000
+                    if input_price is not None and output_price is not None else 0.0)
+            await ResponseCacheService.set_response(
+                cache_db, signature=cache_signature, model=model_str, response_json=resp_obj.model_dump(),
+                input_tokens=p_tok, output_tokens=c_tok, estimated_cost_usd=cost,
+                expected_generation=cache_generation,
+            )
+        except Exception as exc:
+            logger.warning("Optional response cache write failed: %s", type(exc).__name__)
+        finally:
+            if db is None:
+                await _safe_close_session(cache_db)
 
-    async def _wrap_streaming_with_cache(stream_gen):
+    async def _process_outbound_response(resp_obj):
+        safe = await _secure_outbound(resp_obj, request, db, router_key, model_str)
+        await _save_to_cache(safe)
+        return safe
+
+    async def _wrap_streaming_with_cache(source):
         from app.security.registry import GuardrailRegistry
-        sec_cfg = await GuardrailRegistry.get_security_config()
-        mask_outbound = sec_cfg.get("credential_masking_enabled", False) and sec_cfg.get("mask_outbound", True)
-
-        full_content = []
-        finish_reason = "stop"
-        usage = None
-        async for chunk in stream_gen:
-            out_chunk = chunk
-            if mask_outbound and chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
-                try:
-                    cdata = json.loads(chunk[6:])
-                    ch = cdata.get("choices", [])
-                    if ch:
-                        delta = ch[0].get("delta", {})
-                        if delta.get("content"):
-                            delta["content"] = GuardrailRegistry.mask_text_sync(delta["content"])
-                            out_chunk = f"data: {json.dumps(cdata)}\n\n"
-                except Exception:
-                    pass
-
-            yield out_chunk
-
-            if not (is_cacheable and cache_signature):
-                continue
-
-            if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
-                try:
-                    cdata = json.loads(chunk[6:])
-                    ch = cdata.get("choices", [])
-                    if ch:
-                        delta = ch[0].get("delta", {})
-                        if delta.get("content"):
-                            full_content.append(delta["content"])
-                        if ch[0].get("finish_reason"):
-                            finish_reason = ch[0]["finish_reason"]
-                    if "usage" in cdata and cdata["usage"]:
-                        usage = cdata["usage"]
-                except Exception:
-                    pass
-
+        stream_db = AsyncSessionLocal()
+        accumulator = ChatStreamAccumulator() if is_cacheable and cache_signature else None
         try:
-            from app.cache.response_cache import ResponseCacheService
-            text_result = "".join(full_content)
-            assembled = {
-                "id": req_id,
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": model_str,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": text_result},
-                        "finish_reason": finish_reason,
-                    }
-                ],
-            }
-            if usage:
-                assembled["usage"] = usage
-            in_tok = usage.get("prompt_tokens", 0) if usage else 0
-            out_tok = usage.get("completion_tokens", max(1, len(text_result) // 4)) if usage else max(1, len(text_result) // 4)
-            c_db = AsyncSessionLocal()
-            try:
-                await ResponseCacheService.set_response(
-                    c_db,
-                    signature=cache_signature,
-                    model=model_str,
-                    response_json=assembled,
-                    input_tokens=in_tok,
-                    output_tokens=out_tok,
-                )
-            finally:
-                await _safe_close_session(c_db)
-        except Exception:
-            pass
+            safe_source = GuardrailRegistry.wrap_stream(
+                source, model=model_str, headers=req_headers, db=stream_db,
+                router_key=router_key, include_usage=include_usage,
+            )
+            async for chunk in safe_source:
+                if accumulator is not None:
+                    try:
+                        accumulator.feed(chunk)
+                    except (ValueError, TypeError):
+                        # Large or malformed streams can still be delivered; never cached.
+                        accumulator = None
+                yield chunk
+            if accumulator is not None:
+                try:
+                    assembled = accumulator.response(model_str, require_complete=True)
+                except (ValueError, RouterException):
+                    return
+                await _process_outbound_response(assembled)
+        except (RouterException, HTTPException) as exc:
+            error = exc.to_openai_dict(req_id) if isinstance(exc, RouterException) else {"error": {
+                "type": "guardrail_error", "message": "Response safety processing failed",
+            }}
+            yield f"data: {json.dumps(error)}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            await _safe_close_session(stream_db)
 
-    def _make_streaming_response(stream_generator) -> StreamingResponse:
-        wrapped_gen = _wrap_streaming_with_cache(stream_generator)
-        stream_headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
-        return StreamingResponse(wrapped_gen, media_type="text/event-stream", headers=stream_headers)
+    def _make_streaming_response(source):
+        headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
+        return StreamingResponse(_wrap_streaming_with_cache(source), media_type="text/event-stream", headers=headers)
 
     try:
         if is_fusion:
@@ -601,7 +591,7 @@ async def chat_completions(
                         await _safe_close_session(session)
 
                 content_text = json.dumps(jev_res.answers, ensure_ascii=False, indent=2)
-                return ChatCompletionResponse(
+                return await _process_outbound_response(ChatCompletionResponse(
                     id=req_id,
                     object="chat.completion",
                     created=int(time.time()),
@@ -618,7 +608,7 @@ async def chat_completions(
                         completion_tokens=jev_res.usage.output_tokens,
                         total_tokens=jev_res.usage.total_tokens,
                     ),
-                )
+                ))
 
             if payload.stream:
                 stream_gen = RoutingEngine.route_stream_chat(
@@ -645,6 +635,8 @@ async def chat_completions(
             status_code=re.status_code,
             content=re.to_openai_dict(request_id=req_id),
         )
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse(
             status_code=500,
@@ -662,19 +654,39 @@ async def chat_completions(
 @router.post("/decisions", response_model=JevResponse)
 async def systemone_decision(
     payload: JevRequest,
+    request: Request,
+    response: Response,
     db: Optional[AsyncSession] = Depends(lambda: None),
     router_key: Optional[RouterApiKey] = Depends(get_router_key_dep),
 ):
     req_id = f"dec_{uuid.uuid4().hex[:16]}"
+    envelope = ChatCompletionRequest(model=payload.model, messages=[ChatMessage(
+        role="user", content=json.dumps({"state": payload.state, "questions": payload.questions}, ensure_ascii=False),
+    )])
+    try:
+        prepared = await _prepare_chat_payload(envelope, request, response, db, router_key)
+    except RouterException as exc:
+        return JSONResponse(status_code=exc.status_code, content=exc.to_openai_dict(req_id))
+    if isinstance(prepared, Response):
+        return prepared
+    envelope, _ = prepared
+    try:
+        decoded = json.loads(envelope.messages[0].content)
+        payload = payload.model_copy(update={"model": envelope.model, "state": decoded["state"], "questions": decoded["questions"]})
+    except (ValueError, KeyError, IndexError) as exc:
+        raise HTTPException(status_code=503, detail="Decision input safety processing failed") from exc
     session = db if db is not None else AsyncSessionLocal()
     try:
-        return await JevEngine.execute_decision(
+        result = await JevEngine.execute_decision(
             db=session,
             request=payload,
             router_key=router_key,
             request_id=req_id,
             record_log=True,
         )
+        return await _secure_outbound(result, request, session, router_key, payload.model)
+    except HTTPException:
+        raise
     except RouterException as re:
         return JSONResponse(
             status_code=re.status_code,
@@ -827,34 +839,25 @@ async def responses_api(
     payload: ResponsesRequest,
     router_key: Optional[RouterApiKey] = Depends(get_router_key_dep),
     db: AsyncSession = Depends(get_db),
+    request: Request = None,
+    response: Response = None,
 ):
     req_id = f"resp_{uuid.uuid4().hex[:16]}"
+    request = request if request is not None else Request({"type": "http", "headers": []})
+    response = response if response is not None else Response()
     try:
         chat_request = payload.to_chat_request()
     except (ValueError, KeyError) as exc:
         return JSONResponse(status_code=400, content={"error": {"message": str(exc), "type": "invalid_request_error", "request_id": req_id}})
-    is_fusion, chat_request.model = await _resolve_is_fusion(chat_request.model, db)
-    try:
-        if payload.stream:
-            source = (
-                FusionEngine.execute_fusion_stream(None, chat_request, router_key, req_id)
-                if is_fusion
-                else RoutingEngine.route_stream_chat(None, chat_request, router_key, req_id)
-            )
-            return StreamingResponse(
-                _responses_event_stream(source, chat_request.model, req_id),
-                media_type="text/event-stream",
-            )
-        response = (
-            await FusionEngine.execute_fusion(db, chat_request, router_key, req_id)
-            if is_fusion
-            else await RoutingEngine.route_chat_completions(db, chat_request, router_key, req_id)
+    result = await chat_completions(chat_request, request, response, db, router_key)
+    if isinstance(result, StreamingResponse):
+        return StreamingResponse(
+            _responses_event_stream(result.body_iterator, chat_request.model, req_id),
+            media_type="text/event-stream", headers=dict(result.headers),
         )
-        return _responses_payload(response, req_id)
-    except RouterException as exc:
-        return JSONResponse(status_code=exc.status_code, content=exc.to_openai_dict(request_id=req_id))
-    except Exception as exc:
-        return JSONResponse(status_code=500, content={"error": {"message": str(exc), "type": "router_internal_error", "request_id": req_id}})
+    if isinstance(result, Response):
+        return result
+    return _responses_payload(result, req_id)
 
 async def _anthropic_event_stream(source: AsyncGenerator[str, None], model: str, message_id: str):
     yield f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': {'id': message_id, 'type': 'message', 'role': 'assistant', 'content': [], 'model': model, 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': 0, 'output_tokens': 0}}})}\n\n"
@@ -887,6 +890,7 @@ async def _anthropic_event_stream(source: AsyncGenerator[str, None], model: str,
 @router.post("/messages")
 async def anthropic_messages_inbound(
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     router_key: Optional[RouterApiKey] = Depends(get_router_key_dep),
 ):
@@ -915,26 +919,15 @@ async def anthropic_messages_inbound(
             tool_choice=body.get("tool_choice"),
         )
 
-        is_fusion, req.model = await _resolve_is_fusion(req.model, db)
-        model = req.model
-
-        if is_stream:
+        resp = await chat_completions(req, request, response, db, router_key)
+        if isinstance(resp, StreamingResponse):
             message_id = f"msg_{uuid.uuid4().hex[:16]}"
-            source = (
-                FusionEngine.execute_fusion_stream(None, req, router_key, message_id)
-                if is_fusion
-                else RoutingEngine.route_stream_chat(None, req, router_key, message_id)
-            )
             return StreamingResponse(
-                _anthropic_event_stream(source, model, message_id),
-                media_type="text/event-stream",
+                _anthropic_event_stream(resp.body_iterator, req.model, message_id),
+                media_type="text/event-stream", headers=dict(resp.headers),
             )
-
-        resp = (
-            await FusionEngine.execute_fusion(db, req, router_key)
-            if is_fusion
-            else await RoutingEngine.route_chat_completions(db, req, router_key)
-        )
+        if isinstance(resp, Response):
+            return resp
         content_text = resp.choices[0].message.content if resp.choices else ""
         return {
             "id": resp.id,
@@ -949,6 +942,10 @@ async def anthropic_messages_inbound(
                 "output_tokens": resp.usage.completion_tokens if resp.usage else 0,
             },
         }
+    except HTTPException:
+        raise
+    except (ValueError, TypeError) as exc:
+        return JSONResponse(status_code=400, content={"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid Messages request"}})
     except RouterException as exc:
         return JSONResponse(status_code=exc.status_code, content={"type": "error", "error": {"type": exc.category.value.lower(), "message": exc.message}})
     except Exception as exc:

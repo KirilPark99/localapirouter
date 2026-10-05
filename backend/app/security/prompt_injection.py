@@ -9,6 +9,8 @@ Protects against:
 - encoding_evasion: rot13/base64/hex decode instruction evasion
 """
 import re
+import asyncio
+from app.core.safe_regex import search
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 from app.security.base import BaseGuardrail, GuardrailContext, GuardrailResult
@@ -86,42 +88,43 @@ BUILTIN_PATTERNS = [
 ]
 
 
+def scan_text_from_messages(messages: Any, max_bytes: int = MAX_INJECTION_SCAN_BYTES) -> Tuple[str, bool]:
+    """UTF-8 bounded scan, newest user/tool turns first; all roles remain untrusted."""
+    messages = messages or []
+    if not isinstance(messages, list):
+        messages = [{"content": messages}]
+    def field(message, name, default=None):
+        return message.get(name, default) if isinstance(message, dict) else getattr(message, name, default)
+    ordered = sorted(enumerate(messages), key=lambda pair: (
+        field(pair[1], "role") not in ("user", "tool", "function"), -pair[0]))
+    parts = []
+    remaining = max_bytes
+    incomplete = False
+    for _, message in ordered:
+        content = field(message, "content", "")
+        texts = [content] if isinstance(content, str) else [
+            field(part, "text", "") for part in (content or [])
+            if field(part, "type") in ("text", "input_text", "output_text")
+        ] if isinstance(content, list) else []
+        for text in texts:
+            if not isinstance(text, str) or not text:
+                continue
+            separator = "\n" if parts else ""
+            if remaining <= len(separator):
+                incomplete = True
+                continue
+            # Slice characters before encoding so one huge turn cannot allocate
+            # an equally huge temporary byte string just to enforce the cap.
+            encoded = text[:remaining].encode("utf-8")
+            take = encoded[:remaining - len(separator)].decode("utf-8", errors="ignore")
+            incomplete |= len(take) != len(text)
+            parts.append(separator + take)
+            remaining -= len((separator + take).encode("utf-8"))
+    return "".join(parts), incomplete
+
+
 def extract_text_from_messages(messages: Any, max_bytes: int = MAX_INJECTION_SCAN_BYTES) -> str:
-    """Extract plain text string from chat messages up to max_bytes."""
-    if not messages:
-        return ""
-
-    buffer: List[str] = []
-    current_len = 0
-
-    if isinstance(messages, list):
-        for msg in messages:
-            content = ""
-            if isinstance(msg, dict):
-                content = msg.get("content", "")
-            elif hasattr(msg, "content"):
-                content = getattr(msg, "content", "")
-
-            if isinstance(content, str):
-                buffer.append(content)
-                current_len += len(content)
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        t = part.get("text", "")
-                        buffer.append(t)
-                        current_len += len(t)
-                    elif hasattr(part, "type") and getattr(part, "type") == "text":
-                        t = getattr(part, "text", "")
-                        buffer.append(t)
-                        current_len += len(t)
-
-            if current_len >= max_bytes:
-                break
-
-    full_text = " \n ".join(buffer)
-    # Strict slice to max_bytes
-    return full_text[:max_bytes]
+    return scan_text_from_messages(messages, max_bytes)[0]
 
 
 def detect_injections(
@@ -152,19 +155,13 @@ def detect_injections(
             pat_str = cp.get("pattern")
             if not pat_str:
                 continue
-            try:
-                rx = re.compile(pat_str, re.IGNORECASE)
-                m = rx.search(text)
-                if m:
-                    detections.append(
-                        {
-                            "name": cp.get("name", f"custom_{idx}"),
-                            "match": m.group(0),
-                            "severity": cp.get("severity", "high"),
-                        }
-                    )
-            except Exception as e:
-                logger.warning(f"Invalid custom regex pattern '{pat_str}': {e}")
+            m = search(pat_str, text, flags=re.IGNORECASE)
+            severity = cp.get("severity", "high")
+            if severity not in SEVERITY_SCORES:
+                raise ValueError("Invalid injection severity")
+            if m:
+                detections.append({"name": cp.get("name", f"custom_{idx}"),
+                                   "match": m["match"], "severity": severity})
 
     return detections
 
@@ -203,6 +200,10 @@ class PromptInjectionGuardrail(BaseGuardrail):
         custom_patterns: Optional[List[Dict[str, Any]]] = None,
     ):
         super().__init__(name="prompt-injection", enabled=enabled, priority=10)
+        if mode not in ("block", "warn", "log") or threshold not in SEVERITY_SCORES:
+            raise ValueError("Invalid injection policy")
+        if not 512 <= max_scan_bytes <= 65536:
+            raise ValueError("Invalid injection scan budget")
         self.mode = mode.lower()
         self.threshold = threshold.lower()
         self.max_scan_bytes = max_scan_bytes
@@ -213,7 +214,7 @@ class PromptInjectionGuardrail(BaseGuardrail):
             return GuardrailResult(block=False)
 
         # Check bypass
-        disabled = [d.lower().strip() for d in context.disabled_guardrails]
+        disabled = [d.lower().strip() for d in context.disabled_guardrails] if context.trusted_bypass else []
         if "prompt-injection" in disabled or "prompt_injection" in disabled or "all" in disabled:
             return GuardrailResult(block=False)
 
@@ -221,37 +222,19 @@ class PromptInjectionGuardrail(BaseGuardrail):
         if messages is None and isinstance(payload, dict):
             messages = payload.get("messages", [])
 
-        scanned_text = extract_text_from_messages(messages, max_bytes=self.max_scan_bytes)
-        detections = detect_injections(scanned_text, custom_patterns=self.custom_patterns)
-
-        if not detections:
-            return GuardrailResult(block=False)
-
+        scanned_text, incomplete = scan_text_from_messages(messages, self.max_scan_bytes)
+        detections = await asyncio.to_thread(detect_injections, scanned_text, self.custom_patterns)
         block_candidate, top_severity = should_block(detections, self.threshold)
-        det_names = [d["name"] for d in detections]
-        log_msg = f"Prompt injection detected ({det_names}, top_severity={top_severity}, mode={self.mode})"
-
-        if self.mode == "block" and block_candidate:
-            logger.warning(f"BLOCKING request: {log_msg}")
+        meta = {"detections": detections, "scanned_bytes": len(scanned_text.encode("utf-8")),
+                "incomplete_scan": incomplete}
+        if self.mode == "block" and (block_candidate or incomplete):
             return GuardrailResult(
-                block=True,
-                block_reason=f"Security Violation: Prompt injection pattern detected ('{det_names[0]}'). Request blocked.",
-                severity=top_severity,
-                meta={"detections": detections, "scanned_bytes": len(scanned_text)},
+                block=True, severity=top_severity,
+                block_reason="Security Violation: incomplete injection scan" if incomplete else "Security Violation: prompt injection detected",
+                meta=meta,
             )
-        elif self.mode in ("warn", "block"):
-            logger.info(f"WARNING: {log_msg}")
-            return GuardrailResult(
-                block=False,
-                warnings=[f"prompt_injection_{name}" for name in det_names],
-                severity=top_severity,
-                meta={"detections": detections, "scanned_bytes": len(scanned_text)},
-            )
-        else:
-            # log mode
-            logger.debug(f"LOG: {log_msg}")
-            return GuardrailResult(
-                block=False,
-                severity=top_severity,
-                meta={"detections": detections, "scanned_bytes": len(scanned_text)},
-            )
+        warnings = [f"prompt_injection_{d['name']}" for d in detections] if self.mode != "log" else []
+        if incomplete:
+            logger.warning("Injection scan incomplete (mode=%s)", self.mode)
+            warnings.append("prompt_injection_incomplete_scan")
+        return GuardrailResult(warnings=warnings, severity=top_severity, meta=meta)

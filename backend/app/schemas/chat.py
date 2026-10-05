@@ -34,6 +34,7 @@ class ResponsesRequest(BaseModel):
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
     parallel_tool_calls: Optional[bool] = None
+    prompt_cache_key: Optional[str] = Field(default=None, max_length=512)
 
     def to_chat_request(self) -> "ChatCompletionRequest":
         messages: List[ChatMessage] = []
@@ -88,6 +89,7 @@ class ResponsesRequest(BaseModel):
             tools=tools,
             tool_choice=choice,
             parallel_tool_calls=self.parallel_tool_calls,
+            prompt_cache_key=self.prompt_cache_key,
         )
 
 class ChatCompletionRequest(BaseModel):
@@ -114,6 +116,7 @@ class ChatCompletionRequest(BaseModel):
     reasoning_effort: Optional[str] = None
     reasoning: Optional[Dict[str, Any]] = None
     thinking: Optional[Dict[str, Any]] = None
+    prompt_cache_key: Optional[str] = Field(default=None, max_length=512)
 
     def get_effective_max_tokens(self) -> Optional[int]:
         return self.max_completion_tokens if self.max_completion_tokens is not None else self.max_tokens

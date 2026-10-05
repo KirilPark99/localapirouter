@@ -2,31 +2,58 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Optional, Literal
+import asyncio
+import re
+from pydantic import BaseModel, Field, field_validator, model_validator
+from app.core.safe_regex import validate_pattern
 
 from app.core.database import get_db
 from app.api.deps import get_current_admin
 from app.models.entities import SecurityConfig
 from app.security.registry import GuardrailRegistry
-from app.security.prompt_injection import detect_injections, should_block
+from app.security.prompt_injection import detect_injections, should_block, scan_text_from_messages
 from app.security.credential_masker import redact_credentials
 from app.services.search.duckduckgo_lite import search_duckduckgo_lite
 
 router = APIRouter(prefix="/security", tags=["Admin Security & Guardrails"])
 
 
+class InjectionPattern(BaseModel):
+    name: str = Field(default="custom", max_length=128)
+    pattern: str = Field(min_length=1, max_length=512)
+    severity: Literal["high", "medium", "low"] = "high"
+
+    @field_validator("pattern")
+    @classmethod
+    def valid_regex(cls, value):
+        validate_pattern(value)
+        return value
+
+
+class CredentialPattern(InjectionPattern):
+    replacement: str = Field(default="[REDACTED:secret]", max_length=1024)
+
+    @model_validator(mode="after")
+    def valid_replacement(self):
+        try:
+            re.compile(self.pattern, re.IGNORECASE).sub(self.replacement, "")
+        except re.error as exc:
+            raise ValueError("Invalid regex replacement") from exc
+        return self
+
+
 class SecuritySettingsUpdate(BaseModel):
     injection_guard_enabled: Optional[bool] = None
-    injection_mode: Optional[str] = None  # "block", "warn", "log"
-    injection_threshold: Optional[str] = None  # "high", "medium", "low"
-    max_injection_scan_bytes: Optional[int] = None
-    custom_injection_patterns: Optional[List[Dict[str, Any]]] = None
+    injection_mode: Optional[Literal["block", "warn", "log"]] = None  # "block", "warn", "log"
+    injection_threshold: Optional[Literal["high", "medium", "low"]] = None  # "high", "medium", "low"
+    max_injection_scan_bytes: Optional[int] = Field(default=None, ge=512, le=65536)
+    custom_injection_patterns: Optional[List[InjectionPattern]] = Field(default=None, max_length=32)
 
     credential_masking_enabled: Optional[bool] = None
     mask_inbound: Optional[bool] = None
     mask_outbound: Optional[bool] = None
-    custom_credential_patterns: Optional[List[Dict[str, Any]]] = None
+    custom_credential_patterns: Optional[List[CredentialPattern]] = Field(default=None, max_length=32)
 
     duckduckgo_fallback_enabled: Optional[bool] = None
 
@@ -39,14 +66,29 @@ class SecuritySettingsUpdate(BaseModel):
     oidc_allowed_emails: Optional[List[str]] = None
 
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_security_nulls(cls, values):
+        if isinstance(values, dict):
+            for name in ("injection_guard_enabled", "injection_mode", "injection_threshold",
+                         "max_injection_scan_bytes", "custom_injection_patterns",
+                         "credential_masking_enabled", "mask_inbound", "mask_outbound",
+                         "custom_credential_patterns"):
+                if name in values and values[name] is None:
+                    raise ValueError(f"{name} cannot be null")
+                if name in ("custom_injection_patterns", "custom_credential_patterns") and isinstance(values.get(name), list) and len(values[name]) > 32:
+                    raise ValueError("At most 32 custom patterns are allowed")
+        return values
+
+
 class TestInjectionRequest(BaseModel):
-    prompt: str
-    custom_patterns: Optional[List[Dict[str, Any]]] = None
+    prompt: str = Field(max_length=524288)
+    custom_patterns: Optional[List[InjectionPattern]] = Field(default=None, max_length=32)
 
 
 class TestMaskingRequest(BaseModel):
-    text: str
-    custom_patterns: Optional[List[Dict[str, Any]]] = None
+    text: str = Field(max_length=524288)
+    custom_patterns: Optional[List[CredentialPattern]] = Field(default=None, max_length=32)
 
 
 class TestSearchRequest(BaseModel):
@@ -79,6 +121,7 @@ async def update_security_settings(
     admin: str = Depends(get_current_admin),
 ):
     """Update security and guardrails configuration."""
+    await GuardrailRegistry.check_readiness(db)
     res = await db.execute(select(SecurityConfig).where(SecurityConfig.id == 1))
     cfg = res.scalar_one_or_none()
     if cfg is None:
@@ -162,11 +205,14 @@ async def test_injection(
 ):
     """Test prompt injection detection on sample prompt."""
     cfg = await GuardrailRegistry.get_security_config(db)
-    patterns = payload.custom_patterns or cfg.get("custom_injection_patterns", [])
+    patterns = [p.model_dump() for p in payload.custom_patterns] if payload.custom_patterns is not None else cfg.get("custom_injection_patterns", [])
     max_bytes = cfg.get("max_injection_scan_bytes", 16384)
 
-    text_to_scan = payload.prompt[:max_bytes]
-    detections = detect_injections(text_to_scan, custom_patterns=patterns)
+    text_to_scan, incomplete = scan_text_from_messages([{"content": payload.prompt}], max_bytes)
+    try:
+        detections = await asyncio.to_thread(detect_injections, text_to_scan, patterns)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Custom pattern evaluation failed") from exc
     threshold = cfg.get("injection_threshold", "high")
     would_block, top_sev = should_block(detections, threshold)
 
@@ -176,8 +222,9 @@ async def test_injection(
         "top_severity": top_sev,
         "configured_threshold": threshold,
         "configured_mode": cfg.get("injection_mode", "warn"),
-        "would_block": would_block if cfg.get("injection_mode") == "block" else False,
-        "scanned_bytes": len(text_to_scan),
+        "would_block": (would_block or incomplete) if cfg.get("injection_mode") == "block" else False,
+        "scanned_bytes": len(text_to_scan.encode("utf-8")),
+        "incomplete_scan": incomplete,
     }
 
 
@@ -189,8 +236,11 @@ async def test_masking(
 ):
     """Test credential masking on sample text."""
     cfg = await GuardrailRegistry.get_security_config(db)
-    patterns = payload.custom_patterns or cfg.get("custom_credential_patterns", [])
-    redacted_text, detections, modified = redact_credentials(payload.text, custom_patterns=patterns)
+    patterns = [p.model_dump() for p in payload.custom_patterns] if payload.custom_patterns is not None else cfg.get("custom_credential_patterns", [])
+    try:
+        redacted_text, detections, modified = await asyncio.to_thread(redact_credentials, payload.text, patterns)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Custom pattern evaluation failed") from exc
 
     return {
         "original_length": len(payload.text),

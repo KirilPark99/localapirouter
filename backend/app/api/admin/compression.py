@@ -1,6 +1,6 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -11,18 +11,28 @@ from app.schemas.chat import ChatMessage
 
 router = APIRouter(prefix="/compression", tags=["Admin Compression"])
 
-class GlobalSettingsUpdate(BaseModel):
+class StrictUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_null(cls, value):
+        if isinstance(value, dict) and any(v is None for v in value.values()):
+            raise ValueError("Explicit null settings are not allowed")
+        return value
+
+class GlobalSettingsUpdate(StrictUpdate):
     enabled: Optional[bool] = None
-    trigger_token_threshold: Optional[int] = None
-    min_savings_bailout_percent: Optional[float] = None
-    preserve_recent_turns: Optional[int] = None
-    preserve_system_prompt_mode: Optional[str] = None
+    trigger_token_threshold: Optional[int] = Field(default=None, ge=0, le=10000000)
+    min_savings_bailout_percent: Optional[float] = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    preserve_recent_turns: Optional[int] = Field(default=None, ge=0, le=1000)
+    preserve_system_prompt_mode: Optional[Literal["always", "never", "when_caching"]] = None
     enable_telemetry: Optional[bool] = None
     fail_open: Optional[bool] = None
 
-class StageUpdate(BaseModel):
+class StageUpdate(StrictUpdate):
     enabled: Optional[bool] = None
-    priority_order: Optional[int] = None
+    priority_order: Optional[int] = Field(default=None, ge=0, le=10000)
     config_json: Optional[Dict[str, Any]] = None
     name: Optional[str] = None
     description: Optional[str] = None
@@ -32,15 +42,21 @@ class StagesReorderRequest(BaseModel):
     ordered_ids: List[str]
 
 class CustomStageCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
     id: Optional[str] = None
     name: str
     description: str = ""
     icon: str = "Sliders"
-    priority_order: int = 50
+    priority_order: int = Field(default=50, ge=0, le=10000)
     guard_code_blocks: bool = True
     rules: List[Dict[str, Any]] = Field(default_factory=list)
 
 class PreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model_id: str = ""
+    provider_name: Optional[str] = None
+    supports_vision: Optional[bool] = None
+    request_headers: Optional[Dict[str, str]] = None
     messages: List[ChatMessage]
     stage_ids: Optional[List[str]] = None
     config_overrides: Optional[Dict[str, Any]] = None
@@ -124,7 +140,10 @@ async def update_stage(
     admin: str = Depends(get_current_admin),
 ):
     update_data = payload.model_dump(exclude_unset=True)
-    stage = await CompressionPipelineService.update_stage(db, stage_id, update_data)
+    try:
+        stage = await CompressionPipelineService.update_stage(db, stage_id, update_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not stage:
         raise HTTPException(status_code=404, detail="Stage not found")
     return {"message": f"Stage {stage_id} updated", "stage": stage.id}
@@ -136,7 +155,10 @@ async def create_custom_stage(
     admin: str = Depends(get_current_admin),
 ):
     data = payload.model_dump()
-    stage = await CompressionPipelineService.create_custom_stage(db, data)
+    try:
+        stage = await CompressionPipelineService.create_custom_stage(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"message": "Custom stage created", "stage_id": stage.id}
 
 @router.delete("/stages/{stage_id}")
@@ -159,10 +181,15 @@ async def preview_compression(
     db: AsyncSession = Depends(get_db),
     admin: str = Depends(get_current_admin),
 ):
-    preview_data = await CompressionPipelineService.preview_compression(
-        db=db,
-        messages=payload.messages,
-        stage_ids_filter=payload.stage_ids,
-        config_overrides=payload.config_overrides,
-    )
+    try:
+        preview_data = await CompressionPipelineService.preview_compression(
+            db=db, messages=payload.messages,
+            stage_ids_filter=payload.stage_ids, config_overrides=payload.config_overrides,
+            model_id=payload.model_id, provider_name=payload.provider_name,
+            supports_vision=payload.supports_vision, request_headers=payload.request_headers,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Compression preview failed") from exc
     return preview_data

@@ -20,6 +20,7 @@ class PreservationGuards:
     INLINE_CODE_RE = re.compile(r'(`[^`\n]+`)')
     MATH_BLOCK_RE = re.compile(r'(\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\])', re.MULTILINE)
     INLINE_MATH_RE = re.compile(r'(?<!\$)\$(?!\s)([^\n\$]+?)(?<!\s)\$(?!\$)')
+    QUOTED_RE = re.compile(r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'")
     URL_RE = re.compile(r'(https?://[^\s<>"\'\)]+)')
 
     @classmethod
@@ -65,15 +66,26 @@ class PreservationGuards:
         res = cls.MATH_BLOCK_RE.sub(_replace_math, res)
         # 3. Inline code
         res = cls.INLINE_CODE_RE.sub(_replace_inline_code, res)
+        res = cls.INLINE_MATH_RE.sub(_replace_math, res)
+        res = cls.QUOTED_RE.sub(_replace_inline_code, res)
         # 4. URLs
         res = cls.URL_RE.sub(_replace_url, res)
 
         return res, blocks
 
     @classmethod
+    def transform_unprotected(cls, text, transform):
+        masked, blocks = cls.extract(text)
+        placeholders = {b.placeholder for b in blocks}
+        parts = re.split('(' + '|'.join(re.escape(p) for p in placeholders) + ')', masked) if placeholders else [masked]
+        return cls.restore(''.join(part if part in placeholders else transform(part) for part in parts), blocks)
+
+    @classmethod
     def restore(cls, text: str, blocks: List[PreservedBlock]) -> str:
-        if not text or not blocks:
+        if not blocks:
             return text
+        if any(text.count(b.placeholder) != 1 for b in blocks):
+            raise ValueError("Protected content was removed or duplicated")
 
         res = text
         for b in reversed(blocks):

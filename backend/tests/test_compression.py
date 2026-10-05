@@ -86,8 +86,11 @@ async def test_headroom_stage():
     ctx = CompressionContext(model_id="test", original_tokens=100)
     res = await stage.compress(msgs, {"min_rows": 5}, ctx)
     assert res.compressed
-    assert "```omni-tabular [6 rows]" in res.messages[0].content
-    assert "Alice,Paris" in res.messages[0].content
+    import csv, io, json
+    assert "```omni-tabular-json-cells [6 rows]" in res.messages[0].content
+    rows = list(csv.reader(io.StringIO(res.messages[0].content.split("\n", 1)[1].rsplit("\n```", 1)[0])))
+    assert rows[0] == ["id", "name", "city"]
+    assert [json.loads(cell) for cell in rows[1]] == [1, "Alice", "Paris"]
 
 @pytest.mark.asyncio
 async def test_rtk_stage():
@@ -102,7 +105,7 @@ async def test_rtk_stage():
     )
     msgs = [ChatMessage(role="tool", content=log_content)]
     ctx = CompressionContext(model_id="test", original_tokens=50)
-    res = await stage.compress(msgs, {"strip_ansi": True, "dedup_repeated_lines": True}, ctx)
+    res = await stage.compress(msgs, {"strip_ansi": True, "dedup_repeated_lines": True, "allow_lossy": True}, ctx)
     assert res.compressed
     assert "\x1b[32m" not in res.messages[0].content
     assert "[... repeated" in res.messages[0].content
@@ -139,6 +142,11 @@ async def test_custom_regex_stage():
         {"pattern": r"TopSecret\s*", "replacement": "", "case_sensitive": False},
     ]
     res = await stage.compress(msgs, {"rules": rules, "guard_code_blocks": True}, ctx)
-    assert res.compressed
-    assert "[REDACTED]" in res.messages[0].content
-    assert "TopSecret" not in res.messages[0].content
+    assert not res.compressed
+    assert res.messages == msgs  # User instructions are not regex data.
+    assistant = msgs[0].model_copy(update={"role": "assistant"})
+    allowed = await stage.compress([assistant], {"rules": rules, "guard_code_blocks": True}, ctx)
+    assert allowed.compressed
+    assert "[REDACTED]" in allowed.messages[0].content
+    assert "TopSecret" not in allowed.messages[0].content
+    assert allowed.messages[0].model_dump(exclude={"content"}) == assistant.model_dump(exclude={"content"})

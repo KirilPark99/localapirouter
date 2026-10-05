@@ -82,4 +82,6 @@ def should_preserve_system_prompt(
         if "cache-control" in k.lower() and "no-cache" not in str(v).lower():
             return True
 
+    if not provider_name and (not model_id or model_id.lower().startswith("route/")):
+        return True  # Unknown resolved target must not destroy a potential cache prefix.
     return is_prompt_caching_supported(model_id, provider_name)

@@ -38,6 +38,8 @@ class SessionDedupStage(BaseCompressionStage):
 
     def _extract_blocks(self, text: str, min_chars: int, min_lines: int) -> List[str]:
         candidates: List[str] = []
+        if len(text) > 524288:
+            return candidates
         # 1. Whole text
         trimmed = text.strip()
         if len(trimmed) >= min_chars and len(trimmed.splitlines()) >= min_lines:
@@ -45,16 +47,25 @@ class SessionDedupStage(BaseCompressionStage):
 
         # 2. Paragraphs
         paragraphs = [p.strip() for p in text.split("\n\n") if len(p.strip()) >= min_chars and len(p.strip().splitlines()) >= min_lines]
+        paragraph_seen = set(candidates)
         for p in paragraphs:
-            if p not in candidates:
+            if p not in paragraph_seen:
+                paragraph_seen.add(p)
                 candidates.append(p)
+                if len(candidates) >= 512:
+                    break
 
-        # 3. Multiline chunks (from any line to end)
+        # Bounded non-overlapping blocks, never all suffix copies.
         lines = text.splitlines()
-        if len(lines) >= min_lines:
-            for i in range(len(lines) - min_lines + 1):
-                chunk = "\n".join(lines[i:])
-                if len(chunk) >= min_chars and chunk not in candidates:
+        seen = set(candidates)
+        width = max(min_lines, 16)
+        for offset in (0, 1):
+            for i in range(offset, len(lines), width):
+                chunk = "\n".join(lines[i:i + width])
+                if len(candidates) >= 512:
+                    break
+                if len(chunk) >= min_chars and len(chunk.splitlines()) >= min_lines and chunk not in seen:
+                    seen.add(chunk)
                     candidates.append(chunk)
 
         # Sort longest first
@@ -82,10 +93,10 @@ class SessionDedupStage(BaseCompressionStage):
         preserve_start = max(0, num_msgs - (context.preserve_recent_turns * 2)) if context.preserve_recent_turns > 0 else num_msgs
 
         for idx, msg in enumerate(messages):
-            if msg.role == "system" or not isinstance(msg.content, str) or idx >= preserve_start:
+            if msg.role == "system" or not isinstance(msg.content, str) or idx >= preserve_start or len(msg.content) > 524288:
                 if isinstance(msg.content, str):
                     for b in self._extract_blocks(msg.content, min_chars, min_lines):
-                        h = hashlib.sha256(b.encode("utf-8")).hexdigest()[:8]
+                        h = hashlib.sha256(b.encode("utf-8")).hexdigest()
                         if h not in seen_blocks:
                             seen_blocks[h] = f"sha={h}"
                 compressed_messages.append(msg)
@@ -93,7 +104,7 @@ class SessionDedupStage(BaseCompressionStage):
 
             content = msg.content
             # Check whole message duplicate
-            content_hash = hashlib.sha256(content.strip().encode("utf-8")).hexdigest()[:8]
+            content_hash = hashlib.sha256(content.strip().encode("utf-8")).hexdigest()
             if content_hash in seen_blocks:
                 replaced_count += 1
                 new_msg = msg.model_copy(update={
@@ -106,7 +117,7 @@ class SessionDedupStage(BaseCompressionStage):
             modified_content = content
             blocks = self._extract_blocks(content, min_chars, min_lines)
             for b in blocks:
-                b_hash = hashlib.sha256(b.encode("utf-8")).hexdigest()[:8]
+                b_hash = hashlib.sha256(b.encode("utf-8")).hexdigest()
                 if b_hash in seen_blocks:
                     if b in modified_content:
                         modified_content = modified_content.replace(b, f"[dedup:block sha={b_hash}]")

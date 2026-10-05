@@ -98,4 +98,6 @@ async def test_guardrail_bypass_header():
     context = GuardrailContext(disabled_guardrails=["prompt-injection"])
 
     res = await guard.pre_call(payload, context)
-    assert res.block is False
+    assert res.block is True
+    context.trusted_bypass = True
+    assert not (await guard.pre_call(payload, context)).block

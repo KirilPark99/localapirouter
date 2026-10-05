@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import random
 import time
@@ -146,10 +147,21 @@ class RoutingEngine:
                 raise RouterException(f"Model '{model_str}' is not in allowed models for this API key", ErrorCategory.AUTH_ERROR, status_code=403)
 
     @staticmethod
+    def _client_parameter_fields(request: ChatCompletionRequest) -> Set[str]:
+        return getattr(request, "_routing_client_fields", {
+            field for field in ("temperature", "reasoning_effort", "reasoning", "thinking")
+            if getattr(request, field, None) is not None
+        })
+
+    @staticmethod
     def _apply_thinking_effort(request: ChatCompletionRequest, eff_thinking: Optional[str]) -> ChatCompletionRequest:
-        if not eff_thinking:
+        client_fields = RoutingEngine._client_parameter_fields(request)
+        if not eff_thinking or client_fields.intersection(("reasoning_effort", "reasoning", "thinking")):
             return request
         cand_request = request.model_copy()
+        object.__setattr__(cand_request, "_routing_client_fields", client_fields)
+        cand_request.thinking = None
+        cand_request.reasoning = None
         if eff_thinking in ("off", "none"):
             cand_request.reasoning_effort = "none"
             cand_request.thinking = {"type": "disabled"}
@@ -184,7 +196,9 @@ class RoutingEngine:
         cand_request = cls._apply_thinking_effort(request, eff_thinking)
         req_temp = getattr(cand_request, "temperature", None) if not isinstance(cand_request, dict) else cand_request.get("temperature")
         eff_temp = None
-        if candidate_temperature is not None:
+        if req_temp is not None and "temperature" in cls._client_parameter_fields(request):
+            eff_temp = req_temp
+        elif candidate_temperature is not None:
             eff_temp = candidate_temperature
         elif profile_temperature is not None:
             eff_temp = profile_temperature
@@ -198,11 +212,89 @@ class RoutingEngine:
                 if cand_request.temperature != float(eff_temp):
                     if cand_request is request and hasattr(cand_request, "model_copy"):
                         cand_request = cand_request.model_copy()
+                        object.__setattr__(cand_request, "_routing_client_fields", cls._client_parameter_fields(request))
                     cand_request.temperature = float(eff_temp)
             elif isinstance(cand_request, dict):
                 cand_request["temperature"] = float(eff_temp)
 
         return cand_request
+
+    @classmethod
+    async def prepare_effective_request(
+        cls, db: AsyncSession, request: ChatCompletionRequest,
+        router_key: Optional[RouterApiKey] = None,
+    ) -> Tuple[ChatCompletionRequest, Dict[str, Any]]:
+        """Resolve only unambiguous cache contexts; actual routing validates misses.
+
+        The returned request retains its route alias for dispatch. Defaults share
+        the upstream helper; ambiguous groups/fallbacks/dynamic routes skip cache.
+        Configuration values are hashed, never exposed in the context.
+        """
+        model_str = request.model.strip()
+        if router_key is not None:
+            cls._check_permissions(router_key, model_str)
+        context = {"skip_response_cache": True, "supports_vision": None,
+                   "config_fingerprint": ""}
+        profile = candidate = None
+        if model_str.startswith(("fusion/", "judge/", "smart/")):
+            return request, context
+        if model_str.startswith("route/"):
+            profile = await RoutingService.get_profile_by_slug(db, model_str)
+            if not profile or not profile.enabled:
+                return request, context
+            candidates = [c for c in profile.candidates if c.is_active]
+            if len(candidates) != 1:
+                return request, context
+            candidate = candidates[0]
+            if (candidate.candidate_type == "profile" or candidate.target_profile_id is not None
+                    or not candidate.credential_id):
+                return request, context
+            provider, model_obj = candidate.provider, candidate.model
+            cred = candidate.credential
+            if not cred or not cred.enabled:
+                return request, context
+        else:
+            pairs = await cls._get_candidate_credentials_for_model(db, model_str)
+            if len(pairs) != 1:
+                return request, context
+            cred, model_obj = pairs[0]
+            provider = cred.provider
+        if (not provider or not getattr(provider, "enabled", False) or not model_obj
+                or not getattr(model_obj, "enabled", False) or not getattr(model_obj, "available", False)):
+            return request, context
+        eff_thinking = (getattr(candidate, "thinking_effort", None)
+                        or getattr(profile, "thinking_effort", None)
+                        or request.get_effective_reasoning_effort()
+                        or getattr(model_obj, "reasoning_effort", None))
+        effective = cls._apply_model_defaults(
+            request, model_obj, eff_thinking,
+            candidate_temperature=getattr(candidate, "temperature", None),
+            profile_temperature=getattr(profile, "temperature", None),
+        )
+        # Explicit allowlist: never serialize credential secrets or whole ORM rows.
+        fields = ("id", "updated_at", "temperature", "reasoning_effort", "thinking_effort",
+                  "strategy", "randomize_candidates", "credential_id", "credential_group",
+                  "provider_model_id", "canonical_slug", "capabilities", "context_length",
+                  "max_output_tokens", "timeout_seconds", "fallback_conditions", "input_price_per_1m", "output_price_per_1m")
+        config = [{field: getattr(obj, field, None) for field in fields}
+                  for obj in (profile, candidate, model_obj, cred)]
+        config.append({"adapter_type": provider.adapter_type,
+                       "base_url": provider.base_url,
+                       "updated_at": getattr(provider, "updated_at", None),
+                       "configuration": provider.adapter_configuration,
+                       "headers": provider.extra_headers,
+                       "credential_metadata": getattr(cred, "metadata_json", {})})
+        fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True, default=str,
+                                                ensure_ascii=False).encode()).hexdigest()
+        capabilities = getattr(model_obj, "capabilities", {}) or {}
+        vision = capabilities.get("vision")
+        context.update(skip_response_cache=False, supports_vision=vision if isinstance(vision, bool) else None,
+                       config_fingerprint=fingerprint,
+                       resolved_model_id=model_obj.provider_model_id,
+                       provider_name=getattr(provider, "name", None),
+                       input_price_per_1m=getattr(model_obj, "input_price_per_1m", None),
+                       output_price_per_1m=getattr(model_obj, "output_price_per_1m", None))
+        return effective, context
 
     @classmethod
     async def _handle_direct_route(
@@ -667,15 +759,13 @@ class RoutingEngine:
                 sub_t0 = time.perf_counter()
                 initial_attempts_len = len(attempts_trace)
                 try:
-                    sub_req = request
-                    cand_temp = getattr(candidate, "temperature", None)
-                    prof_temp = getattr(profile, "temperature", None)
-                    eff_sub_temp = cand_temp if cand_temp is not None else prof_temp
-                    if eff_sub_temp is not None:
-                        sub_req = request.model_copy()
-                        sub_req.temperature = float(eff_sub_temp)
-                    if getattr(candidate, "thinking_effort", None):
-                        sub_req = cls._apply_thinking_effort(sub_req, candidate.thinking_effort)
+                    sub_req = cls._apply_model_defaults(
+                        request,
+                        eff_thinking=(getattr(candidate, "thinking_effort", None)
+                                      or getattr(profile, "thinking_effort", None)),
+                        candidate_temperature=getattr(candidate, "temperature", None),
+                        profile_temperature=getattr(profile, "temperature", None),
+                    )
                     sub_response = await cls._handle_priority_route(
                         db=db,
                         request=sub_req,
@@ -771,7 +861,12 @@ class RoutingEngine:
             # Random key selection is built-in by default across available credentials
             if len(creds_to_try) > 1:
                 creds_to_try = list(creds_to_try)
-                random.shuffle(creds_to_try)
+                if getattr(profile, "strategy", "priority") == "cache-optimized":
+                    from app.routing.cache_affinity import apply_prompt_cache_affinity
+                    pairs, _ = apply_prompt_cache_affinity([(cred, model_obj) for cred in creds_to_try], request)
+                    creds_to_try = [cred for cred, _ in pairs]
+                else:
+                    random.shuffle(creds_to_try)
 
             cand_model_name = f"[{profile.name}] {model_obj.display_name or model_obj.provider_model_id}" if is_sub_route else (model_obj.display_name or model_obj.provider_model_id)
 
@@ -1032,15 +1127,13 @@ class RoutingEngine:
                 sub_t0 = time.perf_counter()
                 initial_attempts_len = len(attempts_trace)
                 try:
-                    sub_req = request
-                    cand_temp = getattr(candidate, "temperature", None)
-                    prof_temp = getattr(profile, "temperature", None)
-                    eff_sub_temp = cand_temp if cand_temp is not None else prof_temp
-                    if eff_sub_temp is not None:
-                        sub_req = request.model_copy()
-                        sub_req.temperature = float(eff_sub_temp)
-                    if getattr(candidate, "thinking_effort", None):
-                        sub_req = cls._apply_thinking_effort(sub_req, candidate.thinking_effort)
+                    sub_req = cls._apply_model_defaults(
+                        request,
+                        eff_thinking=(getattr(candidate, "thinking_effort", None)
+                                      or getattr(profile, "thinking_effort", None)),
+                        candidate_temperature=getattr(candidate, "temperature", None),
+                        profile_temperature=getattr(profile, "temperature", None),
+                    )
                     async for chunk in cls._handle_priority_stream(
                         db=db,
                         request=sub_req,
@@ -1138,7 +1231,12 @@ class RoutingEngine:
             # Random key selection is built-in by default across available credentials
             if len(creds_to_try) > 1:
                 creds_to_try = list(creds_to_try)
-                random.shuffle(creds_to_try)
+                if getattr(profile, "strategy", "priority") == "cache-optimized":
+                    from app.routing.cache_affinity import apply_prompt_cache_affinity
+                    pairs, _ = apply_prompt_cache_affinity([(cred, model_obj) for cred in creds_to_try], request)
+                    creds_to_try = [cred for cred, _ in pairs]
+                else:
+                    random.shuffle(creds_to_try)
 
             cand_model_name = f"[{profile.name}] {model_obj.display_name or model_obj.provider_model_id}" if is_sub_route else (model_obj.display_name or model_obj.provider_model_id)
 

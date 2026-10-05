@@ -56,10 +56,11 @@ class UltraStage(BaseCompressionStage):
 
         # Protect recent turns
         num_msgs = len(messages)
-        preserve_start = max(0, num_msgs - max(1, context.preserve_recent_turns * 2))
+        from app.compression.safety import protected_indices
+        recent_protected = protected_indices(messages, context.preserve_recent_turns)
 
         for idx, msg in enumerate(messages):
-            if msg.role == "system" or not isinstance(msg.content, str) or idx >= preserve_start:
+            if msg.role in {"system", "developer", "user", "tool", "function"} or msg.tool_calls or not isinstance(msg.content, str) or idx in recent_protected:
                 compressed_messages.append(msg)
                 continue
 
@@ -125,6 +126,7 @@ class UltraStage(BaseCompressionStage):
             tokens_after=final_tokens,
             savings_percent=savings,
             duration_ms=duration,
+            warning="Impossible hard budget: protected context exceeds limit" if hard_limit > 0 and final_tokens > hard_limit else None,
             rules_applied=[f"ultra_tokens_pruned:{tokens_pruned}"] if tokens_pruned > 0 else [],
         )
 
@@ -140,17 +142,14 @@ class UltraStage(BaseCompressionStage):
         return 0.5
 
     def _apply_hard_limit(self, messages: List[ChatMessage], limit: int, preserve_turns: int) -> List[ChatMessage]:
-        # Drop oldest non-system messages until under limit
-        res = list(messages)
-        while len(res) > (preserve_turns * 2 + 1) and count_messages_tokens(res) > limit:
-            # Find first non-system message
-            drop_idx = None
-            for i, m in enumerate(res):
-                if m.role != "system":
-                    drop_idx = i
-                    break
-            if drop_idx is not None:
-                res.pop(drop_idx)
-            else:
+        from app.compression.safety import atomic_groups, protected_indices
+        protected = protected_indices(messages, preserve_turns)
+        protected.update(i for i, m in enumerate(messages) if m.role in {"system", "developer", "user"} or (m.name or '').startswith('__compression_guard_'))
+        removed = set()
+        for group in atomic_groups(messages):
+            remaining = [m for i, m in enumerate(messages) if i not in removed]
+            if count_messages_tokens(remaining) <= limit:
                 break
-        return res
+            if not protected.intersection(group):
+                removed.update(group)
+        return [m for i, m in enumerate(messages) if i not in removed]

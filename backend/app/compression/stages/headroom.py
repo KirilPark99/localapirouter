@@ -99,7 +99,14 @@ class HeadroomStage(BaseCompressionStage):
 
     def _try_crush_array(self, json_str: str, min_rows: int) -> str | None:
         try:
-            arr = json.loads(json_str)
+            def unique_object(pairs):
+                obj = {}
+                for key, value in pairs:
+                    if key in obj:
+                        raise ValueError("Ambiguous duplicate JSON key")
+                    obj[key] = value
+                return obj
+            arr = json.loads(json_str, object_pairs_hook=unique_object)
             if not isinstance(arr, list) or len(arr) < min_rows:
                 return None
 
@@ -122,9 +129,9 @@ class HeadroomStage(BaseCompressionStage):
             writer = csv.writer(output, lineterminator="\n")
             writer.writerow(keys)
             for item in arr:
-                writer.writerow([item.get(k, "") for k in keys])
+                writer.writerow([json.dumps(item[k], ensure_ascii=False, allow_nan=False) for k in keys])
 
             csv_text = output.getvalue().strip()
-            return f"```omni-tabular [{len(arr)} rows]\n{csv_text}\n```"
+            return f"```omni-tabular-json-cells [{len(arr)} rows]\n{csv_text}\n```"
         except Exception:
             return None

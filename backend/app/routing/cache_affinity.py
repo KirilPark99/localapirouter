@@ -37,14 +37,14 @@ class PrefixAnalyzer:
         prefix_end_idx = -1
         confidence = 0.5
 
-        def _extract_msg(m: Any) -> Tuple[str, str]:
+        def _extract_msg(m: Any) -> Tuple[str, Any]:
             if isinstance(m, dict):
                 r = m.get("role") or "user"
                 c = m.get("content") or ""
             else:
                 r = getattr(m, "role", "user") or "user"
                 c = getattr(m, "content", "") or ""
-            return str(r).lower(), str(c)
+            return str(r).lower(), c
 
         for i, msg in enumerate(messages):
             role, _ = _extract_msg(msg)
@@ -139,7 +139,7 @@ def resolve_prompt_cache_key(request: Any) -> Optional[str]:
     if isinstance(request, dict):
         explicit = request.get("prompt_cache_key")
         if isinstance(explicit, str) and explicit.strip():
-            return explicit.strip()
+            return explicit
         msgs = request.get("messages")
         if msgs:
             return PrefixAnalyzer.generate_prompt_cache_key(msgs)
@@ -148,7 +148,7 @@ def resolve_prompt_cache_key(request: Any) -> Optional[str]:
     # Check explicit key in request extra fields
     explicit = getattr(request, "prompt_cache_key", None)
     if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
+        return explicit
 
     # Generate from messages
     messages = getattr(request, "messages", None)

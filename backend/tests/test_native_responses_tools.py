@@ -147,7 +147,7 @@ async def test_responses_endpoint_output_can_be_sent_back_as_history():
                    {"type": "function_call_output", "call_id": "call_weather", "output": "sunny"},
                    {"type": "function_call_output", "call_id": "call_time", "output": "noon"}]
         await responses_api(ResponsesRequest(model="demo", input=history), None, None)
-        request = route.call_args.args[1]
+        request = route.call_args.kwargs["request"]
         calls = [call for message in request.messages for call in message.tool_calls or []]
         assert [call.id for call in calls] == ["call_weather", "call_time"]
         assert [(message.tool_call_id, message.content) for message in request.messages if message.role == "tool"] == [

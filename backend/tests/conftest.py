@@ -14,6 +14,8 @@ os.environ["ROUTER_MASTER_KEY"] = Fernet.generate_key().decode()
 os.environ["JWT_SECRET"] = "test-jwt-secret-" + uuid.uuid4().hex
 os.environ["ADMIN_PASSWORD"] = "test-admin-password-12345"
 os.environ["FINGERPRINT_SALT"] = "test-fingerprint-salt-" + uuid.uuid4().hex
+os.environ["ANTIGRAVITY_OAUTH_CLIENT_ID"] = "synthetic-antigravity-client"
+os.environ["ANTIGRAVITY_OAUTH_CLIENT_SECRET"] = "synthetic-antigravity-secret"
 
 from app.core.config import settings
 settings.DATABASE_URL = test_db_url

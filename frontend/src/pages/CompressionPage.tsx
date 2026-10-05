@@ -98,6 +98,9 @@ export const CompressionPage: React.FC = () => {
       2
     )
   );
+  const [previewModel, setPreviewModel] = useState("");
+  const [previewProvider, setPreviewProvider] = useState("");
+  const [previewVision, setPreviewVision] = useState<"unknown" | "true" | "false">("unknown");
   const [previewLoading, setPreviewLoading] = useState<boolean>(false);
   const [previewResult, setPreviewResult] = useState<CompressionPreviewResponse | null>(null);
 
@@ -223,13 +226,18 @@ export const CompressionPage: React.FC = () => {
   const handleSaveStageConfig = async () => {
     if (!configModalStage) return;
     try {
+      const nextConfig = { ...editingConfig };
+      if (typeof nextConfig.rules === "string") {
+        nextConfig.rules = JSON.parse(nextConfig.rules);
+        if (!Array.isArray(nextConfig.rules)) throw new Error("Правила должны быть JSON-массивом");
+      }
       await apiRequest(`/api/admin/compression/stages/${configModalStage.id}`, {
         method: "PUT",
-        body: JSON.stringify({ config_json: editingConfig }),
+        body: JSON.stringify({ config_json: nextConfig }),
       });
       setStages((prev) =>
         prev.map((s) =>
-          s.id === configModalStage.id ? { ...s, config_json: editingConfig } : s
+          s.id === configModalStage.id ? { ...s, config_json: nextConfig } : s
         )
       );
       setConfigModalStage(null);
@@ -305,7 +313,8 @@ export const CompressionPage: React.FC = () => {
         "/api/admin/compression/preview",
         {
           method: "POST",
-          body: JSON.stringify({ messages: parsedMsgs }),
+          body: JSON.stringify({ messages: parsedMsgs, model_id: previewModel, provider_name: previewProvider || null,
+            supports_vision: previewVision === "unknown" ? null : previewVision === "true" }),
         }
       );
       setPreviewResult(res);
@@ -633,6 +642,9 @@ export const CompressionPage: React.FC = () => {
             <span className="text-[10px] text-slate-500">Оценка в USD</span>
           </div>
         </div>
+        <p className="text-[10px] text-slate-500 mt-2">
+          Попадания и экономия — с момента запуска сервера. Стоимость приблизительная; ноль также может означать отсутствие цены модели.
+        </p>
       </div>
 
       {/* Tabs */}
@@ -680,7 +692,7 @@ export const CompressionPage: React.FC = () => {
             <div className="flex items-center gap-2">
               <ShieldCheck size={16} className="text-indigo-400" />
               <span>
-                Блоки кода (```), формулы LaTeX ($$), ссылки и JSON автоматически защищены сентинелями во всех этапах.
+                Последние реплики и tool exchanges сохраняются целиком. Lossy-этапы не меняют user/system инструкции; код, формулы и quoted literals защищены. CCR и OmniGlyph пока no-op.
               </span>
             </div>
             <span className="text-[11px] text-slate-500">
@@ -823,6 +835,20 @@ export const CompressionPage: React.FC = () => {
                 Пример с терминальными логами
               </button>
             </div>
+            <div className="grid grid-cols-3 gap-2">
+              <input aria-label="Effective model" placeholder="Модель (необязательно)" value={previewModel}
+                onChange={(e) => setPreviewModel(e.target.value)} className="bg-slate-950 rounded-xl p-2 text-xs" />
+              <input aria-label="Effective provider" placeholder="Провайдер (необязательно)" value={previewProvider}
+                onChange={(e) => setPreviewProvider(e.target.value)} className="bg-slate-950 rounded-xl p-2 text-xs" />
+              <select aria-label="Vision capability" value={previewVision}
+                onChange={(e) => setPreviewVision(e.target.value as "unknown" | "true" | "false")}
+                className="bg-slate-950 rounded-xl p-2 text-xs">
+                <option value="unknown">Vision: неизвестно</option>
+                <option value="true">Vision: поддерживается</option>
+                <option value="false">Vision: text-only</option>
+              </select>
+            </div>
+            <p className="text-[11px] text-slate-400">Preview использует сохранённые глобальные настройки, порог и bailout, как API. Без контекста изображения сохраняются; токены — оценка, не usage провайдера.</p>
             <textarea
               rows={16}
               value={playgroundMessages}
@@ -885,6 +911,10 @@ export const CompressionPage: React.FC = () => {
                         <div className="flex items-center gap-2.5">
                           {getStageIcon(st.icon)}
                           <span className="font-medium text-slate-300">{st.stage_name}</span>
+                          {("warning" in st || "error" in st || "note" in st) && (
+                            <span className="text-[10px] text-amber-300">{String((st as typeof st & { warning?: string; error?: string; note?: string }).warning ||
+                              (st as typeof st & { error?: string }).error || (st as typeof st & { note?: string }).note || "")}</span>
+                          )}
                           {st.rules && st.rules.length > 0 && (
                             <span className="text-[10px] text-indigo-300 font-mono bg-indigo-500/10 px-1.5 py-0.5 rounded">
                               {st.rules.join(", ")}

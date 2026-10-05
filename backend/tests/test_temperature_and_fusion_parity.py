@@ -16,7 +16,7 @@ from app.fusion.engine import FusionEngine
 async def test_routing_temperature_resolution_hierarchy():
     """
     Verifies that RoutingEngine correctly resolves temperature in the proper order:
-    Candidate override -> Profile default -> Request temperature -> Model default -> fallback.
+    Explicit request -> Candidate override -> Profile default -> Model default -> fallback.
     """
     run_id = uuid.uuid4().hex[:8]
     async with AsyncSessionLocal() as db:
@@ -68,13 +68,13 @@ async def test_routing_temperature_resolution_hierarchy():
         db.add_all([cand1, cand2])
         await db.commit()
 
-        # Case 1: Candidate 1 has override 0.2 -> must resolve to 0.2
+        # Case 1: Explicit request wins over candidate/profile defaults.
         req1 = ChatCompletionRequest(model=f"route/{rp.slug}", messages=[{"role": "user", "content": "Hi"}], temperature=1.0)
         mod_req1 = RoutingEngine._apply_model_defaults(req1, m, candidate_temperature=cand1.temperature, profile_temperature=rp.temperature)
-        assert mod_req1.temperature == 0.2
+        assert mod_req1.temperature == 1.0
 
-        # Case 2: Candidate 2 has no override (None), Profile has 0.5 -> must resolve to 0.5
-        req2 = ChatCompletionRequest(model=f"route/{rp.slug}", messages=[{"role": "user", "content": "Hi"}], temperature=1.0)
+        # Case 2: Without a client temperature, inherit the profile default.
+        req2 = ChatCompletionRequest(model=f"route/{rp.slug}", messages=[{"role": "user", "content": "Hi"}])
         mod_req2 = RoutingEngine._apply_model_defaults(req2, m, candidate_temperature=cand2.temperature, profile_temperature=rp.temperature)
         assert mod_req2.temperature == 0.5
 
@@ -84,7 +84,7 @@ async def test_routing_temperature_resolution_hierarchy():
         assert mod_req3.temperature == 0.9
 
         # Case 4: Candidate has 0.0 (falsy in python) -> must NOT be skipped, resolves to 0.0
-        req4 = ChatCompletionRequest(model=f"route/{rp.slug}", messages=[{"role": "user", "content": "Hi"}], temperature=1.0)
+        req4 = ChatCompletionRequest(model=f"route/{rp.slug}", messages=[{"role": "user", "content": "Hi"}])
         mod_req4 = RoutingEngine._apply_model_defaults(req4, m, candidate_temperature=0.0, profile_temperature=0.5)
         assert mod_req4.temperature == 0.0
 

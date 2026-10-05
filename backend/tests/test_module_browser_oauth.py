@@ -13,6 +13,21 @@ from app.modules.loader import LoadedModule, ModuleLoader
 
 
 @pytest.mark.asyncio
+async def test_agy_oauth_requires_local_client_settings(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services import module_oauth
+
+    config = {**module_oauth.CONFIG["agy_cli"], "client_id": "", "client_secret": ""}
+    monkeypatch.setitem(module_oauth.CONFIG, "agy_cli", config)
+    listener = AsyncMock()
+    monkeypatch.setattr(module_oauth.asyncio, "start_server", listener)
+    with pytest.raises(HTTPException) as error:
+        await module_oauth.start("agy_cli", "synthetic-admin", None, None)
+    assert error.value.status_code == 503
+    listener.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("module_id", ["agy_cli", "codex_cli", "grok_builder_cli"])
 async def test_browser_oauth_start_and_cancel(monkeypatch, module_id):
     monkeypatch.setattr(ModuleLoader, "get_module", lambda mid: LoadedModule(

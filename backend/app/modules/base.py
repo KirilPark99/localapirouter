@@ -142,36 +142,54 @@ class BaseModuleAdapter(ABC):
         return httpx.AsyncClient(**client_kwargs)
 
 
-async def collect_chat_completion(source: AsyncGenerator[str, None], model: str) -> ChatCompletionResponse:
-    """Collect the same Chat SSE contract used by streaming CLI clients."""
-    from app.schemas.chat import ToolCall
-    content, reasoning, calls = "", "", {}
-    finish_reason, usage = "stop", None
-    response_id, created = None, int(time.time())
-    async for chunk in source:
-        for line in chunk.splitlines():
-            if not line.startswith("data:"):
+class ChatStreamAccumulator:
+    """One collector for CLI completion, safe stream redaction and cache writes."""
+    MAX_BYTES = 8 * 1024 * 1024
+
+    def __init__(self):
+        import codecs
+        self._decoder = codecs.getincrementaldecoder("utf-8")()
+        self.buffer, self.choices = "", {}
+        self.usage, self.error, self.response_id = None, None, None
+        self.created, self.done, self.size = int(time.time()), False, 0
+
+    def feed(self, chunk):
+        if isinstance(chunk, bytes):
+            chunk = self._decoder.decode(chunk)
+        self.size += len(chunk.encode("utf-8"))
+        if self.size > self.MAX_BYTES:
+            raise ValueError("Response stream exceeds the 8 MiB assembly limit")
+        self.buffer += chunk
+        self.buffer = self.buffer.replace("\r\n", "\n")
+        while "\n\n" in self.buffer:
+            event, self.buffer = self.buffer.split("\n\n", 1)
+            raw = "\n".join(line[5:].lstrip() for line in event.splitlines() if line.startswith("data:"))
+            if not raw:
                 continue
-            raw = line[5:].strip()
-            if not raw or raw == "[DONE]":
+            if raw == "[DONE]":
+                self.done = True
                 continue
-            payload = json.loads(raw)
-            if payload.get("error"):
-                from app.core.errors import normalize_upstream_error
-                raise normalize_upstream_error(response_body=payload)
-            response_id = payload.get("id") or response_id
-            created = payload.get("created", created)
-            if payload.get("usage"):
-                usage = UsageInfo.model_validate(payload["usage"])
-            for choice in payload.get("choices", []):
-                if choice.get("index", 0) != 0:
-                    continue
-                delta = choice.get("delta") or {}
-                content += delta.get("content") or ""
-                reasoning += delta.get("reasoning_content") or ""
-                finish_reason = choice.get("finish_reason") or finish_reason
-                for call in delta.get("tool_calls") or []:
-                    target = calls.setdefault(call.get("index", 0), {
+            data = json.loads(raw)
+            if data.get("error"):
+                self.error = data
+                continue
+            self.response_id = data.get("id") or self.response_id
+            self.created = data.get("created", self.created)
+            if data.get("usage"):
+                self.usage = UsageInfo.model_validate(data["usage"])
+            for choice in data.get("choices", []):
+                state = self.choices.setdefault(choice.get("index", 0), {
+                    "content": [], "reasoning": [], "calls": {}, "finish": None,
+                })
+                delta = choice.get("delta") or choice.get("message") or {}
+                if delta.get("content"):
+                    state["content"].append(delta["content"])
+                if delta.get("reasoning_content"):
+                    state["reasoning"].append(delta["reasoning_content"])
+                if choice.get("finish_reason"):
+                    state["finish"] = choice["finish_reason"]
+                for position, call in enumerate(delta.get("tool_calls") or []):
+                    target = state["calls"].setdefault(call.get("index", position), {
                         "id": "", "type": "function", "function": {"name": "", "arguments": ""},
                     })
                     if call.get("id"):
@@ -181,10 +199,32 @@ async def collect_chat_completion(source: AsyncGenerator[str, None], model: str)
                     function = call.get("function") or {}
                     target["function"]["name"] += function.get("name") or ""
                     target["function"]["arguments"] += function.get("arguments") or ""
-    tool_calls = [ToolCall.model_validate(calls[i]) for i in sorted(calls)] or None
-    message = ChatMessage(role="assistant", content=content or (None if tool_calls else ""),
-                          reasoning_content=reasoning or None, tool_calls=tool_calls)
-    kwargs = {"id": response_id} if response_id else {}
-    return ChatCompletionResponse(model=model, created=created, **kwargs,
-        choices=[ChatCompletionChoice(message=message, finish_reason="tool_calls" if tool_calls else finish_reason)],
-        usage=usage)
+
+    def response(self, model: str, require_complete: bool = False):
+        from app.schemas.chat import ToolCall
+        if self.error:
+            from app.core.errors import normalize_upstream_error
+            raise normalize_upstream_error(response_body=self.error)
+        if require_complete and (not self.done or self.buffer.strip() or not self.choices or
+                any(c["finish"] is None for c in self.choices.values())):
+            raise ValueError("Only successfully completed streams can be cached")
+        choices = []
+        for index, state in sorted(self.choices.items()):
+            calls = [ToolCall.model_validate(c) for _, c in sorted(state["calls"].items())] or None
+            if calls and any(not c.id or not c.function.name for c in calls):
+                raise ValueError("Incomplete streamed tool call")
+            message = ChatMessage(role="assistant", content="".join(state["content"]) or (None if calls else ""),
+                                  reasoning_content="".join(state["reasoning"]) or None, tool_calls=calls)
+            choices.append(ChatCompletionChoice(index=index, message=message,
+                           finish_reason=state["finish"] or ("tool_calls" if calls else "stop")))
+        if not choices and not require_complete:
+            choices = [ChatCompletionChoice(message=ChatMessage(role="assistant", content=""))]
+        kwargs = {"id": self.response_id} if self.response_id else {}
+        return ChatCompletionResponse(model=model, created=self.created, choices=choices, usage=self.usage, **kwargs)
+
+
+async def collect_chat_completion(source: AsyncGenerator[str, None], model: str, require_complete: bool = False) -> ChatCompletionResponse:
+    accumulator = ChatStreamAccumulator()
+    async for chunk in source:
+        accumulator.feed(chunk)
+    return accumulator.response(model, require_complete=require_complete)

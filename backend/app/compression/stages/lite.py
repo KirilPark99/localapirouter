@@ -3,6 +3,7 @@ import time
 from typing import Any, Dict, List
 from app.schemas.chat import ChatMessage
 from app.compression.base import BaseCompressionStage, StageConfigField, CompressionContext, StageExecutionResult
+from app.compression.preservation import PreservationGuards
 from app.compression.tokenizer import count_messages_tokens
 
 class LiteStage(BaseCompressionStage):
@@ -62,7 +63,7 @@ class LiteStage(BaseCompressionStage):
         do_collapse = config.get("collapse_whitespace", True)
         do_trim = config.get("trim_trailing_spaces", True)
         do_dedup_system = config.get("dedup_system_prompts", True)
-        do_strip_images = config.get("strip_non_vision_images", True) and not context.supports_vision
+        do_strip_images = config.get("strip_non_vision_images", True) and context.supports_vision is False
 
         compressed_messages: List[ChatMessage] = []
         seen_system_prompts = set()
@@ -81,6 +82,7 @@ class LiteStage(BaseCompressionStage):
             if isinstance(msg.content, str):
                 content = msg.content
                 orig = content
+                content, blocks = PreservationGuards.extract(content)
 
                 if do_trim:
                     content = self.TRAILING_WHITESPACE_RE.sub('', content)
@@ -89,6 +91,7 @@ class LiteStage(BaseCompressionStage):
                 if do_strip_images and "data:image" in content:
                     content = self.BASE64_IMAGE_RE.sub('[image:stripped_non_vision]', content)
 
+                content = PreservationGuards.restore(content, blocks)
                 if content != orig:
                     modified = True
                     compressed_messages.append(msg.model_copy(update={"content": content}))
@@ -99,11 +102,12 @@ class LiteStage(BaseCompressionStage):
                 new_parts = []
                 for part in msg.content:
                     if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
-                        t_val = part["text"]
+                        t_val, blocks = PreservationGuards.extract(part["text"])
                         if do_trim:
                             t_val = self.TRAILING_WHITESPACE_RE.sub('', t_val)
                         if do_collapse:
                             t_val = self.MULTIPLE_NEWLINES_RE.sub('\n\n', t_val)
+                        t_val = PreservationGuards.restore(t_val, blocks)
                         new_parts.append({**part, "text": t_val})
                         if t_val != part["text"]:
                             modified = True

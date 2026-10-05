@@ -19,7 +19,7 @@ class StageConfigField(BaseModel):
 class CompressionContext(BaseModel):
     """Runtime context passed to compression stages."""
     model_id: str = ""
-    supports_vision: bool = False
+    supports_vision: Optional[bool] = None
     original_tokens: int = 0
     preserve_recent_turns: int = 1
     preserve_system_prompt: bool = False

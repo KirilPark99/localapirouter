@@ -3,6 +3,7 @@ import time
 from typing import Any, Dict, List
 from app.schemas.chat import ChatMessage
 from app.compression.base import BaseCompressionStage, StageConfigField, CompressionContext, StageExecutionResult
+from app.compression.preservation import PreservationGuards
 from app.compression.tokenizer import count_messages_tokens
 
 class RtkStage(BaseCompressionStage):
@@ -20,6 +21,7 @@ class RtkStage(BaseCompressionStage):
 
     def get_config_schema(self) -> List[StageConfigField]:
         return [
+            StageConfigField(key="allow_lossy", label="Allow destructive log truncation", type="boolean", default_value=False),
             StageConfigField(
                 key="strip_ansi",
                 label="Удалять ANSI-коды и цвета",
@@ -71,7 +73,8 @@ class RtkStage(BaseCompressionStage):
         initial_tokens = count_messages_tokens(messages)
 
         strip_ansi = config.get("strip_ansi", True)
-        dedup_lines = config.get("dedup_repeated_lines", True)
+        allow_lossy = config.get("allow_lossy", False) is True
+        dedup_lines = allow_lossy and config.get("dedup_repeated_lines", True)
         threshold = int(config.get("smart_truncate_threshold", 50))
         head_n = int(config.get("head_lines", 12))
         tail_n = int(config.get("tail_lines", 15))
@@ -87,23 +90,29 @@ class RtkStage(BaseCompressionStage):
 
             content = msg.content
             orig = content
+            msg_lossy = allow_lossy and msg.role not in {"user", "system", "developer"}
 
             # 1. Strip ANSI
             if strip_ansi and "\x1b" in content:
-                content = self.ANSI_ESCAPE_RE.sub('', content)
-                content = self.SPINNER_PROGRESS_RE.sub('', content)
+                content = PreservationGuards.transform_unprotected(content, lambda span: self.ANSI_ESCAPE_RE.sub('', span))
+                if msg_lossy:
+                    content = self.SPINNER_PROGRESS_RE.sub('', content)
                 rules_applied.append("strip_ansi")
 
             # 2. Dedup repeated lines
-            if dedup_lines:
+            if dedup_lines and msg_lossy:
                 content = self._dedup_lines(content)
 
             # 3. Smart truncate on large tool/command outputs
             lines = content.splitlines()
-            if len(lines) > threshold and (msg.role == "tool" or "```" in content or any(sig in content.lower() for sig in ["git ", "npm ", "pytest", "build", "stdout", "stderr"])):
+            if msg_lossy and len(lines) > threshold and (msg.role == "tool" or "```" in content or any(sig in content.lower() for sig in ["git ", "npm ", "pytest", "build", "stdout", "stderr"])):
                 content = self._smart_truncate(lines, head_n, tail_n)
                 rules_applied.append("smart_truncate")
 
+            if allow_lossy:
+                _, blocks = PreservationGuards.extract(orig)
+                if any(content.count(b.content) < orig.count(b.content) for b in blocks):
+                    content = orig
             if content != orig:
                 any_modified = True
                 compressed_messages.append(msg.model_copy(update={"content": content}))

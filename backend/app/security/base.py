@@ -10,6 +10,7 @@ class GuardrailContext:
     router_key_id: Optional[int] = None
     disabled_guardrails: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    trusted_bypass: bool = False
 
 
 @dataclass
@@ -19,7 +20,7 @@ class GuardrailResult:
     severity: str = "low"  # low, medium, high
     modified: bool = False
     modified_payload: Any = None
-    modified_content: Optional[str] = None
+    modified_content: Any = None
     warnings: List[str] = field(default_factory=list)
     meta: Dict[str, Any] = field(default_factory=dict)
 

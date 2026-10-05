@@ -73,7 +73,8 @@ async def test_guardrail_bidirectional():
     context = GuardrailContext()
     res_in = await guard.pre_call(payload, context)
     assert res_in.modified is True
-    assert "[REDACTED:openai]" in payload["messages"][0]["content"]
+    assert "[REDACTED:openai]" in res_in.modified_payload["messages"][0]["content"]
+    assert res_in.modified_payload is not payload
 
     # 2. Outbound (response)
     outbound_text = "Here is your key: sk-ant-api03-abcdef1234567890abcdef"

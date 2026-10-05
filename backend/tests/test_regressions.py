@@ -240,7 +240,7 @@ async def test_protocol_endpoints_accept_native_payloads():
         assert sdk_response.output_text == "ok"
         await sdk.close()
 
-        routed_request = mocked_complete.await_args.args[1]
+        routed_request = mocked_complete.await_args.kwargs["request"]
         assert [message.role for message in routed_request.messages] == ["system", "user"]
 
     async def source():

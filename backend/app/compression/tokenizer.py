@@ -1,5 +1,6 @@
 import re
-from typing import List, Union
+import json
+from typing import Sequence, Union
 from app.schemas.chat import ChatMessage
 
 # Try importing tiktoken if available
@@ -51,7 +52,7 @@ def estimate_tokens(text: str) -> int:
 
     return max(1, total)
 
-def count_messages_tokens(messages: List[Union[ChatMessage, dict]]) -> int:
+def count_messages_tokens(messages: Sequence[Union[ChatMessage, dict]]) -> int:
     """
     Estimate total tokens across a list of ChatMessage or message dicts,
     including formatting overhead (~3 tokens per message role/delimiter).
@@ -65,6 +66,11 @@ def count_messages_tokens(messages: List[Union[ChatMessage, dict]]) -> int:
         role = getattr(m, "role", None) or (m.get("role") if isinstance(m, dict) else "")
         content = getattr(m, "content", None) or (m.get("content") if isinstance(m, dict) else "")
 
+        data = m if isinstance(m, dict) else m.model_dump(exclude_none=True)
+        for key, value in data.items():
+            if key not in {"role", "content"} and value is not None:
+                total += estimate_tokens(json.dumps({key: value}, ensure_ascii=False, default=str))
+
         if role:
             total += estimate_tokens(str(role))
         if isinstance(content, str):
@@ -73,6 +79,8 @@ def count_messages_tokens(messages: List[Union[ChatMessage, dict]]) -> int:
             for part in content:
                 if isinstance(part, dict) and "text" in part:
                     total += estimate_tokens(str(part["text"]))
+                elif isinstance(part, dict) and part.get("type") in {"image_url", "input_image"}:
+                    total += 85  # Lower-bound approximation; provider image usage varies.
                 elif isinstance(part, str):
                     total += estimate_tokens(part)
 

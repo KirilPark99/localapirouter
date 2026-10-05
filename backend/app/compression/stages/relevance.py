@@ -3,6 +3,7 @@ import time
 from typing import Any, Dict, List, Set
 from app.schemas.chat import ChatMessage
 from app.compression.base import BaseCompressionStage, StageConfigField, CompressionContext, StageExecutionResult
+from app.compression.preservation import PreservationGuards
 from app.compression.tokenizer import count_messages_tokens
 
 class RelevanceStage(BaseCompressionStage):
@@ -57,6 +58,8 @@ class RelevanceStage(BaseCompressionStage):
 
         # Extract latest user query terms
         query_words = self._extract_query_words(messages)
+        if not query_words and context.metadata.get("latest_user_query"):
+            query_words = self._extract_query_words([ChatMessage(role="user", content=context.metadata["latest_user_query"])])
         if not query_words:
             return StageExecutionResult(
                 stage_id=self.id,
@@ -74,10 +77,13 @@ class RelevanceStage(BaseCompressionStage):
         sentences_dropped = 0
 
         for idx, msg in enumerate(messages):
-            if msg.role == "system" or not isinstance(msg.content, str) or idx >= preserve_start:
+            if msg.role in {"system", "developer", "user", "tool", "function"} or not isinstance(msg.content, str) or idx >= preserve_start:
                 compressed_messages.append(msg)
                 continue
 
+            if PreservationGuards.extract(msg.content)[1]:
+                compressed_messages.append(msg)
+                continue
             content = msg.content
             sentences = self.SENTENCE_SPLIT_RE.split(content)
             if len(sentences) < min_sentences:

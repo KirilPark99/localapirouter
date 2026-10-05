@@ -16,6 +16,22 @@ from modules.codex_cli.handler import CodexCliAdapter, _decode_jwt_payload
 from modules.grok_builder_cli.handler import GrokBuilderCliAdapter
 
 
+def test_agy_client_settings_from_environment(monkeypatch):
+    from app.core.config import Settings
+
+    monkeypatch.setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", "synthetic-custom-client")
+    monkeypatch.setenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET", "synthetic-custom-secret")
+    configured = Settings(_env_file=None)
+    assert configured.ANTIGRAVITY_OAUTH_CLIENT_ID == "synthetic-custom-client"
+    assert configured.ANTIGRAVITY_OAUTH_CLIENT_SECRET.get_secret_value() == "synthetic-custom-secret"
+    assert "synthetic-custom-secret" not in repr(configured)
+    monkeypatch.delenv("ANTIGRAVITY_OAUTH_CLIENT_ID")
+    monkeypatch.delenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET")
+    empty = Settings(_env_file=None)
+    assert empty.ANTIGRAVITY_OAUTH_CLIENT_ID == ""
+    assert empty.ANTIGRAVITY_OAUTH_CLIENT_SECRET.get_secret_value() == ""
+
+
 def test_cli_modules_discovery_and_manifests():
     """Verify that agy_cli, codex_cli, and grok_builder_cli are properly discovered with valid manifests."""
     modules = ModuleLoader.scan_modules()

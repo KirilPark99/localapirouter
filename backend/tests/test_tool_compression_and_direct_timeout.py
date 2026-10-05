@@ -56,9 +56,24 @@ async def test_every_reconstruction_preserves_non_content_fields(stage_id, conte
     messages += [ChatMessage(role="user", content="answer simple"), ChatMessage(role="assistant", content="recent")]
     original = [m.model_dump() for m in messages]
     result = await stage.compress(messages, config, CompressionContext(supports_vision=True, preserve_recent_turns=0))
-    assert result.compressed, stage_id
-    assert result.messages[target].content != content
+    unavailable = stage_id in {"ccr", "omniglyph"}
+    protected_target = unavailable or stage_id == "ultra" or (
+        role == "tool" and stage_id in {"caveman", "llmlingua", "relevance", "aggressive", "custom_regex"}
+    )
+    if protected_target:
+        # New fidelity contract protects complete tool data/call contents.
+        assert result.messages[target].model_dump() == message.model_dump(), stage_id
+        if unavailable:
+            assert result.messages == messages
+            assert not result.compressed
+            assert result.warning  # No invented retrieval/image representation.
+    else:
+        assert result.compressed, stage_id
+        assert result.messages[target].content != content
     assert result.messages[target].model_dump(exclude={"content"}) == message.model_dump(exclude={"content"})
+    # Preserve every sibling's metadata, including when only a sibling advances.
+    for before, after in zip(messages, result.messages):
+        assert before.model_dump(exclude={"content"}) == after.model_dump(exclude={"content"})
     assert [m.model_dump() for m in messages] == original
 
 

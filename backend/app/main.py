@@ -37,7 +37,9 @@ from app.compression.registry import StageRegistry
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.security.registry import GuardrailRegistry
     async with AsyncSessionLocal() as db:
+        await GuardrailRegistry.check_readiness(db)
         await AuthService.init_admin_user(db)
         await ProviderService.seed_default_presets(db)
         ModuleLoader.scan_modules()
@@ -55,6 +57,15 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Read-only readiness: missing security schema is unavailable, not silently disabled.
+@app.get("/api/health/ready", include_in_schema=False)
+async def readiness():
+    from app.security.registry import GuardrailRegistry
+    async with AsyncSessionLocal() as db:
+        await GuardrailRegistry.check_readiness(db)
+    return {"ready": True}
+
 
 # CORS
 app.add_middleware(

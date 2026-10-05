@@ -3,6 +3,7 @@ import time
 from typing import Any, Dict, List
 from app.schemas.chat import ChatMessage
 from app.compression.base import BaseCompressionStage, StageConfigField, CompressionContext, StageExecutionResult
+from app.compression.preservation import PreservationGuards
 from app.compression.tokenizer import count_messages_tokens
 
 class AggressiveStage(BaseCompressionStage):
@@ -70,10 +71,13 @@ class AggressiveStage(BaseCompressionStage):
         recent_boundary = max(0, total_msgs - recent_n)
 
         for idx, msg in enumerate(messages):
-            if msg.role == "system" or not isinstance(msg.content, str):
+            if msg.role in {"system", "developer", "user", "tool", "function"} or not isinstance(msg.content, str):
                 compressed_messages.append(msg)
                 continue
 
+            if PreservationGuards.extract(msg.content)[1]:
+                compressed_messages.append(msg)
+                continue
             content = msg.content
             if idx >= recent_boundary:
                 # Verbatim recent
