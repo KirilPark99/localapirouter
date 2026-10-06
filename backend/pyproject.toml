@@ -20,6 +20,7 @@ dependencies = [
     "passlib[bcrypt]>=1.7.4",
     "python-multipart>=0.0.9",
     "openai>=1.42.0",
+    "stem==1.8.2",
 ]
 
 [project.optional-dependencies]

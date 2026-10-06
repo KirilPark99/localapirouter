@@ -49,7 +49,7 @@ class RoutingEngine:
     async def _candidate_credentials(cls, db, provider, model_obj, *, credential_id=None, credential_group=None):
         if not provider or not model_obj or not provider.enabled or not model_obj.enabled or not model_obj.available:
             return []
-        query = select(ProviderCredential).options(selectinload(ProviderCredential.proxy)).where(
+        query = select(ProviderCredential).options(selectinload(ProviderCredential.proxy), selectinload(ProviderCredential.provider)).where(
             ProviderCredential.provider_id == provider.id, ProviderCredential.enabled == True)
         if credential_id is not None:
             query = query.where(ProviderCredential.id == credential_id)
@@ -1649,6 +1649,34 @@ class RoutingEngine:
 
         target_model = matching_models[0]
         provider = target_model.provider
+
+        # Zen's free tier requires the native client; keep the public model name and actual execution profile separate.
+        if provider.adapter_type == "generic_openai" and (provider.base_url or "").rstrip("/") in (
+                "https://opencode.ai/zen/v1", "https://opencode.ai:443/zen/v1"):
+            from app.modules.base import ModuleManifest
+            from app.modules.loader import MODULES_DIR, ModuleLoader
+            module = ModuleLoader.get_module("lingling")
+            manifest = module.manifest if module else ModuleManifest.model_validate_json(
+                (MODULES_DIR / "lingling" / "manifest.json").read_text())
+            if target_model.provider_model_id in {m.id for m in manifest.default_models}:
+                if ModuleLoader.get_adapter("lingling") is None:
+                    raise RouterException("Free OpenCode Zen models require the loaded Lingling module", ErrorCategory.MODEL_NOT_FOUND, status_code=503)
+                native_models = (await db.execute(select(DiscoveredModel).where(
+                    DiscoveredModel.provider_model_id == target_model.provider_model_id,
+                    DiscoveredModel.enabled == True, DiscoveredModel.available == True,
+                    DiscoveredModel.provider.has(Provider.enabled == True),
+                    DiscoveredModel.provider.has(Provider.adapter_type == "custom_module"),
+                    DiscoveredModel.provider.has(Provider.configuration["module_id"].as_string() == "lingling"),
+                ).options(selectinload(DiscoveredModel.provider)).order_by(DiscoveredModel.credential_id.asc()))).scalars().all()
+                native_pairs = {}
+                for model_obj in native_models:
+                    for cred in await cls._candidate_credentials(db, model_obj.provider, model_obj,
+                            credential_id=model_obj.credential_id):
+                        native_pairs[cred.id] = (cred, model_obj)
+                if native_pairs:
+                    return list(native_pairs.values())
+                raise RouterException("Free OpenCode Zen models require an enabled, healthy Lingling profile; generic HTTP is unsupported",
+                    ErrorCategory.MODEL_NOT_FOUND, status_code=503)
 
         # Step 4: Find all enabled credentials for this specific primary provider
         p_creds_res = await db.execute(

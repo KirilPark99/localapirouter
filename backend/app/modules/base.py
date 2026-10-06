@@ -120,6 +120,14 @@ class BaseModuleAdapter(ABC):
         """
         pass
 
+    async def close(self) -> None:
+        """Release owned subprocesses/resources on reload and application shutdown."""
+        pass
+
+    async def close_profile(self, credential_id: int) -> None:
+        """Release this profile's resources after edits, disable or deletion."""
+        pass
+
     def create_http_client(
         self,
         ctx: ModuleExecutionContext,

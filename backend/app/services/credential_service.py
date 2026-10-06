@@ -18,9 +18,9 @@ class CredentialService:
     def module_runtime_configuration(cls, provider, credential):
         configuration = {**provider.adapter_configuration,
             "credential_metadata": getattr(credential, "metadata_json", {}) or {}}
+        configuration["credential_id"] = credential.id
         if configuration.get("module_id") not in ("codex_cli", "grok_builder_cli"):
             return configuration
-        configuration["credential_id"] = credential.id
 
         async def persist_credentials(fields):
             import json
@@ -194,6 +194,13 @@ class CredentialService:
         return cls._build_credential_read(full_cred)
 
     @classmethod
+    async def close_module_profile(cls, provider, credential_id: int) -> None:
+        from app.modules.loader import ModuleLoader
+        module = ModuleLoader.get_adapter((provider.configuration or {}).get("module_id", ""))
+        if module:
+            await module.close_profile(credential_id)
+
+    @classmethod
     async def update_credential(cls, db: AsyncSession, credential_id: int, data: CredentialUpdate) -> Optional[CredentialRead]:
         cred = await cls.get_credential(db, credential_id)
         if not cred:
@@ -239,6 +246,8 @@ class CredentialService:
         await db.commit()
         full_cred = await cls.get_credential(db, credential_id)
         assert full_cred is not None
+        if data.api_key is not None or data.enabled is False or "proxy_id" in data.model_fields_set:
+            await cls.close_module_profile(full_cred.provider, credential_id)
         return cls._build_credential_read(full_cred)
 
     @classmethod
@@ -331,6 +340,7 @@ class CredentialService:
         cred = await cls.get_credential(db, credential_id)
         if not cred:
             return False
+        await cls.close_module_profile(cred.provider, credential_id)
         circuit_breaker.reset(credential_id)
         await db.delete(cred)
         await db.commit()

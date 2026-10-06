@@ -32,6 +32,7 @@ class LoadedModule(BaseModel):
 class ModuleLoader:
     _modules: Dict[str, LoadedModule] = {}
     _adapters: Dict[str, BaseModuleAdapter] = {}
+    _retired_adapters: List[BaseModuleAdapter] = []
 
     @classmethod
     def get_modules_dir(cls) -> Path:
@@ -155,6 +156,9 @@ class ModuleLoader:
                 )
 
         cls._modules = discovered
+        # A failed implicit rescan cannot silently drop a resource-owning adapter.
+        cls._retired_adapters.extend(adapter for key, adapter in cls._adapters.items()
+            if key not in adapters and adapter not in cls._retired_adapters)
         cls._adapters = adapters
         return cls._modules
 
@@ -287,8 +291,21 @@ class ModuleLoader:
                 loaded.profiles_count = cred_count
 
     @classmethod
+    async def close_all(cls) -> None:
+        """Stop resources owned by loaded modules, not unrelated processes."""
+        targets = list(cls._adapters.items()) + [("retired", a) for a in cls._retired_adapters]
+        for module_id, adapter in targets:
+            try:
+                await adapter.close()
+                if adapter in cls._retired_adapters:
+                    cls._retired_adapters.remove(adapter)
+            except Exception:
+                logger.exception("Failed to close module '%s'", module_id)
+
+    @classmethod
     async def reload_and_sync(cls, db: AsyncSession) -> Dict[str, Any]:
         """Rescan modules from disk and synchronize with the database."""
+        await cls.close_all()
         cls.scan_modules()
         await cls.sync_with_db(db)
         return {

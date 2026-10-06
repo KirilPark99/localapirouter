@@ -48,6 +48,7 @@ async def lifespan(app: FastAPI):
     yield
     from app.services.module_oauth import close_all
     await close_all()
+    await ModuleLoader.close_all()
     # Shutdown: close all active HTTP connection pools
     await http_client_manager.close_all()
 

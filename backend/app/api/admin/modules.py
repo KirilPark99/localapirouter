@@ -384,6 +384,9 @@ async def update_module_profile(
 
     await db.commit()
     await db.refresh(cred)
+    if data.fields is not None or data.enabled is False or "proxy_id" in data.model_fields_set:
+        provider = await db.get(Provider, cred.provider_id)
+        await CredentialService.close_module_profile(provider, cred.id)
 
     return {
         "id": cred.id,
@@ -438,8 +441,7 @@ async def delete_module_profile(
     if not cred:
         raise HTTPException(status_code=404, detail=f"Profile with ID {profile_id} not found")
 
-    await db.delete(cred)
-    await db.commit()
+    await CredentialService.delete_credential(db, profile_id)
     return {"success": True, "message": f"Profile {profile_id} deleted"}
 
 
@@ -465,8 +467,13 @@ async def sync_module_models(
     """
     Fetch live models from this module profile and store them in the catalog.
     """
-    result = await ModelDiscoveryService.fetch_models_from_provider(db, profile_id)
-    return result
+    cred = await CredentialService.get_credential(db, profile_id)
+    if not cred or (cred.provider.configuration or {}).get("module_id") != module_id:
+        raise HTTPException(status_code=404, detail="Profile does not belong to this module")
+    await ModelDiscoveryService.fetch_models_for_credential(db, profile_id)
+    count = await db.scalar(select(func.count(DiscoveredModel.id)).where(
+        DiscoveredModel.provider_id == cred.provider_id, DiscoveredModel.available == True)) or 0
+    return {"success": True, "models_discovered": count}
 
 
 @router.post("/{module_id}/profiles/{profile_id}/export")
