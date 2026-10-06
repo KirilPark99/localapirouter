@@ -135,7 +135,7 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
         <span className="text-sm shrink-0" role="img" aria-label={currentLanguage.name}>
           {currentLanguage.flag}
         </span>
-        <span className="font-semibold text-xs tracking-tight text-slate-100 whitespace-nowrap">
+        <span className="hidden sm:inline font-semibold text-xs tracking-tight text-slate-100 whitespace-nowrap">
           {currentLanguage.nativeName}
         </span>
         <ChevronDown

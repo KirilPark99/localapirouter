@@ -65,7 +65,11 @@ async def test_circuit_breaker_full_lifecycle():
     avail_failed, _ = circuit_breaker.is_available(cred_id)
     assert avail_failed is False
 
-    # 3. Success resets state back to HEALTHY
+    # 3. A late success cannot erase cooldown; an admitted success after expiry recovers.
+    from datetime import datetime, timezone, timedelta
+    circuit_breaker.record_success(cred_id)
+    assert not circuit_breaker.is_available(cred_id)[0]
+    circuit_breaker._cooldown_until[cred_id] = datetime.now(timezone.utc) - timedelta(seconds=1)
     circuit_breaker.record_success(cred_id)
     st_recovered = circuit_breaker.get_status(cred_id)
     assert st_recovered["status"] == "HEALTHY"

@@ -6,7 +6,8 @@ import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
-from app.modules.base import BaseModuleAdapter, ModuleExecutionContext
+from app.core.errors import normalize_upstream_error, RouterException, ErrorCategory
+from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_chat_completion
 from app.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -109,44 +110,8 @@ class ClinePassAdapter(BaseModuleAdapter):
         request: ChatCompletionRequest,
         ctx: ModuleExecutionContext,
     ) -> ChatCompletionResponse:
-        full_content = ""
-        model_name = request.model or ctx.model_id or "cline-pass/deepseek-v4-flash"
-        if model_name.startswith("clinepass/"):
-            model_name = model_name[10:]
-
-        async for chunk_str in self.stream_chat(request, ctx):
-            if not chunk_str.startswith("data: "):
-                continue
-            data_part = chunk_str[6:].strip()
-            if data_part == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data_part)
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                content = delta.get("content", "")
-                if content:
-                    full_content += content
-            except Exception:
-                pass
-
-        return ChatCompletionResponse(
-            id=f"chatcmpl-clinepass-{uuid.uuid4().hex[:12]}",
-            object="chat.completion",
-            created=int(time.time()),
-            model=model_name,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=ChatMessage(role="assistant", content=full_content),
-                    finish_reason="stop",
-                )
-            ],
-            usage=UsageInfo(
-                prompt_tokens=len(str(request.messages)) // 4,
-                completion_tokens=len(full_content) // 4,
-                total_tokens=(len(str(request.messages)) + len(full_content)) // 4,
-            ),
-        )
+        model = (request.model or ctx.model_id or "cline-pass/deepseek-v4-flash").removeprefix("clinepass/")
+        return await collect_chat_completion(self.stream_chat(request, ctx), model, require_complete=True)
 
     async def stream_chat(
         self,
@@ -168,7 +133,7 @@ class ClinePassAdapter(BaseModuleAdapter):
             ) as resp:
                 if resp.status_code != 200:
                     err_body = await resp.aread()
-                    raise RuntimeError(f"ClinePass error (HTTP {resp.status_code}): {err_body.decode('utf-8', errors='ignore')[:300]}")
+                    raise normalize_upstream_error(status_code=resp.status_code, response_body=(await resp.aread()).decode("utf-8", errors="replace"))
 
                 async for line in resp.aiter_lines():
                     if not line:

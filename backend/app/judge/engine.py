@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import aclosing
 import json
 import logging
 import re
@@ -35,6 +36,7 @@ from app.schemas.chat import (
 from app.schemas.jev import JevRequest
 from app.schemas.entities import JudgeTestResponse
 from app.services.proxy_service import ProxyService
+from app.services.credential_service import CredentialService
 from app.services.log_service import LogService
 from app.services.judge_service import JudgeService
 from app.routing.engine import RoutingEngine
@@ -76,7 +78,9 @@ class JudgeEngine:
                 ErrorCategory.AUTH_ERROR,
                 status_code=403,
             )
-        allowed_judges = getattr(router_key, "allowed_judges", ["*"]) or ["*"]
+        allowed_judges = getattr(router_key, "allowed_judges", None)
+        if allowed_judges is None:
+            allowed_judges = ["*"]
         if "*" not in allowed_judges and slug not in allowed_judges:
             raise RouterException(
                 f"Judge profile '{slug}' is not in allowed judges for this API key",
@@ -191,10 +195,12 @@ class JudgeEngine:
         Returns: (winning_idx, decision_metadata, judge_latency_ms, judge_status, error_msg)
         """
         t0 = time.perf_counter()
+        evaluation_usage = UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0)
 
         if len(active_candidates) <= 1:
             latency = round((time.perf_counter() - t0) * 1000, 2)
             meta = {
+                "usage": evaluation_usage.model_dump(),
                 "reasoning": "Single active candidate configured; judge deliberation bypassed.",
                 "estimated_complexity": "auto",
                 "detected_task_type": "auto",
@@ -239,6 +245,7 @@ class JudgeEngine:
                     strongest_cand = active_candidates[strongest_idx]
                     lat = round((time.perf_counter() - t0) * 1000, 2)
                     meta = {
+                "usage": evaluation_usage.model_dump(),
                         "selected_candidate_index": strongest_idx,
                         "estimated_complexity": strongest_cand.complexity_level,
                         "detected_task_type": "context_overflow_bypass",
@@ -282,14 +289,18 @@ class JudgeEngine:
                     state=prompt_text,
                     questions=jev_questions,
                 )
-                jev_res = await JevEngine.execute_decision(
-                    db=db,
-                    request=jev_req,
-                    request_id=f"{req_id}_judge",
-                    record_log=False,
-                )
-                choice_ans = jev_res.answers.get("candidate_selection", {})
-                choice_key = choice_ans.get("choice") or choice_ans.get("decision") or "candidate_0"
+                creds = await RoutingEngine._candidate_credentials(db, profile.judge_provider, profile.judge_model,
+                    credential_id=profile.judge_credential_id, credential_group=profile.judge_credential_group)
+                if not creds:
+                    raise RouterException('No eligible JEV judge credential', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
+                cred = creds[0]
+                answers, usage = await JevEngine._dispatch_decision(cred, profile.judge_provider, profile.judge_model,
+                    jev_req, ProxyService.build_proxy_url(cred.proxy) if cred.proxy else None, profile.timeout_seconds)
+                evaluation_usage = UsageInfo(prompt_tokens=usage.get('input_tokens', 0),
+                    completion_tokens=usage.get('output_tokens', 0),
+                    total_tokens=usage.get('input_tokens', 0)+usage.get('output_tokens', 0))
+                choice_ans = answers.get("candidate_selection", {})
+                choice_key = choice_ans.get("choice") or choice_ans.get("decision")
                 cand_idx = fallback_idx
                 if choice_key.startswith("candidate_"):
                     try:
@@ -301,6 +312,7 @@ class JudgeEngine:
 
                 lat = round((time.perf_counter() - t0) * 1000, 2)
                 meta = {
+                "usage": evaluation_usage.model_dump(),
                     "selected_candidate_index": cand_idx,
                     "estimated_complexity": active_candidates[cand_idx].complexity_level,
                     "detected_task_type": active_candidates[cand_idx].task_types[0] if active_candidates[cand_idx].task_types else "general",
@@ -360,35 +372,27 @@ class JudgeEngine:
                     raise RouterException("Judge provider or model not configured", ErrorCategory.UPSTREAM_5XX)
 
                 adapter = get_adapter(provider.adapter_type)
-                cred = profile.judge_credential
-                if not cred or not cred.enabled:
-                    # Look up active credential for provider
-                    q = select(ProviderCredential).where(
-                        ProviderCredential.provider_id == provider.id,
-                        ProviderCredential.enabled == True,
-                    )
-                    if profile.judge_credential_group:
-                        q = q.where(ProviderCredential.group_name == profile.judge_credential_group)
-                    q = q.order_by(ProviderCredential.priority.asc(), ProviderCredential.weight.desc())
-                    c_res = await db.execute(q)
-                    cred = c_res.scalars().first()
-
-                if not cred:
-                    raise RouterException("No active credential available for judge model", ErrorCategory.UPSTREAM_5XX)
+                creds = await RoutingEngine._candidate_credentials(db, provider, model_obj,
+                    credential_id=profile.judge_credential_id, credential_group=profile.judge_credential_group)
+                if not creds:
+                    raise RouterException('No eligible judge credential', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
+                cred = creds[0]
 
                 api_key = decrypt_secret(cred.encrypted_api_key)
                 proxy_url = ProxyService.build_proxy_url(cred.proxy) if cred.proxy else None
-                resp = await adapter.chat_completions(
+                resp = await RoutingEngine._dispatch_chat(adapter, cred, provider, model_obj,
                     base_url=provider.base_url,
                     api_key=api_key,
                     model_id=model_obj.provider_model_id,
                     request=judge_req,
                     extra_headers=provider.extra_headers,
-                    configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
+                    configuration=CredentialService.module_runtime_configuration(provider, cred),
                     proxy_url=proxy_url,
                     timeout=profile.timeout_seconds or 30.0,
                 )
                 raw_response_content = resp.choices[0].message.content if resp.choices else ""
+
+            evaluation_usage = resp.usage or evaluation_usage
 
             # Parse JSON
             cleaned_json = raw_response_content.strip()
@@ -405,6 +409,7 @@ class JudgeEngine:
 
             lat = round((time.perf_counter() - t0) * 1000, 2)
             meta = {
+                "usage": evaluation_usage.model_dump(),
                 "selected_candidate_index": cand_idx,
                 "estimated_complexity": data.get("estimated_complexity", "auto"),
                 "detected_task_type": data.get("detected_task_type", "general"),
@@ -434,6 +439,7 @@ class JudgeEngine:
                     f"Judge evaluation exceeded context limit: {err_str}; auto-routing to strongest candidate '{strongest_cand.label}' (#{strongest_idx})"
                 )
                 meta = {
+                "usage": evaluation_usage.model_dump(),
                     "selected_candidate_index": strongest_idx,
                     "estimated_complexity": strongest_cand.complexity_level,
                     "detected_task_type": "context_overflow_fallback",
@@ -445,6 +451,7 @@ class JudgeEngine:
 
             logger.warning(f"Judge evaluation failed: {err_str}; falling back to candidate #{fallback_idx}")
             meta = {
+                "usage": evaluation_usage.model_dump(),
                 "selected_candidate_index": fallback_idx,
                 "estimated_complexity": "fallback",
                 "detected_task_type": "fallback",
@@ -452,6 +459,57 @@ class JudgeEngine:
                 "judge_model": judge_model_name,
             }
             return fallback_idx, meta, lat, "FALLBACK", err_str
+
+    @classmethod
+    async def _winner_dispatch(cls, db, candidate, request, timeout, *, stream=False, request_id=None):
+        if candidate.candidate_type == 'profile':
+            if not candidate.target_profile or not candidate.target_profile.enabled:
+                raise RouterException('Winning route unavailable', ErrorCategory.MODEL_NOT_FOUND)
+            request.model = f'route/{candidate.target_profile.slug}'
+            if stream:
+                return RoutingEngine.route_stream_chat(db, request, router_key=None, request_id=request_id, record_log=False)
+            return await RoutingEngine.route_chat_completions(db, request, router_key=None, request_id=request_id, record_log=False)
+        provider, model = candidate.provider, candidate.model
+        creds = await RoutingEngine._candidate_credentials(db, provider, model,
+            credential_id=candidate.credential_id, credential_group=candidate.credential_group)
+        if not creds:
+            raise RouterException('Winning candidate credential unavailable', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
+        request = RoutingEngine._apply_model_defaults(request, model,
+            candidate_temperature=candidate.temperature, eff_thinking=candidate.thinking_effort)
+        adapter = get_adapter(provider.adapter_type)
+
+        def kwargs(cred):
+            return dict(base_url=provider.base_url, api_key=decrypt_secret(cred.encrypted_api_key),
+                model_id=model.provider_model_id, request=request, extra_headers=provider.extra_headers,
+                configuration=CredentialService.module_runtime_configuration(provider, cred),
+                proxy_url=ProxyService.build_proxy_url(cred.proxy) if cred.proxy else None, timeout=timeout)
+
+        if stream:
+            async def winner_stream():
+                last_error = None
+                for cred in creds:
+                    started = False
+                    try:
+                        async with aclosing(RoutingEngine._dispatch_stream(adapter, cred, provider, model, **kwargs(cred))) as source:
+                            async for chunk in source:
+                                started = True
+                                yield chunk
+                        return
+                    except RouterException as error:
+                        last_error = error
+                        if started or not error.category.is_fallback_eligible:
+                            raise
+                raise last_error
+            return winner_stream()
+        last_error = None
+        for cred in creds:
+            try:
+                return await RoutingEngine._dispatch_chat(adapter, cred, provider, model, **kwargs(cred))
+            except RouterException as error:
+                last_error = error
+                if not error.category.is_fallback_eligible:
+                    raise
+        raise last_error
 
     @classmethod
     async def execute_judge(
@@ -508,8 +566,8 @@ class JudgeEngine:
         # 2. Dispatch to winning candidate
         cand_t0 = time.perf_counter()
         cand_req = request.model_copy(deep=True)
-        if winning_candidate.temperature is not None:
-            cand_req.temperature = float(winning_candidate.temperature)
+        cand_req = RoutingEngine._apply_model_defaults(cand_req, winning_candidate.model,
+            candidate_temperature=winning_candidate.temperature)
         if winning_candidate.thinking_effort:
             cand_req = RoutingEngine._apply_thinking_effort(cand_req, winning_candidate.thinking_effort)
 
@@ -519,56 +577,12 @@ class JudgeEngine:
         upstream_model_id = None
 
         try:
-            if winning_candidate.candidate_type == "profile" and winning_candidate.target_profile:
-                target_model_name = f"route/{winning_candidate.target_profile.slug}"
-                cand_req.model = target_model_name
-                response = await RoutingEngine.route_chat_completions(
-                    db=db,
-                    request=cand_req,
-                    router_key=router_key,
-                    request_id=req_id,
-                    record_log=False,
-                )
-                upstream_model_id = response.model
-            else:
-                model_obj = winning_candidate.model
-                provider = winning_candidate.provider
-                if not model_obj or not provider:
-                    raise RouterException("Winning candidate model or provider not configured", ErrorCategory.UPSTREAM_5XX)
-
-                target_model_name = model_obj.canonical_slug or model_obj.provider_model_id
-                resolved_prov_id = provider.id
-                upstream_model_id = model_obj.provider_model_id
-                cand_req.model = target_model_name
-
-                # Check if specific credential assigned
-                if winning_candidate.credential_id:
-                    cand_req = RoutingEngine._apply_model_defaults(cand_req, model_obj, winning_candidate.thinking_effort)
-                    adapter = get_adapter(provider.adapter_type)
-                    cred = winning_candidate.credential
-                    if not cred or not cred.enabled:
-                        raise RouterException("Assigned credential for winning candidate is disabled", ErrorCategory.UPSTREAM_5XX)
-                    resolved_cred_id = cred.id
-                    api_key = decrypt_secret(cred.encrypted_api_key)
-                    proxy_url = ProxyService.build_proxy_url(cred.proxy) if cred.proxy else None
-                    response = await adapter.chat_completions(
-                        base_url=provider.base_url,
-                        api_key=api_key,
-                        model_id=model_obj.provider_model_id,
-                        request=cand_req,
-                        extra_headers=provider.extra_headers,
-                        configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
-                        proxy_url=proxy_url,
-                        timeout=profile.timeout_seconds or 60.0,
-                    )
-                else:
-                    response = await RoutingEngine.route_chat_completions(
-                        db=db,
-                        request=cand_req,
-                        router_key=router_key,
-                        request_id=req_id,
-                        record_log=False,
-                    )
+            target_model_name = (f'route/{winning_candidate.target_profile.slug}' if winning_candidate.target_profile
+                                 else winning_candidate.model.canonical_slug if winning_candidate.model else 'unknown')
+            response = await cls._winner_dispatch(db, winning_candidate, cand_req, profile.timeout_seconds, request_id=req_id)
+            resolved_prov_id = getattr(winning_candidate.provider, 'id', None)
+            resolved_cred_id = winning_candidate.credential_id
+            upstream_model_id = response.model
 
             cand_lat = round((time.perf_counter() - cand_t0) * 1000, 2)
             attempts_trace.append({
@@ -582,8 +596,10 @@ class JudgeEngine:
             })
 
             total_lat = round((time.perf_counter() - t0) * 1000, 2)
-            p_toks = response.usage.prompt_tokens if response.usage else 0
-            c_toks = response.usage.completion_tokens if response.usage else 0
+            evaluation_usage = judge_meta.get('usage', {})
+            p_toks = (response.usage.prompt_tokens if response.usage else 0) + evaluation_usage.get('prompt_tokens', 0)
+            c_toks = (response.usage.completion_tokens if response.usage else 0) + evaluation_usage.get('completion_tokens', 0)
+            response.usage = UsageInfo(prompt_tokens=p_toks, completion_tokens=c_toks, total_tokens=p_toks+c_toks)
 
             # Override response model to indicate judge routing path
             response.model = f"judge/{profile.slug}"
@@ -708,8 +724,8 @@ class JudgeEngine:
             winning_candidate = active_candidates[winning_idx]
 
             cand_req = request.model_copy(deep=True)
-            if winning_candidate.temperature is not None:
-                cand_req.temperature = float(winning_candidate.temperature)
+            cand_req = RoutingEngine._apply_model_defaults(cand_req, winning_candidate.model,
+                candidate_temperature=winning_candidate.temperature)
             if winning_candidate.thinking_effort:
                 cand_req = RoutingEngine._apply_thinking_effort(cand_req, winning_candidate.thinking_effort)
 
@@ -728,28 +744,40 @@ class JudgeEngine:
             has_seen_usage = False
 
             try:
-                stream_source = RoutingEngine.route_stream_chat(
-                    db=session,
-                    request=cand_req,
-                    router_key=router_key,
-                    request_id=req_id,
-                    record_log=False,
-                )
-                async for chunk in stream_source:
-                    if '"usage"' in chunk:
-                        has_seen_usage = True
-                        try:
-                            for line in chunk.split("\n"):
-                                if line.startswith("data: ") and not line.startswith("data: [DONE]"):
-                                    c_data = json.loads(line[6:])
-                                    if "usage" in c_data and c_data["usage"]:
-                                        approx_input_tokens = c_data["usage"].get("prompt_tokens", approx_input_tokens)
-                                        approx_output_tokens = c_data["usage"].get("completion_tokens", approx_output_tokens)
-                        except Exception:
-                            pass
-                    else:
-                        approx_output_tokens += 1
-                    yield chunk
+                stream_source = await cls._winner_dispatch(session, winning_candidate, cand_req,
+                    profile.timeout_seconds, stream=True, request_id=req_id)
+                terminal = False
+                evaluator_usage = judge_meta.get('usage', {})
+                async with aclosing(stream_source) as source:
+                    async for chunk in source:
+                        output_lines = []
+                        for line in chunk.splitlines():
+                            if line.startswith('data: {'):
+                                data = json.loads(line[6:])
+                                if data.get('error'):
+                                    raise RouterException(str(data['error'].get('message', 'Winner stream failed')), ErrorCategory.UPSTREAM_5XX)
+                                if data.get('usage'):
+                                    has_seen_usage = True
+                                    approx_input_tokens = data['usage'].get('prompt_tokens', 0)
+                                    approx_output_tokens = data['usage'].get('completion_tokens', 0)
+                                    data['usage'] = {'prompt_tokens': approx_input_tokens + evaluator_usage.get('prompt_tokens', 0),
+                                        'completion_tokens': approx_output_tokens + evaluator_usage.get('completion_tokens', 0),
+                                        'total_tokens': approx_input_tokens + approx_output_tokens + evaluator_usage.get('total_tokens', 0)}
+                                terminal = terminal or any(c.get('finish_reason') for c in data.get('choices', []))
+                                output_lines.append('data: '+json.dumps(data))
+                            elif line.strip() == 'data: [DONE]':
+                                terminal = True
+                            elif line.strip():
+                                output_lines.append(line)
+                        if output_lines:
+                            yield '\n'.join(output_lines)+'\n\n'
+                if not terminal:
+                    raise RouterException('Winner stream ended without terminal', ErrorCategory.UPSTREAM_5XX)
+                approx_input_tokens += evaluator_usage.get('prompt_tokens', 0)
+                approx_output_tokens += evaluator_usage.get('completion_tokens', 0)
+                if not has_seen_usage:
+                    yield 'data: '+json.dumps({'choices':[], 'usage':{'prompt_tokens':approx_input_tokens,
+                        'completion_tokens':approx_output_tokens,'total_tokens':approx_input_tokens+approx_output_tokens}})+'\n\n'
 
                 total_lat = round((time.perf_counter() - t0) * 1000, 2)
                 metadata = {
@@ -778,9 +806,10 @@ class JudgeEngine:
                     resolved_credential_id=getattr(winning_candidate.credential, "id", None),
                     upstream_model=target_model_name,
                     input_tokens=approx_input_tokens,
-                    output_tokens=max(1, approx_output_tokens),
+                    output_tokens=approx_output_tokens,
                     metadata_json=metadata,
                 )
+                yield 'data: [DONE]\n\n'
             except Exception as e:
                 total_lat = round((time.perf_counter() - t0) * 1000, 2)
                 re = e if isinstance(e, RouterException) else RouterException(str(e), ErrorCategory.UPSTREAM_5XX)
@@ -801,13 +830,15 @@ class JudgeEngine:
                 yield "data: [DONE]\n\n"
 
         if db is not None:
-            async for chunk in _stream_runner(db):
-                yield chunk
+            async with aclosing(_stream_runner(db)) as source:
+                async for chunk in source:
+                    yield chunk
         else:
             fresh_db = AsyncSessionLocal()
             try:
-                async for chunk in _stream_runner(fresh_db):
-                    yield chunk
+                async with aclosing(_stream_runner(fresh_db)) as source:
+                    async for chunk in source:
+                        yield chunk
             finally:
                 await _safe_close_session(fresh_db)
 

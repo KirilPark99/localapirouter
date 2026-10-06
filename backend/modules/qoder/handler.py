@@ -6,7 +6,8 @@ import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
-from app.modules.base import BaseModuleAdapter, ModuleExecutionContext
+from app.core.errors import normalize_upstream_error, RouterException, ErrorCategory
+from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_chat_completion
 from app.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -169,7 +170,7 @@ class QoderAdapter(BaseModuleAdapter):
         async with self.create_http_client(ctx) as client:
             resp = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=ctx.timeout or 60.0)
             if resp.status_code != 200:
-                raise RuntimeError(f"Qoder error (HTTP {resp.status_code}): {resp.text[:300]}")
+                raise normalize_upstream_error(status_code=resp.status_code, response_body=(await resp.aread()).decode("utf-8", errors="replace"))
             data = resp.json()
             return ChatCompletionResponse(**data)
 
@@ -195,7 +196,7 @@ class QoderAdapter(BaseModuleAdapter):
             ) as resp:
                 if resp.status_code != 200:
                     err_body = await resp.aread()
-                    raise RuntimeError(f"Qoder error (HTTP {resp.status_code}): {err_body.decode('utf-8', errors='ignore')[:300]}")
+                    raise normalize_upstream_error(status_code=resp.status_code, response_body=(await resp.aread()).decode("utf-8", errors="replace"))
 
                 async for line in resp.aiter_lines():
                     if not line:
@@ -212,7 +213,7 @@ class QoderAdapter(BaseModuleAdapter):
                             status_val = envelope.get("statusCodeValue")
                             if status_val is not None and status_val != 200:
                                 body_err = envelope.get("body") or f"status {status_val}"
-                                raise RuntimeError(f"Qoder upstream error ({status_val}): {body_err}")
+                                raise normalize_upstream_error(status_code=int(status_val), response_body=body_err)
                         except json.JSONDecodeError:
                             pass
 

@@ -1,10 +1,14 @@
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.api.deps import get_current_admin
 from app.core.config import settings
 
 router = APIRouter(prefix="/settings", tags=["Admin Settings"])
+
+class SettingsUpdate(BaseModel):
+    log_request_content: bool | None = None
 
 @router.get("")
 async def get_settings(username: str = Depends(get_current_admin)):
@@ -18,7 +22,7 @@ async def get_settings(username: str = Depends(get_current_admin)):
     }
 
 @router.post("")
-async def update_settings(payload: dict, username: str = Depends(get_current_admin)):
-    if "log_request_content" in payload:
-        settings.LOG_REQUEST_CONTENT = bool(payload["log_request_content"])
+async def update_settings(payload: SettingsUpdate, username: str = Depends(get_current_admin)):
+    if payload.log_request_content is not None:
+        settings.LOG_REQUEST_CONTENT = payload.log_request_content
     return {"message": "Settings updated", "log_request_content": settings.LOG_REQUEST_CONTENT}

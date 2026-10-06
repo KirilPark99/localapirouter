@@ -108,7 +108,7 @@ class FusionService:
 
     @classmethod
     async def get_profile(cls, db: AsyncSession, profile_id: int) -> Optional[FusionProfileRead]:
-        query = select(FusionProfile).where(FusionProfile.id == profile_id).options(
+        query = select(FusionProfile).where(FusionProfile.id == profile_id).execution_options(populate_existing=True).options(
             selectinload(FusionProfile.judge_routing_profile),
             selectinload(FusionProfile.judge_provider),
             selectinload(FusionProfile.judge_credential),
@@ -124,6 +124,8 @@ class FusionService:
 
     @classmethod
     async def create_profile(cls, db: AsyncSession, data: FusionProfileCreate) -> FusionProfileRead:
+        if data.min_successful_candidates > sum(p.is_active for p in data.participants):
+            raise ValueError('min_successful_candidates exceeds active participants')
         clean_slug = data.slug.removeprefix("fusion/").strip()
         existing = await db.execute(select(FusionProfile.id).where(FusionProfile.slug == clean_slug))
         if existing.scalar_one_or_none():
@@ -154,6 +156,7 @@ class FusionService:
             judge_thinking_effort=data.judge_thinking_effort,
             judge_temperature=data.judge_temperature,
             temperature=data.temperature,
+            context_length=data.context_length,
             system_prompt=data.system_prompt,
             min_successful_candidates=data.min_successful_candidates,
             max_parallelism=data.max_parallelism,
@@ -185,10 +188,15 @@ class FusionService:
 
     @classmethod
     async def update_profile(cls, db: AsyncSession, profile_id: int, data: FusionProfileUpdate) -> Optional[FusionProfileRead]:
-        result = await db.execute(select(FusionProfile).where(FusionProfile.id == profile_id))
+        result = await db.execute(select(FusionProfile).where(FusionProfile.id == profile_id).options(selectinload(FusionProfile.participants)))
         p = result.scalar_one_or_none()
         if not p:
             return None
+
+        participants = data.participants if data.participants is not None else p.participants
+        minimum = data.min_successful_candidates if data.min_successful_candidates is not None else p.min_successful_candidates
+        if minimum > sum(part.is_active for part in participants):
+            raise ValueError('min_successful_candidates exceeds active participants')
 
         judge_type = data.judge_type if data.judge_type is not None else p.judge_type
         judge_routing_profile_id = (
@@ -251,6 +259,8 @@ class FusionService:
             p.judge_temperature = data.judge_temperature
         if "temperature" in data.model_fields_set:
             p.temperature = data.temperature
+        if "context_length" in data.model_fields_set:
+            p.context_length = data.context_length
         if data.system_prompt is not None:
             p.system_prompt = data.system_prompt
         if data.min_successful_candidates is not None:
@@ -378,6 +388,7 @@ class FusionService:
             judge_thinking_effort=getattr(p, "judge_thinking_effort", None),
             judge_temperature=getattr(p, "judge_temperature", None),
             temperature=getattr(p, "temperature", None),
+            context_length=p.context_length,
             system_prompt=p.system_prompt,
             min_successful_candidates=p.min_successful_candidates,
             max_parallelism=p.max_parallelism,

@@ -12,6 +12,8 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 
 from app.models.entities import Provider, ProviderCredential, Proxy
+from app.schemas.entities import ProviderCreate, CredentialCreate, ProxyCreate
+from pydantic import ValidationError
 from app.core.crypto import encrypt_secret, decrypt_secret, compute_fingerprint, mask_secret
 
 MIN_BACKUP_PASSPHRASE_LENGTH = 12
@@ -79,6 +81,55 @@ def decrypt_payload(envelope: dict, passphrase: Optional[str] = None) -> dict:
 
 
 class BackupService:
+    @classmethod
+    async def _validated_payload(cls, db: AsyncSession, envelope: dict, passphrase: Optional[str]) -> dict:
+        def check_header(value):
+            if not isinstance(value, dict) or value.get("type") != "myairouter_backup" or type(value.get("version")) is not int or value["version"] != 1:
+                raise ValueError("Unsupported backup type or version")
+        check_header(envelope)
+        data = decrypt_payload(envelope, passphrase)
+        check_header(data)
+        for field, schema in (("providers", ProviderCreate), ("credentials", CredentialCreate), ("proxies", ProxyCreate)):
+            entries = data.get(field, [])
+            if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
+                raise ValueError(f"Backup {field} must be an array of objects")
+            normalized = []
+            for item in entries:
+                try:
+                    values = {**item, "provider_id": 1} if field == "credentials" else item
+                    checked = schema.model_validate(values)
+                except ValidationError:
+                    raise ValueError(f"Invalid backup {field} structure") from None
+                # Preserve backup-only references/metadata, but use the existing API types.
+                normalized.append({**item, **checked.model_dump(exclude_unset=True)})
+            data[field] = normalized
+        slugs = [p["slug"] for p in data["providers"]]
+        if any(not slug or slug != slug.strip() for slug in slugs) or len(slugs) != len(set(slugs)):
+            raise ValueError("Backup provider slugs must be nonempty and unique")
+        for credential in data["credentials"]:
+            slug, name = credential.get("provider_slug"), credential.get("provider_name")
+            if slug is not None and not isinstance(slug, str) or name is not None and not isinstance(name, str):
+                raise ValueError("Invalid credential provider reference")
+            if slug:
+                known = slug in slugs or await db.scalar(select(Provider.id).where(Provider.slug == slug)) is not None
+            elif name:
+                count = sum(p["name"] == name for p in data["providers"])
+                existing = list((await db.scalars(select(Provider.id).where(Provider.name == name))).all()) if not count else []
+                known = count == 1 or not count and len(existing) == 1
+            else:
+                known = False
+            if not known:
+                raise ValueError("Credential references an unknown or ambiguous provider")
+            if not isinstance(credential.get("metadata_json", {}), dict):
+                raise ValueError("Credential metadata must be an object")
+            reference = credential.get("proxy_ref")
+            if reference is not None:
+                try:
+                    credential["proxy_ref"] = ProxyCreate.model_validate(reference).model_dump()
+                except ValidationError:
+                    raise ValueError("Invalid credential proxy reference") from None
+        return data
+
     @classmethod
     async def export_data(
         cls,
@@ -224,7 +275,7 @@ class BackupService:
         """
         Validates backup content and analyzes what will be created vs updated on this server.
         """
-        data = decrypt_payload(raw_payload, passphrase)
+        data = await cls._validated_payload(db, raw_payload, passphrase)
 
         providers_list = data.get("providers", [])
         credentials_list = data.get("credentials", [])
@@ -244,7 +295,7 @@ class BackupService:
         for p_data in providers_list:
             slug = p_data.get("slug", "")
             name = p_data.get("name", slug)
-            keys_for_p = [c for c in credentials_list if c.get("provider_slug") == slug or c.get("provider_name") == name]
+            keys_for_p = [c for c in credentials_list if c.get("provider_slug") == slug or not c.get("provider_slug") and c.get("provider_name") == name]
             exists = slug in existing_provs
             
             # Check duplicates among keys
@@ -307,7 +358,7 @@ class BackupService:
         Imports providers and credentials into target server database.
         Re-encrypts all secrets with target server's secret master key.
         """
-        data = decrypt_payload(raw_payload, passphrase)
+        data = await cls._validated_payload(db, raw_payload, passphrase)
 
         providers_list = data.get("providers", [])
         credentials_list = data.get("credentials", [])
@@ -367,7 +418,7 @@ class BackupService:
                     proxy_name_map[name] = new_prx.id
                     stats["imported_proxies"] += 1
             except Exception as e:
-                stats["errors"].append(f"Error importing proxy {prx_data.get('name')}: {str(e)}")
+                stats["errors"].append(f"Error importing proxy {prx_data.get('name')}: {type(e).__name__}")
 
         # 2. Import Providers
         provider_slug_map: Dict[str, int] = {}
@@ -435,19 +486,19 @@ class BackupService:
                     provider_name_map[name] = new_p.id
                     stats["imported_providers"] += 1
             except Exception as e:
-                stats["errors"].append(f"Error importing provider {name} ({slug}): {str(e)}")
+                stats["errors"].append(f"Error importing provider {name} ({slug}): {type(e).__name__}")
 
         # 3. Import Credentials
         for cred_data in credentials_list:
             try:
                 p_slug = cred_data.get("provider_slug", "")
                 p_name = cred_data.get("provider_name", "")
-                target_pid = provider_slug_map.get(p_slug) or provider_name_map.get(p_name)
+                target_pid = provider_slug_map.get(p_slug) if p_slug else provider_name_map.get(p_name)
 
                 if not target_pid:
                     # Fallback lookup in DB
                     find_prov = await db.execute(
-                        select(Provider.id).where((Provider.slug == p_slug) | (Provider.name == p_name))
+                        select(Provider.id).where(Provider.slug == p_slug if p_slug else Provider.name == p_name)
                     )
                     target_pid = find_prov.scalar_one_or_none()
 
@@ -456,11 +507,9 @@ class BackupService:
                     continue
 
                 raw_key = (cred_data.get("api_key") or "").strip()
-                is_keyless = (
-                    raw_key == "no-key"
-                    or raw_key == ""
-                    or cred_data.get("name", "").lower() == "keyless"
-                )
+                from app.services.credential_service import CredentialService
+                target_provider = await db.get(Provider, target_pid)
+                is_keyless = CredentialService._is_keyless(target_provider, raw_key)
 
                 if not is_keyless:
                     fingerprint = compute_fingerprint(raw_key)
@@ -493,6 +542,7 @@ class BackupService:
                         existing_cred.weight = cred_data.get("weight", existing_cred.weight)
                         existing_cred.rpm_limit = cred_data.get("rpm_limit", existing_cred.rpm_limit)
                         existing_cred.tpm_limit = cred_data.get("tpm_limit", existing_cred.tpm_limit)
+                        existing_cred.max_concurrency = cred_data.get("max_concurrency", existing_cred.max_concurrency)
                         stats["updated_credentials"] += 1
                         continue
 
@@ -530,8 +580,17 @@ class BackupService:
                 stats["new_credential_ids"].append(new_cred.id)
 
             except Exception as e:
-                stats["errors"].append(f"Error importing key '{cred_data.get('name')}': {str(e)}")
+                stats["errors"].append(f"Error importing key '{cred_data.get('name')}': {type(e).__name__}")
 
+        if stats["errors"]:
+            await db.rollback()
+            stats["success"] = False
+            for field in stats:
+                if field.startswith(("imported_", "updated_")):
+                    stats[field] = 0
+            stats["new_credential_ids"] = []
+            stats["discovery_triggered"] = False
+            return stats
         await db.commit()
 
         # 4. Auto-discover models if requested
@@ -541,12 +600,16 @@ class BackupService:
                 for cid in stats["new_credential_ids"]:
                     try:
                         await ModelDiscoveryService.fetch_models_for_credential(db, cid)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        stats["errors"].append(f"Model discovery failed for imported credential: {type(exc).__name__}")
+                        await db.rollback()
                 stats["discovery_triggered"] = True
-            except Exception:
+            except Exception as exc:
+                stats["errors"].append(f"Model discovery unavailable: {type(exc).__name__}")
                 stats["discovery_triggered"] = False
         else:
             stats["discovery_triggered"] = False
 
+        stats["success"] = not stats["errors"]
+        stats["partial"] = bool(stats["errors"] and stats["new_credential_ids"])
         return stats

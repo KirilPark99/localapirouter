@@ -42,7 +42,8 @@ export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [language, dir]);
 
   const t = useMemo(() => {
-    return translations[language] || translations.en;
+    const selected = translations[language] || translations.en;
+    return { ...selected, nav: { ...translations.en.nav, ...selected.nav, groups: { ...translations.en.nav.groups, ...selected.nav.groups } } };
   }, [language]);
 
   return (

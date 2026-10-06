@@ -33,7 +33,7 @@ async def test_null_optional_fields_reach_validation_without_strip_error(
     assert adapter._resolve_raw_tokens(ctx) == {}
     ok, message, count = await adapter.validate_credentials(ctx)
     assert not ok and count == 0
-    assert "No " in message and "NoneType" not in message
+    assert ("No " in message or "Missing CLI credentials" in message) and "NoneType" not in message
 
     # Explicit credentials still work when their optional siblings are null.
     fields["access_token"] = "  dummy-token  "

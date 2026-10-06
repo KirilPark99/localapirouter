@@ -1,4 +1,5 @@
 import time
+import uuid
 import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -108,7 +109,7 @@ class CompressionPipelineService:
 
     @classmethod
     async def create_custom_stage(cls, db: AsyncSession, data: Dict[str, Any]) -> CompressionStage:
-        stage_id = data.get("id") or f"custom_{int(time.time())}"
+        stage_id = data.get("id") or f"custom_{uuid.uuid4().hex}"
         name = data.get("name") or "Пользовательский этап"
         description = data.get("description") or "Пользовательские правила сжатия"
         icon = data.get("icon") or "Sliders"

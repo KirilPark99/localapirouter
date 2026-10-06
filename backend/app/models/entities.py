@@ -192,6 +192,7 @@ class FusionProfile(Base, TimestampMixin):
     judge_thinking_effort: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     judge_temperature: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     temperature: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    context_length: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     min_successful_candidates: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
     max_parallelism: Mapped[int] = mapped_column(Integer, default=5, nullable=False)

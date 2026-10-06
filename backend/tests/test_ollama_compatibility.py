@@ -69,7 +69,7 @@ async def test_ollama_tags_and_show():
         await db.commit()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization":"Bearer " + __import__("app.services.auth_service",fromlist=["AuthService"]).AuthService.create_access_token("admin")}) as client:
         # 1. Test GET /api/tags
         res = await client.get("/api/tags")
         assert res.status_code == 200

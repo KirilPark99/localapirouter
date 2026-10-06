@@ -7,7 +7,8 @@ import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
-from app.modules.base import BaseModuleAdapter, ModuleExecutionContext
+from app.core.errors import normalize_upstream_error, RouterException, ErrorCategory
+from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_chat_completion
 from app.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -263,50 +264,8 @@ class KimiWebAdapter(BaseModuleAdapter):
         request: ChatCompletionRequest,
         ctx: ModuleExecutionContext,
     ) -> ChatCompletionResponse:
-        full_content = ""
-        full_reasoning = ""
-        model_name = request.model or ctx.model_id or "kimi-k2.8"
-
-        async for chunk_str in self.stream_chat(request, ctx):
-            if not chunk_str.startswith("data: "):
-                continue
-            data_part = chunk_str[6:].strip()
-            if data_part == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data_part)
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                content = delta.get("content", "")
-                reasoning = delta.get("reasoning_content", "")
-                if content:
-                    full_content += content
-                if reasoning:
-                    full_reasoning += reasoning
-            except Exception:
-                pass
-
-        msg = ChatMessage(role="assistant", content=full_content)
-        if full_reasoning:
-            msg.reasoning_content = full_reasoning
-
-        return ChatCompletionResponse(
-            id=f"chatcmpl-kimi-{uuid.uuid4().hex[:12]}",
-            object="chat.completion",
-            created=int(time.time()),
-            model=model_name,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=msg,
-                    finish_reason="stop",
-                )
-            ],
-            usage=UsageInfo(
-                prompt_tokens=len(str(request.messages)) // 4,
-                completion_tokens=(len(full_content) + len(full_reasoning)) // 4,
-                total_tokens=(len(str(request.messages)) + len(full_content) + len(full_reasoning)) // 4,
-            ),
-        )
+        model = request.model or ctx.model_id or "kimi-k2.8"
+        return await collect_chat_completion(self.stream_chat(request, ctx), model, require_complete=True)
 
     async def stream_chat(
         self,
@@ -375,7 +334,7 @@ class KimiWebAdapter(BaseModuleAdapter):
             async with client.stream("POST", CHAT_URL, headers=headers, content=framed, timeout=ctx.timeout or 120.0) as resp:
                 if resp.status_code != 200:
                     err_text = await resp.aread()
-                    raise RuntimeError(f"Kimi Web error (HTTP {resp.status_code}): {err_text.decode('utf-8', errors='ignore')[:300]}")
+                    raise normalize_upstream_error(status_code=resp.status_code, response_body=(await resp.aread()).decode("utf-8", errors="replace"))
 
                 buffer = bytearray()
                 role_emitted = False
@@ -398,7 +357,12 @@ class KimiWebAdapter(BaseModuleAdapter):
                                 err = msg["error"]
                                 code = err.get("code", "unknown")
                                 m_text = err.get("message", "upstream error")
-                                raise RuntimeError(f"Kimi Connect EndStream error: {code}: {m_text}")
+                                raise normalize_upstream_error(status_code=502, response_body=f"Kimi Connect EndStream error: {code}: {m_text}")
+                            terminal = {"id": req_id, "object": "chat.completion.chunk", "created": created_ts,
+                                        "model": model_name, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+                            if msg and msg.get("usage"):
+                                terminal["usage"] = msg["usage"]
+                            yield f"data: {json.dumps(terminal)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
 
@@ -429,4 +393,4 @@ class KimiWebAdapter(BaseModuleAdapter):
                     if offset > 0:
                         buffer = buffer[offset:]
 
-                yield "data: [DONE]\n\n"
+                raise normalize_upstream_error(status_code=502, response_body="Kimi Connect stream ended without EndStream or with incomplete frame")

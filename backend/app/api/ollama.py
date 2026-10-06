@@ -7,6 +7,9 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.api.deps import get_router_key_dep
+from app.api.v1.router import list_models, retrieve_model
+from app.models.entities import RouterApiKey
 from app.models.entities import DiscoveredModel, RoutingProfile, RoutingCandidate, FusionProfile, Provider
 
 router = APIRouter(tags=["Ollama Compatibility API"])
@@ -21,19 +24,28 @@ async def ollama_version():
     return {"version": "0.5.4"}
 
 @router.post("/show")
-async def ollama_show(request: Request, db: AsyncSession = Depends(get_db)):
+async def ollama_show(request: Request, db: AsyncSession = Depends(get_db), router_key: Optional[RouterApiKey] = Depends(get_router_key_dep)):
     """
     Ollama-compatible /api/show endpoint for model inspection.
     Takes {"name": "model_name"} or {"model": "model_name"}.
     """
     try:
         body = await request.json()
-    except Exception:
-        body = {}
-
-    model_name = (body.get("name") or body.get("model") or "").strip()
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=422, content={"error": "JSON object required"})
+    model_name = body.get("name") or body.get("model") or ""
+    if not isinstance(model_name, str):
+        return JSONResponse(status_code=422, content={"error": "Model name must be a string"})
+    model_name = model_name.strip()
     if not model_name:
         return JSONResponse(status_code=400, content={"error": "model name is required"})
+
+    card = await retrieve_model(model_name, db, router_key)
+    if isinstance(card, JSONResponse):
+        return card
+    model_name = card.id
 
     # Check routing profile
     slug = model_name.removeprefix("route/")
@@ -121,91 +133,24 @@ async def ollama_show(request: Request, db: AsyncSession = Depends(get_db)):
             },
         }
 
-    # Fallback: check fusion profiles
-    f_slug = model_name.removeprefix("fusion/")
-    f_res = await db.execute(select(FusionProfile).where(FusionProfile.slug == f_slug, FusionProfile.enabled == True))
-    f_profile = f_res.scalar_one_or_none()
-    if f_profile:
-        return {
-            "license": "",
-            "modelfile": f"# Modelfile for fusion/{f_profile.slug}\nFROM fusion/{f_profile.slug}\n",
-            "parameters": "",
-            "template": "{{ .Prompt }}",
-            "system": "",
-            "details": {
-                "parent_model": "",
-                "format": "api",
-                "family": "fusion-profile",
-                "families": ["fusion-profile"],
-                "parameter_size": "unknown",
-                "quantization_level": "none",
-            },
-            "model_info": {
-                "general.architecture": "fusion",
-                "context_length": 131072,
-            },
-        }
+    if model_name.startswith(("fusion/", "judge/")):
+        kind = model_name.split("/", 1)[0]
+        return {"license": "", "modelfile": f"FROM {model_name}\n", "parameters": "", "template": "{{ .Prompt }}", "system": "",
+                "details": {"format": "api", "family": f"{kind}-profile", "families": [f"{kind}-profile"], "parameter_size": "unknown", "quantization_level": "none"},
+                "model_info": {"general.architecture": kind, "context_length": card.context_length or 131072}}
 
     return JSONResponse(status_code=404, content={"error": f"model '{model_name}' not found"})
 
 @router.get("/tags")
 @router.post("/tags")
-async def ollama_tags(db: AsyncSession = Depends(get_db)):
-    """
-    Ollama-compatible /api/tags endpoint listing available models.
-    """
-    query = select(DiscoveredModel).where(
-        DiscoveredModel.enabled == True,
-        DiscoveredModel.available == True,
-        DiscoveredModel.is_visible == True,
-        DiscoveredModel.provider.has(Provider.enabled == True),
-    )
-    res = await db.execute(query)
-    models = res.scalars().all()
-
-    now_iso = datetime.now(timezone.utc).isoformat()
-    ollama_models = []
-    seen = set()
-
-    for m in models:
-        name = m.canonical_slug
-        if name not in seen:
-            seen.add(name)
-            tag_name = name if ":" in name else f"{name}:latest"
-            ollama_models.append({
-                "name": tag_name,
-                "model": tag_name,
-                "modified_at": m.updated_at.isoformat() if m.updated_at else now_iso,
-                "size": 0,
-                "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                "details": {
-                    "parent_model": "",
-                    "format": "api",
-                    "family": _model_family(m),
-                    "families": [_model_family(m)],
-                    "parameter_size": "unknown",
-                    "quantization_level": "none",
-                },
-            })
-
-    # Add routes
-    r_res = await db.execute(select(RoutingProfile).where(RoutingProfile.enabled == True))
-    for r in r_res.scalars().all():
-        r_name = f"route/{r.slug}:latest"
-        ollama_models.append({
-            "name": r_name,
-            "model": r_name,
-            "modified_at": r.updated_at.isoformat() if r.updated_at else now_iso,
-            "size": 0,
-            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            "details": {
-                "parent_model": "",
-                "format": "api",
-                "family": "router-profile",
-                "families": ["router-profile"],
-                "parameter_size": "unknown",
-                "quantization_level": "none",
-            },
-        })
-
-    return {"models": ollama_models}
+async def ollama_tags(db: AsyncSession = Depends(get_db), router_key: Optional[RouterApiKey] = Depends(get_router_key_dep)):
+    cards = (await list_models(db, router_key)).data
+    models = []
+    for card in cards:
+        kind = card.id.split("/", 1)[0]
+        family = {"route": "router-profile", "fusion": "fusion-profile", "judge": "judge-profile"}.get(kind, kind)
+        name = card.id if ":" in card.id else card.id + ":latest"
+        models.append({"name": name, "model": name, "modified_at": datetime.now(timezone.utc).isoformat(), "size": 0,
+            "digest": "sha256:" + "0" * 64,
+            "details": {"parent_model": "", "format": "api", "family": family, "families": [family], "parameter_size": "unknown", "quantization_level": "none"}})
+    return {"models": models}

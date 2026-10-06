@@ -9,6 +9,7 @@ from app.schemas.entities import DiscoveredModelRead, DiscoveredModelUpdate, Mod
 from app.core.crypto import decrypt_secret
 from app.adapters.factory import get_adapter
 from app.services.proxy_service import ProxyService
+from app.services.credential_service import CredentialService
 from app.services.model_ratings_service import ModelRatingsService
 from app.services.model_limits_service import ModelLimitsService
 from app.core.errors import RouterException
@@ -65,7 +66,7 @@ class ModelDiscoveryService:
             base_url=provider.base_url,
             api_key=api_key,
             extra_headers=provider.extra_headers,
-            configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
+            configuration=CredentialService.module_runtime_configuration(provider, cred),
             proxy_url=proxy_url,
         )
 
@@ -272,6 +273,10 @@ class ModelDiscoveryService:
         if not provider:
             raise ValueError(f"Provider {provider_id} not found")
 
+        if credential_id is not None:
+            credential = await db.get(ProviderCredential, credential_id)
+            if credential is None or credential.provider_id != provider_id:
+                raise ValueError("Credential does not belong to the selected provider")
         canonical_slug = cls.compute_canonical_slug(provider.slug, provider_model_id)
         now = datetime.now(timezone.utc)
 
@@ -412,9 +417,9 @@ class ModelDiscoveryService:
             m.is_visible = data.is_visible
         if data.display_name is not None:
             m.display_name = data.display_name
-        if data.input_price_per_1m is not None:
+        if "input_price_per_1m" in data.model_fields_set:
             m.input_price_per_1m = data.input_price_per_1m
-        if data.output_price_per_1m is not None:
+        if "output_price_per_1m" in data.model_fields_set:
             m.output_price_per_1m = data.output_price_per_1m
         if "context_length" in data.model_fields_set:
             m.context_length = data.context_length if (data.context_length is not None and data.context_length > 0) else None

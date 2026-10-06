@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
 
 import httpx
+from app.core.errors import normalize_upstream_error, RouterException, ErrorCategory
 from app.modules.base import BaseModuleAdapter, ModuleExecutionContext
 from app.schemas.chat import (
     ChatCompletionRequest,
@@ -703,13 +704,14 @@ class NotionWebAdapter(BaseModuleAdapter):
         ]
 
         # Ignore leading assistant greeting (e.g. from Playground UI initial state)
-        first_user_idx = -1
-        for idx, m in enumerate(messages):
-            if (m.role or "").lower() == "user":
-                first_user_idx = idx
-                break
-
-        effective_messages = messages[first_user_idx:] if first_user_idx != -1 else messages
+        effective_messages = []
+        seen_user = False
+        for message in messages:
+            if message.role == "user":
+                seen_user = True
+            if message.role == "assistant" and not seen_user:
+                continue
+            effective_messages.append(message)
 
         for m in effective_messages:
             text = m.content if isinstance(m.content, str) else json.dumps(m.content)
@@ -795,7 +797,7 @@ class NotionWebAdapter(BaseModuleAdapter):
             headers = self._build_headers(cookie, space_id, user_id)
             resp = await client.post(NOTION_URL, headers=headers, json=build_req_payload(True), timeout=ctx.timeout or 120.0)
             if resp.status_code != 200:
-                raise RuntimeError(f"Notion AI error (HTTP {resp.status_code}): {resp.text[:300]}")
+                raise normalize_upstream_error(status_code=resp.status_code, response_body=resp.text)
 
             try:
                 final_text = extract_text_from_stream(resp.text, exclude_texts=known_assistant_texts)

@@ -9,6 +9,8 @@ from app.security.registry import GuardrailRegistry
 from app.schemas.entities import LoginRequest, TokenResponse, AdminUserRead
 from app.core.config import settings
 from typing import Optional
+import secrets
+from fastapi.responses import JSONResponse
 
 router = APIRouter(prefix="/auth", tags=["Admin Auth"])
 
@@ -63,7 +65,11 @@ async def oidc_login(request: Request, db: AsyncSession = Depends(get_db)):
     if "x-forwarded-proto" in request.headers and request.headers["x-forwarded-proto"] == "https":
         redirect_uri = redirect_uri.replace("http://", "https://")
 
-    auth_url = await OidcService.get_authorization_url(db, redirect_uri=redirect_uri)
+    browser_binding = secrets.token_urlsafe(32)
+    try:
+        auth_url = await OidcService.get_authorization_url(db, redirect_uri=redirect_uri, browser_binding=browser_binding)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Unable to initiate OIDC login")
     if not auth_url:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -71,9 +77,12 @@ async def oidc_login(request: Request, db: AsyncSession = Depends(get_db)):
         )
 
     if request.headers.get("accept") == "application/json":
-        return {"authorization_url": auth_url}
-
-    return RedirectResponse(url=auth_url, status_code=302)
+        result = JSONResponse({"authorization_url": auth_url})
+    else:
+        result = RedirectResponse(url=auth_url, status_code=302)
+    result.set_cookie("oidc_browser", browser_binding, httponly=True, samesite="lax",
+                      secure=settings.COOKIE_SECURE, max_age=OidcService.STATE_TTL)
+    return result
 
 
 @router.get("/oidc/callback")
@@ -82,9 +91,19 @@ async def oidc_callback(
     response: Response,
     code: Optional[str] = None,
     error: Optional[str] = None,
+    state: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
     """Handle callback from OIDC identity provider."""
+    redirect_uri = str(request.url_for("oidc_callback"))
+    if request.headers.get("x-forwarded-proto") == "https":
+        redirect_uri = redirect_uri.replace("http://", "https://")
+    try:
+        if len(request.query_params.getlist("state")) != 1:
+            raise ValueError("Exactly one OIDC state is required")
+        transaction = OidcService.consume_state(state, request.cookies.get("oidc_browser"), redirect_uri)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if error:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -96,25 +115,21 @@ async def oidc_callback(
             detail="Missing authorization code from identity provider",
         )
 
-    redirect_uri = str(request.url_for("oidc_callback"))
-    if "x-forwarded-proto" in request.headers and request.headers["x-forwarded-proto"] == "https":
-        redirect_uri = redirect_uri.replace("http://", "https://")
-
     try:
-        user_data = await OidcService.exchange_code(db, code=code, redirect_uri=redirect_uri)
+        user_data = await OidcService.exchange_code(db, code=code, redirect_uri=redirect_uri, transaction=transaction)
     except PermissionError as pe:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(pe))
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Authentication failed: {e}",
+            detail="OIDC authentication failed",
         )
 
     token = user_data["access_token"]
-    username = user_data["username"]
 
     # Redirect to home / dashboard with cookie set
     redirect_resp = RedirectResponse(url="/", status_code=302)
+    redirect_resp.delete_cookie("oidc_browser")
     redirect_resp.set_cookie(
         key="access_token",
         value=token,

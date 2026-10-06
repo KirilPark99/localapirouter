@@ -88,6 +88,7 @@ async def test_backup_export_and_import():
 
         # 5. Test importing with a new provider and new credential
         import_payload = {
+            "version": 1, "type": "myairouter_backup",
             "providers": [
                 {
                     "name": "Export Test Anthropic",

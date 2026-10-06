@@ -34,7 +34,7 @@
         "chat": true,
         "streaming": true,
         "vision": false,
-        "tools": true,
+        "tools": false,
         "reasoning": true
       }
     },
@@ -47,7 +47,7 @@
         "chat": true,
         "streaming": true,
         "vision": true,
-        "tools": true,
+        "tools": false,
         "reasoning": true
       }
     },
@@ -60,7 +60,7 @@
         "chat": true,
         "streaming": true,
         "vision": false,
-        "tools": true,
+        "tools": false,
         "reasoning": true
       }
     }

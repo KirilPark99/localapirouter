@@ -36,6 +36,7 @@ import {
   RoutingProfile,
 } from "../types";
 import { Modal } from "../components/Modal";
+import { ProfileContextWindow, contextPresetFor } from "../components/ProfileContextWindow";
 import { useI18n } from "../i18n/context";
 import { getHiddenModelIds, isModelVisible } from "../utils/models";
 
@@ -116,6 +117,7 @@ export const JudgeRoutingPage: React.FC = () => {
   const [formFallbackCandidateId, setFormFallbackCandidateId] = useState<number | undefined>(undefined);
   const [formFallbackStrongestOnOverflow, setFormFallbackStrongestOnOverflow] = useState(false);
   const [formContextLength, setFormContextLength] = useState<string>("");
+  const [formContextPreset, setFormContextPreset] = useState("auto");
 
   // Candidates list state in modal
   const [formCandidates, setFormCandidates] = useState<JudgeCandidate[]>([]);
@@ -340,6 +342,7 @@ export const JudgeRoutingPage: React.FC = () => {
     setFormFallbackCandidateId(undefined);
     setFormFallbackStrongestOnOverflow(false);
     setFormContextLength("");
+    setFormContextPreset("auto");
     setFormCandidates([]);
 
     setCandComplexityPreset("all");
@@ -414,6 +417,7 @@ export const JudgeRoutingPage: React.FC = () => {
     setFormFallbackCandidateId(p.fallback_candidate_id || undefined);
     setFormFallbackStrongestOnOverflow(Boolean(p.fallback_strongest_on_overflow));
     setFormContextLength(p.context_length ? String(p.context_length) : "");
+    setFormContextPreset(contextPresetFor(p.context_length));
     setFormCandidates([...p.candidates]);
 
     setCandComplexityPreset("all");
@@ -602,6 +606,10 @@ export const JudgeRoutingPage: React.FC = () => {
   };
 
   const handleSaveProfile = async () => {
+    if (formContextPreset === "custom" && (!Number.isInteger(Number(formContextLength)) || Number(formContextLength) <= 0)) {
+      alert("Размер контекстного окна должен быть положительным целым числом");
+      return;
+    }
     if (!formName.trim()) {
       alert("Пожалуйста, укажите название профиля");
       return;
@@ -658,7 +666,7 @@ export const JudgeRoutingPage: React.FC = () => {
       system_prompt: formSystemPrompt.trim() || null,
       fallback_candidate_id: formFallbackCandidateId || null,
       fallback_strongest_on_overflow: formFallbackStrongestOnOverflow,
-      context_length: formContextLength.trim() ? parseInt(formContextLength.trim(), 10) : null,
+      context_length: formContextPreset === "auto" ? null : Number(formContextPreset === "custom" ? formContextLength : formContextPreset),
       timeout_seconds: formTimeout,
       enabled: formEnabled,
       candidates: formCandidates.map((c, idx) => ({
@@ -1153,6 +1161,9 @@ export const JudgeRoutingPage: React.FC = () => {
             </div>
           </div>
 
+          <ProfileContextWindow preset={formContextPreset} customValue={formContextLength}
+            onPresetChange={setFormContextPreset} onCustomChange={setFormContextLength} />
+
           {/* Section: Judge Model Configuration */}
           <div className="p-4 bg-slate-950/60 border border-amber-500/20 rounded-2xl space-y-3">
             <h4 className="font-bold text-amber-400 text-xs flex items-center gap-2">
@@ -1363,27 +1374,7 @@ export const JudgeRoutingPage: React.FC = () => {
                 />
               </div>
 
-              {formFallbackStrongestOnOverflow && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pl-1">
-                  <div>
-                    <label className="block text-slate-400 font-medium mb-1 text-[11px]">
-                      Кастомный лимит контекста судьи (токенов, опционально)
-                    </label>
-                    <input
-                      type="number"
-                      min="100"
-                      step="100"
-                      value={formContextLength}
-                      onChange={(e) => setFormContextLength(e.target.value)}
-                      placeholder="Автоматически из модели (напр. 8192, 32768)"
-                      className="w-full bg-slate-900 border border-white/[0.09] rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-500 text-xs font-mono"
-                    />
-                    <span className="text-[10px] text-slate-500 mt-1 block">
-                      Оставьте пустым, чтобы брать лимит из спецификации модели судьи
-                    </span>
-                  </div>
-                </div>
-              )}
+
             </div>
 
             <div>

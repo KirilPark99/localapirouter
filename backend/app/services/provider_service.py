@@ -1,6 +1,7 @@
 from typing import List, Optional
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from app.models.entities import Provider, ProviderCredential, DiscoveredModel
 from app.schemas.entities import ProviderCreate, ProviderUpdate, ProviderRead
@@ -124,7 +125,13 @@ class ProviderService:
             notes=data.notes.strip() if data.notes else None,
         )
         db.add(provider)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            if await db.scalar(select(Provider.id).where(Provider.slug == data.slug)) is not None:
+                raise ValueError("Provider slug is already registered")
+            raise
         await db.refresh(provider)
 
         if provider.auth_type == "none":

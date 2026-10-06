@@ -21,7 +21,8 @@ from app.schemas.chat import (
     ChatCompletionRequest,
     ChatMessage,
 )
-from app.core.errors import RouterException, ErrorCategory
+from app.core.errors import RouterException, ErrorCategory, normalize_upstream_error
+from app.routing.engine import RoutingEngine
 from app.core.circuit_breaker import circuit_breaker
 from app.core.crypto import decrypt_secret
 from app.core.http_client import http_client_manager
@@ -62,18 +63,7 @@ class JevEngine:
 
     @classmethod
     def _check_permissions(cls, router_key: RouterApiKey, model_str: str):
-        has_all = "*" in router_key.permissions
-        if model_str.startswith("route/"):
-            if not has_all and "routes" not in router_key.permissions:
-                raise RouterException("This API key lacks permission to access routing profiles", ErrorCategory.AUTH_ERROR, status_code=403)
-            slug = model_str.removeprefix("route/")
-            if "*" not in router_key.allowed_routes and slug not in router_key.allowed_routes:
-                raise RouterException(f"Route '{slug}' is not in allowed routes for this API key", ErrorCategory.AUTH_ERROR, status_code=403)
-        else:
-            if not has_all and "direct" not in router_key.permissions:
-                raise RouterException("This API key lacks permission for direct model access", ErrorCategory.AUTH_ERROR, status_code=403)
-            if "*" not in router_key.allowed_models and model_str not in router_key.allowed_models:
-                raise RouterException(f"Model '{model_str}' is not in allowed models for this API key", ErrorCategory.AUTH_ERROR, status_code=403)
+        RoutingEngine._check_permissions(router_key, model_str)
 
     @classmethod
     async def _get_candidates_for_model(
@@ -91,7 +81,7 @@ class JevEngine:
             )
             .options(
                 selectinload(DiscoveredModel.provider),
-                selectinload(DiscoveredModel.credential),
+                selectinload(DiscoveredModel.credential).selectinload(ProviderCredential.proxy),
             )
         )
         result = await db.execute(query)
@@ -110,7 +100,7 @@ class JevEngine:
                 )
                 .options(
                     selectinload(DiscoveredModel.provider),
-                    selectinload(DiscoveredModel.credential),
+                    selectinload(DiscoveredModel.credential).selectinload(ProviderCredential.proxy),
                 )
             )
             res_fallback = await db.execute(query_fallback)
@@ -170,30 +160,10 @@ class JevEngine:
             cand_t0 = time.perf_counter()
 
             try:
-                # Check if native Jev upstream or emulation
                 is_native_jev = cls._is_native_jev_provider(provider, model_obj)
-
-                if is_native_jev:
-                    answers, usage = await cls._call_native_jev_upstream(
-                        provider=provider,
-                        api_key=api_key,
-                        model_id=model_obj.provider_model_id,
-                        request=request,
-                        proxy_url=proxy_url,
-                        timeout=60.0,
-                    )
-                else:
-                    answers, usage = await cls._emulate_jev_via_adapter(
-                        provider=provider,
-                        api_key=api_key,
-                        model_obj=model_obj,
-                        request=request,
-                        proxy_url=proxy_url,
-                        timeout=60.0,
-                    )
+                answers, usage = await cls._dispatch_decision(cred, provider, model_obj, request, proxy_url, 60.0)
 
                 cand_latency = round((time.perf_counter() - cand_t0) * 1000, 2)
-                circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
 
                 attempts_trace.append({
                     "attempt_number": attempt_idx,
@@ -255,7 +225,7 @@ class JevEngine:
                     else ErrorCategory.UPSTREAM_5XX
                 )
                 retry_after = getattr(e, "retry_after", None)
-                circuit_breaker.record_failure(cred.id, category=cat, retry_after=retry_after, error_message=str(e), model_id=model_obj.provider_model_id)
+
 
                 attempts_trace.append({
                     "attempt_number": attempt_idx,
@@ -277,15 +247,17 @@ class JevEngine:
                 requested_model=model_str,
                 mode="JEV",
                 latency_ms=total_latency,
-                status_code=502,
+                status_code=last_exception.status_code if isinstance(last_exception, RouterException) else 502,
                 status="FAILED",
-                error_category="UPSTREAM_5XX",
+                error_category=last_exception.category.value if isinstance(last_exception, RouterException) else "UPSTREAM_5XX",
                 error_message=str(last_exception) if last_exception else "All credentials failed",
                 router_key_id=router_key.id if router_key else None,
                 attempts=attempts_trace,
                 metadata_json={"strategy": "systemone", "attempts_count": len(attempts_trace)},
             )
 
+        if isinstance(last_exception, RouterException):
+            raise last_exception
         raise RouterException(
             f"Jev decision failed after {len(attempts_trace)} attempt(s). Last error: {last_exception}",
             ErrorCategory.UPSTREAM_5XX,
@@ -303,48 +275,32 @@ class JevEngine:
         t0: float,
         record_log: bool = True,
     ) -> JevResponse:
-        slug = model_str.removeprefix("route/")
-        p_res = await db.execute(
-            select(RoutingProfile)
-            .where(RoutingProfile.slug == slug, RoutingProfile.enabled == True)
-            .options(
-                selectinload(RoutingProfile.candidates).selectinload(RoutingCandidate.provider),
-                selectinload(RoutingProfile.candidates).selectinload(RoutingCandidate.model),
-            )
-        )
-        profile = p_res.scalar_one_or_none()
+        from app.services.routing_service import RoutingService
+        slug = model_str.removeprefix('route/')
+        profile = await RoutingService.get_profile_by_slug(db, model_str)
         if not profile:
             raise RouterException(f"Routing profile '{slug}' not found or disabled", ErrorCategory.INVALID_REQUEST, status_code=404)
 
-        active_cands = [c for c in profile.candidates if c.is_active and c.model and c.model.enabled]
+        active_cands = [c for c in profile.candidates if c.is_active and c.provider and c.provider.enabled
+                        and c.model and c.model.enabled and c.model.available]
         if not active_cands:
             raise RouterException(f"Routing profile '{slug}' has no active candidates", ErrorCategory.MODEL_NOT_FOUND, status_code=503)
 
-        if profile.randomize_candidates:
-            random.shuffle(active_cands)
-        else:
-            active_cands.sort(key=lambda c: c.priority_order)
+        active_cands = RoutingEngine._order_candidates(profile, active_cands, request)
 
         attempts_trace = []
         last_exception = None
 
         for attempt_idx, cand in enumerate(active_cands, start=1):
+            if isinstance(last_exception, RouterException) and (not last_exception.category.is_fallback_eligible or
+                    (profile.fallback_conditions is not None and last_exception.category.value not in profile.fallback_conditions)):
+                break
             model_obj = cand.model
             provider = cand.provider or model_obj.provider
-            c_query = (
-                select(ProviderCredential)
-                .where(ProviderCredential.provider_id == provider.id, ProviderCredential.enabled == True)
-                .options(selectinload(ProviderCredential.proxy))
-            )
-            c_res = await db.execute(c_query)
-            creds = c_res.scalars().all()
-            if not creds:
-                continue
-
+            creds = await RoutingEngine._candidate_credentials(db, provider, model_obj,
+                credential_id=cand.credential_id, credential_group=cand.credential_group)
             if profile.randomize_keys:
                 random.shuffle(creds)
-            else:
-                creds.sort(key=lambda cr: (cr.priority, -cr.consecutive_failures), reverse=True)
 
             for cred in creds:
                 if not circuit_breaker.is_available(cred.id, model_obj.provider_model_id)[0]:
@@ -356,27 +312,9 @@ class JevEngine:
 
                 try:
                     is_native_jev = cls._is_native_jev_provider(provider, model_obj)
-                    if is_native_jev:
-                        answers, usage = await cls._call_native_jev_upstream(
-                            provider=provider,
-                            api_key=api_key,
-                            model_id=model_obj.provider_model_id,
-                            request=request,
-                            proxy_url=proxy_url,
-                            timeout=profile.timeout_seconds or 60.0,
-                        )
-                    else:
-                        answers, usage = await cls._emulate_jev_via_adapter(
-                            provider=provider,
-                            api_key=api_key,
-                            model_obj=model_obj,
-                            request=request,
-                            proxy_url=proxy_url,
-                            timeout=profile.timeout_seconds or 60.0,
-                        )
+                    answers, usage = await cls._dispatch_decision(cred, provider, model_obj, request, proxy_url, profile.timeout_seconds, retry_count=profile.retry_count)
 
                     cand_latency = round((time.perf_counter() - cand_t0) * 1000, 2)
-                    circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
 
                     attempts_trace.append({
                         "attempt_number": len(attempts_trace) + 1,
@@ -438,7 +376,7 @@ class JevEngine:
                         else ErrorCategory.UPSTREAM_5XX
                     )
                     retry_after = getattr(e, "retry_after", None)
-                    circuit_breaker.record_failure(cred.id, category=cat, retry_after=retry_after, error_message=str(e), model_id=model_obj.provider_model_id)
+
                     attempts_trace.append({
                         "attempt_number": len(attempts_trace) + 1,
                         "provider_name": provider.name,
@@ -450,6 +388,9 @@ class JevEngine:
                         "latency_ms": cand_latency,
                     })
                     last_exception = e
+                    if isinstance(e, RouterException) and (not e.category.is_fallback_eligible or
+                            (profile.fallback_conditions is not None and e.category.value not in profile.fallback_conditions)):
+                        break
 
         total_latency = round((time.perf_counter() - t0) * 1000, 2)
         if record_log:
@@ -459,20 +400,87 @@ class JevEngine:
                 requested_model=model_str,
                 mode="JEV",
                 latency_ms=total_latency,
-                status_code=502,
+                status_code=last_exception.status_code if isinstance(last_exception, RouterException) else 502,
                 status="FAILED",
-                error_category="UPSTREAM_5XX",
+                error_category=last_exception.category.value if isinstance(last_exception, RouterException) else "UPSTREAM_5XX",
                 error_message=str(last_exception) if last_exception else "All profile candidates failed",
                 router_key_id=router_key.id if router_key else None,
                 attempts=attempts_trace,
                 metadata_json={"strategy": "profile_systemone", "profile_id": profile.id},
             )
 
+        if isinstance(last_exception, RouterException):
+            raise last_exception
         raise RouterException(
             f"Jev decision across profile '{slug}' failed. Last error: {last_exception}",
             ErrorCategory.UPSTREAM_5XX,
             status_code=502,
         )
+
+    @classmethod
+    async def _dispatch_decision(cls, cred, provider, model_obj, request, proxy_url, timeout, *, retry_count=0):
+        from app.core.admission import admission
+        from app.compression.tokenizer import estimate_tokens
+        if not isinstance(retry_count, int) or not 0 <= retry_count <= 10:
+            raise RouterException('retry_count must be between 0 and 10', ErrorCategory.INVALID_REQUEST)
+        if not cls._is_native_jev_provider(provider, model_obj):
+            return await cls._emulate_jev_via_adapter(provider=provider, api_key=decrypt_secret(cred.encrypted_api_key),
+                model_obj=model_obj, request=request, proxy_url=proxy_url, timeout=timeout, credential=cred, retry_count=retry_count)
+        prompt_tokens = estimate_tokens(json.dumps({'state': request.state, 'questions':request.questions}))
+        if cred.tpm_limit is not None and not model_obj.max_output_tokens:
+            raise RouterException('Native JEV needs a known output ceiling for finite TPM', ErrorCategory.RATE_LIMIT,
+                status_code=429, retry_after=60, raw_error={'local_admission': True})
+        for attempt in range(retry_count + 1):
+            if not RoutingEngine._eligible(provider, model_obj, cred):
+                raise RouterException('JEV credential unavailable', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
+            reservation = admission.reserve('credential', cred.id, rpm=cred.rpm_limit, tpm=cred.tpm_limit,
+                concurrency=cred.max_concurrency, tokens=prompt_tokens + (model_obj.max_output_tokens or 0))
+            try:
+                answers, usage = await cls._call_native_jev_upstream(provider, decrypt_secret(cred.encrypted_api_key),
+                    model_obj.provider_model_id, request, proxy_url, timeout)
+                reservation.finish(usage.get('input_tokens', 0) + usage.get('output_tokens', 0))
+                circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
+                return answers, usage
+            except Exception as exc:
+                error = exc if isinstance(exc, RouterException) else normalize_upstream_error(exception=exc)
+                circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
+                if attempt >= retry_count or not error.category.is_retryable or error.category == ErrorCategory.RATE_LIMIT:
+                    raise error
+            finally:
+                reservation.finish()
+
+    @classmethod
+    def _validate_answers(cls, answers, questions):
+        import math
+        if not isinstance(answers, dict) or set(answers) != set(questions):
+            raise RouterException('Invalid JEV answer object', ErrorCategory.UPSTREAM_5XX)
+        for key, question in cls._normalize_questions_for_upstream(questions).items():
+            answer = answers[key]
+            if not isinstance(answer, dict) or answer.get('type', question.get('type')) != question.get('type'):
+                raise RouterException('Invalid JEV answer shape', ErrorCategory.UPSTREAM_5XX)
+            kind = question.get('type')
+            if kind == 'choice' and answer.get('choice', answer.get('decision')) not in question.get('criteria', {}):
+                raise RouterException('Invalid JEV choice', ErrorCategory.UPSTREAM_5XX)
+            if kind == 'noul':
+                if any(field in answer and not isinstance(answer[field], bool) for field in ('answer', 'judgment')):
+                    raise RouterException('Invalid JEV boolean', ErrorCategory.UPSTREAM_5XX)
+                if not any(field in answer for field in ('answer', 'judgment', 'noul')):
+                    raise RouterException('Missing JEV boolean', ErrorCategory.UPSTREAM_5XX)
+            if kind == 'score':
+                score = answer.get('score')
+                levels = question.get('criteria', [])
+                valid_score = (not isinstance(score, bool) and isinstance(score, (int, float))
+                               and math.isfinite(score) and 1 <= score <= len(levels)) or (isinstance(score, str) and score in levels)
+                if not valid_score:
+                    raise RouterException('Invalid JEV score', ErrorCategory.UPSTREAM_5XX)
+            values = [answer[k] for k in ('probability','confidence','noul') if k in answer]
+            probabilities = answer.get('probabilities', {})
+            if not isinstance(probabilities, dict):
+                raise RouterException('Invalid JEV probabilities', ErrorCategory.UPSTREAM_5XX)
+            values.extend(probabilities.values())
+            if any(isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or not 0 <= v <= 1 for v in values):
+                raise RouterException('Invalid JEV probability', ErrorCategory.UPSTREAM_5XX)
+        return cls._normalize_answers(answers)
 
     @classmethod
     def _normalize_questions_for_upstream(cls, questions: Dict[str, Any]) -> Dict[str, Any]:
@@ -654,16 +662,26 @@ class JevEngine:
                 endpoint = alt_endpoint
 
         if resp.status_code != 200:
-            err_text = resp.text
-            raise RouterException(
-                f"Upstream Jev endpoint ({endpoint}) returned HTTP {resp.status_code}: {err_text}",
-                ErrorCategory.UPSTREAM_5XX,
-                status_code=resp.status_code,
-            )
-
-        data = resp.json()
-        raw_answers = data.get("answers", {})
-        answers = cls._normalize_answers(raw_answers)
+            from email.utils import parsedate_to_datetime
+            from datetime import datetime, timezone
+            retry_after = None
+            raw_retry = resp.headers.get('Retry-After')
+            if raw_retry:
+                try:
+                    retry_after = float(raw_retry)
+                except ValueError:
+                    try:
+                        retry_after = max(0.0, (parsedate_to_datetime(raw_retry) - datetime.now(timezone.utc)).total_seconds())
+                    except (ValueError, TypeError):
+                        pass
+            raise normalize_upstream_error(resp.status_code, resp.text, retry_after=retry_after)
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise RouterException('Invalid JEV JSON', ErrorCategory.UPSTREAM_5XX) from exc
+        if not isinstance(data, dict) or data.get('error'):
+            raise RouterException('Invalid JEV response', ErrorCategory.UPSTREAM_5XX)
+        answers = cls._validate_answers(data.get('answers'), request.questions)
         raw_usage = data.get("usage", {})
         in_tok = raw_usage.get("input_tokens", raw_usage.get("prompt_tokens", 0)) if isinstance(raw_usage, dict) else 0
         out_tok = raw_usage.get("output_tokens", raw_usage.get("completion_tokens", 0)) if isinstance(raw_usage, dict) else 0
@@ -679,6 +697,8 @@ class JevEngine:
         request: JevRequest,
         proxy_url: Optional[str] = None,
         timeout: float = 60.0,
+        credential: Optional[ProviderCredential] = None,
+        retry_count: int = 0,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Emulates Jev System One decisions on top of any standard LLM (OpenAI, Gemini, Anthropic, Ollama, Groq).
@@ -724,16 +744,15 @@ class JevEngine:
             response_format={"type": "json_object"} if getattr(model_obj, "capabilities", {}).get("structured_output") else None,
         )
 
-        resp = await adapter.chat_completions(
-            base_url=provider.base_url,
-            api_key=api_key,
-            model_id=model_obj.provider_model_id,
-            request=chat_req,
-            extra_headers=provider.extra_headers,
-            configuration=provider.adapter_configuration,
-            proxy_url=proxy_url,
-            timeout=timeout,
-        )
+        dispatch_kwargs = dict(
+            base_url=provider.base_url, api_key=api_key, model_id=model_obj.provider_model_id,
+            request=chat_req, extra_headers=provider.extra_headers, configuration=provider.adapter_configuration,
+            proxy_url=proxy_url, timeout=timeout)
+        if credential is not None:
+            resp = await RoutingEngine._dispatch_chat(adapter, credential, provider, model_obj,
+                retry_count=retry_count, **dispatch_kwargs)
+        else:
+            resp = await adapter.chat_completions(**dispatch_kwargs)
 
         content = ""
         if resp.choices and resp.choices[0].message:
@@ -751,37 +770,13 @@ class JevEngine:
                 if lines and lines[-1].startswith("```"):
                     lines = lines[:-1]
                 clean_str = "\n".join(lines).strip()
-            
+
             parsed = json.loads(clean_str)
-            if isinstance(parsed, dict):
-                if "answers" in parsed and isinstance(parsed["answers"], dict):
-                    answers = parsed["answers"]
-                else:
-                    answers = parsed
-        except Exception:
-            # Fallback simple answers synthesis if model failed strict JSON
-            for q_name, q_spec in request.questions.items():
-                if isinstance(q_spec, dict):
-                    if "choice" in q_spec and isinstance(q_spec["choice"], dict):
-                        crit = q_spec["choice"].get("criteria", {})
-                        first_k = next(iter(crit.keys()), "unknown")
-                        answers[q_name] = {"type": "choice", "choice": first_k, "probabilities": {first_k: 1.0}, "confidence": 0.9}
-                    elif "score" in q_spec and isinstance(q_spec["score"], dict):
-                        rubric = q_spec["score"].get("rubric", ["Level 1"])
-                        first_lvl = rubric[0] if rubric else "Level 1"
-                        answers[q_name] = {"type": "score", "score": 1, "probabilities": {first_lvl: 1.0}, "confidence": 0.9}
-                    elif "noul" in q_spec:
-                        answers[q_name] = {"type": "noul", "answer": True, "probability": 0.85}
-                    elif q_spec.get("type") == "choice":
-                        crit = q_spec.get("criteria", {})
-                        first_k = next(iter(crit.keys()), "unknown")
-                        answers[q_name] = {"type": "choice", "choice": first_k, "probabilities": {first_k: 1.0}, "confidence": 0.9}
-                    elif q_spec.get("type") == "score":
-                        answers[q_name] = {"type": "score", "score": 1, "probabilities": {"1": 1.0}, "confidence": 0.9}
-                    else:
-                        answers[q_name] = {"type": "noul", "answer": True, "probability": 0.85}
-                else:
-                    answers[q_name] = {"type": "noul", "answer": True, "probability": 0.85}
+            if not isinstance(parsed, dict) or parsed.get('error'):
+                raise ValueError('Invalid JEV response object')
+            answers = cls._validate_answers(parsed.get('answers'), request.questions)
+        except (ValueError, TypeError) as exc:
+            raise RouterException('Invalid JEV decision JSON', ErrorCategory.UPSTREAM_5XX) from exc
 
         usage_dict = {
             "input_tokens": resp.usage.prompt_tokens if resp.usage else 0,

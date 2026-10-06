@@ -19,6 +19,19 @@ _live_limits_cache: Dict[int, ModelLimitsRead] = {}
 _credential_rates_cache: Dict[int, Dict[str, Any]] = {}
 
 class ModelLimitsService:
+    @staticmethod
+    def _with_overrides(limits, cred):
+        result = limits.model_copy(deep=True)
+        if cred is not None:
+            for field, value in _credential_rates_cache.get(cred.id, {}).items():
+                if field in ModelLimitsRead.model_fields:
+                    setattr(result, field, value)
+            if cred.rpm_limit is not None:
+                result.rate_limit_rpm = cred.rpm_limit
+            if cred.tpm_limit is not None:
+                result.rate_limit_tpm = cred.tpm_limit
+        return result
+
     @classmethod
     def compute_model_limits_fast(
         cls,
@@ -31,7 +44,7 @@ class ModelLimitsService:
         """
         # If live probe data was already retrieved for this exact model, return it
         if model.id in _live_limits_cache:
-            return _live_limits_cache[model.id]
+            return cls._with_overrides(_live_limits_cache[model.id], cred)
 
         p_slug = (model.provider.slug if model.provider else "").lower().strip()
 
@@ -53,9 +66,9 @@ class ModelLimitsService:
         is_free_tier: Optional[bool] = cred_rates.get("is_free_tier")
 
         # User's explicit credential limit in database takes precedence if set
-        if cred and cred.rpm_limit:
+        if cred and cred.rpm_limit is not None:
             rpm = cred.rpm_limit
-        if cred and cred.tpm_limit:
+        if cred and cred.tpm_limit is not None:
             tpm = cred.tpm_limit
 
         # If the API returned NO context length, NO max output tokens, and NO rate limits,
@@ -248,7 +261,7 @@ class ModelLimitsService:
             await cls.probe_credential_rate_limits(provider, cred)
 
         # Base limits from fast calculation (strictly API data)
-        limits = cls.compute_model_limits_fast(model, cred) or ModelLimitsRead(
+        limits = cls.compute_model_limits_fast(model, None) or ModelLimitsRead(
             model_id=model.id,
             provider_model_id=model.provider_model_id,
             canonical_slug=model.canonical_slug,
@@ -261,7 +274,7 @@ class ModelLimitsService:
 
         if not api_key or api_key in ("no-key", "none", "empty"):
             _live_limits_cache[model.id] = limits
-            return limits
+            return cls._with_overrides(limits, cred)
 
         p_slug = provider.slug.lower()
         adapter_type = provider.adapter_type.lower()
@@ -424,4 +437,4 @@ class ModelLimitsService:
             except Exception as e:
                 logger.error(f"Failed to update model context/output limits in DB: {e}")
 
-        return limits
+        return cls._with_overrides(limits, cred)

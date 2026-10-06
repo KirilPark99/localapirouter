@@ -77,6 +77,7 @@ async def test_protocol_stream_wrappers_translate_text():
     async def source():
         yield 'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n'
         yield 'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
         yield "data: [DONE]\n\n"
 
     responses_stream = "".join([chunk async for chunk in _responses_event_stream(source(), "demo", "resp_test")])
@@ -155,6 +156,8 @@ async def test_fusion_permission_and_reference_validation():
                     judge_provider_id=provider_a.id,
                     judge_credential_id=credential.id,
                     judge_model_id=model_b.id,
+                    min_successful_candidates=1,
+                    participants=[{"participant_type":"model","provider_id":provider_b.id,"model_id":model_b.id}],
                 ),
             )
 
@@ -245,6 +248,7 @@ async def test_protocol_endpoints_accept_native_payloads():
 
     async def source():
         yield 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
         yield "data: [DONE]\n\n"
 
     with patch.object(RoutingEngine, "route_stream_chat", return_value=source()):
@@ -464,7 +468,7 @@ async def test_routing_profile_custom_context_length_and_ollama_show():
 
         # Test Ollama /api/show returns custom context_length
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization":"Bearer " + __import__("app.services.auth_service",fromlist=["AuthService"]).AuthService.create_access_token("admin")}) as client:
             resp = await client.post("/api/show", json={"name": f"route/{p_read.slug}"})
             assert resp.status_code == 200
             data = resp.json()

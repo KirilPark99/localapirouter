@@ -11,6 +11,24 @@ from app.schemas.entities import (
 )
 
 class RoutingService:
+    @staticmethod
+    async def _validate_candidates(db, candidates, profile_id=None):
+        from fastapi import HTTPException
+        from app.services.judge_service import JudgeService
+        for candidate in candidates:
+            try:
+                if candidate.target_profile_id is not None:
+                    candidate = candidate.model_copy(update={'candidate_type': 'profile'})
+                if candidate.candidate_type == 'profile' and candidate.target_profile_id == profile_id:
+                    raise ValueError('A profile cannot contain itself')
+                if candidate.candidate_type == 'model' and candidate.provider_id is None and candidate.model_id:
+                    model = await db.get(DiscoveredModel, candidate.model_id)
+                    if model:
+                        candidate = candidate.model_copy(update={'provider_id': model.provider_id})
+                await JudgeService._validate_candidate_ref(db, candidate)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @classmethod
     async def list_profiles(cls, db: AsyncSession) -> List[RoutingProfileRead]:
         query = select(RoutingProfile).options(
@@ -50,6 +68,7 @@ class RoutingService:
 
     @classmethod
     async def create_profile(cls, db: AsyncSession, data: RoutingProfileCreate) -> RoutingProfileRead:
+        await cls._validate_candidates(db, data.candidates)
         clean_slug = data.slug.removeprefix("route/").strip()
         profile = RoutingProfile(
             name=data.name,
@@ -85,7 +104,7 @@ class RoutingService:
                     model_id=None,
                     thinking_effort=c.thinking_effort,
                     temperature=c.temperature,
-                    priority_order=idx if c.priority_order == 0 else c.priority_order,
+                    priority_order=idx if "priority_order" not in c.model_fields_set else c.priority_order,
                     is_active=c.is_active,
                 )
             else:
@@ -104,7 +123,7 @@ class RoutingService:
                     model_id=c.model_id,
                     thinking_effort=c.thinking_effort,
                     temperature=c.temperature,
-                    priority_order=idx if c.priority_order == 0 else c.priority_order,
+                    priority_order=idx if "priority_order" not in c.model_fields_set else c.priority_order,
                     is_active=c.is_active,
                 )
             db.add(cand)
@@ -118,6 +137,9 @@ class RoutingService:
         p = result.scalar_one_or_none()
         if not p:
             return None
+
+        if data.candidates is not None:
+            await cls._validate_candidates(db, data.candidates, profile_id)
 
         if data.name is not None:
             p.name = data.name
@@ -165,7 +187,7 @@ class RoutingService:
                         model_id=None,
                         thinking_effort=c.thinking_effort,
                         temperature=c.temperature,
-                        priority_order=idx,
+                        priority_order=idx if "priority_order" not in c.model_fields_set else c.priority_order,
                         is_active=c.is_active,
                     )
                 else:
@@ -184,7 +206,7 @@ class RoutingService:
                         model_id=c.model_id,
                         thinking_effort=c.thinking_effort,
                         temperature=c.temperature,
-                        priority_order=idx,
+                        priority_order=idx if "priority_order" not in c.model_fields_set else c.priority_order,
                         is_active=c.is_active,
                     )
                 db.add(cand)

@@ -34,6 +34,7 @@ async def events(chunks):
     async def source():
         for data in chunks:
             yield f"data: {json.dumps(data)}\n\n"
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n'
         yield "data: [DONE]\n\n"
     return [json.loads(chunk.split("data: ", 1)[1]) async for chunk in
             _responses_event_stream(source(), "demo", "resp_test")]

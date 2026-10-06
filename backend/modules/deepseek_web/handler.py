@@ -25,9 +25,10 @@ import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
+from app.core.errors import normalize_upstream_error, RouterException, ErrorCategory
 
 from app.adapters.base import DiscoveredModelData
-from app.modules.base import BaseModuleAdapter, ModuleExecutionContext
+from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_chat_completion
 from app.schemas.chat import (
     ChatCompletionChoice,
     ChatCompletionChunk,
@@ -102,9 +103,8 @@ def extract_user_token(credentials: Dict[str, Any]) -> str:
 
 
 def clean_deepseek_token(text: str) -> str:
-    cleaned = text.replace("FINISHED", "")
-    cleaned = re.sub(r"^(SEARCH|WEB_SEARCH|SEARCHING)\s*", "", cleaned, flags=re.IGNORECASE)
-    return cleaned
+    # Control paths are filtered before content; ordinary text is opaque.
+    return text
 
 
 def process_deepseek_sse_data(
@@ -117,8 +117,12 @@ def process_deepseek_sse_data(
     Returns:
         (updated_path: str, chunks: List[Tuple[target_path ("thinking"|"content"), text]], new_search_results: List)
     """
+    if data.get("error"):
+        raise normalize_upstream_error(status_code=502, response_body=data)
     p = data.get("p")
     v = data.get("v")
+    if isinstance(p, str) and (p.endswith("/status") or p == "status"):
+        return current_path, [], []
     chunks: List[Tuple[str, str]] = []
     search_results: List[Dict[str, Any]] = []
 
@@ -284,7 +288,7 @@ def serialize_tools_prompt(tools: List[Dict[str, Any]], nonce: str) -> str:
     )
 
 
-def parse_tool_calls_from_text(text: str, nonce: str) -> Tuple[str, List[ToolCall]]:
+def parse_tool_calls_from_text(text: str, nonce: str, allowed_names: Optional[set[str]] = None) -> Tuple[str, List[ToolCall]]:
     """Parse <tool>{...}</tool> blocks from generated text into ToolCall objects."""
     tool_calls: List[ToolCall] = []
     pattern = re.compile(r"<tool>(.*?)</tool>", re.DOTALL)
@@ -296,7 +300,11 @@ def parse_tool_calls_from_text(text: str, nonce: str) -> Tuple[str, List[ToolCal
             if isinstance(parsed, dict) and parsed.get("_nonce") == nonce:
                 name = parsed.get("name", "")
                 args = parsed.get("arguments", {})
-                args_str = json.dumps(args) if isinstance(args, dict) else str(args)
+                if not isinstance(name, str) or not name.strip() or not isinstance(args, dict):
+                    return match.group(0)
+                if allowed_names is not None and name not in allowed_names:
+                    return match.group(0)
+                args_str = json.dumps(args)
                 tool_calls.append(
                     ToolCall(
                         id=f"call_{uuid.uuid4().hex[:12]}",
@@ -331,10 +339,13 @@ def build_prompt_from_messages(
         text = extract_message_text(m.content).strip()
         role = m.role
 
-        if role == "system":
+        if role in ("system", "developer"):
             if text:
                 system_parts.append(text)
         elif role in ("user", "assistant"):
+            if m.tool_calls:
+                calls = [tc.model_dump(exclude_none=True) for tc in m.tool_calls]
+                text = (text + "\n" if text else "") + json.dumps(calls, separators=(",", ":"))
             if text:
                 conversation.append((role, text))
             if role == "user":
@@ -346,7 +357,7 @@ def build_prompt_from_messages(
         elif role == "tool":
             if text:
                 name = call_name_by_id.get(m.tool_call_id or "", m.name or "tool")
-                conversation.append(("tool", f"({name}) {text}"))
+                conversation.append(("tool", f"(call_id={m.tool_call_id}, name={name}) {text}"))
 
     parts: List[str] = []
     if system_parts:
@@ -404,9 +415,9 @@ class DeepSeekWebModule(BaseModuleAdapter):
         resp = await client.get(f"{DEEPSEEK_API_BASE}/v0/users/current", headers=headers)
         if resp.status_code in (401, 403):
             self._token_cache.pop(user_token, None)
-            raise ValueError("DeepSeek userToken invalid or expired. Please extract fresh userToken from localStorage.")
+            raise normalize_upstream_error(status_code=resp.status_code, response_body="DeepSeek userToken invalid or expired")
         if resp.status_code != 200:
-            raise RuntimeError(f"users/current HTTP {resp.status_code}: {resp.text}")
+            raise normalize_upstream_error(status_code=resp.status_code, response_body=resp.text)
 
         data = resp.json()
         code = data.get("code")
@@ -439,7 +450,7 @@ class DeepSeekWebModule(BaseModuleAdapter):
         }
         resp = await client.post(f"{DEEPSEEK_API_BASE}/v0/chat_session/create", headers=headers, json={})
         if resp.status_code != 200:
-            raise RuntimeError(f"chat_session/create HTTP {resp.status_code}: {resp.text}")
+            raise normalize_upstream_error(status_code=resp.status_code, response_body=resp.text)
 
         data = resp.json()
         biz_data = data.get("data", {}).get("biz_data") or data.get("biz_data") or {}
@@ -486,7 +497,7 @@ class DeepSeekWebModule(BaseModuleAdapter):
             json={"target_path": "/api/v0/chat/completion"},
         )
         if resp.status_code != 200:
-            raise RuntimeError(f"create_pow_challenge HTTP {resp.status_code}: {resp.text}")
+            raise normalize_upstream_error(status_code=resp.status_code, response_body=resp.text)
 
         data = resp.json()
         biz_data = data.get("data", {}).get("biz_data") or data.get("biz_data") or {}
@@ -555,13 +566,9 @@ class DeepSeekWebModule(BaseModuleAdapter):
         m = (model_id or request.model or "").lower()
         model_type = "expert" if ("pro" in m or "expert" in m) else "default"
 
-        thinking_enabled = (
-            "r1" in m
-            or "think" in m
-            or "reason" in m
-            or getattr(request, "reasoning_effort", None) is not None
-            or (request.thinking is not None and request.thinking.get("type") != "disabled")
-            or request.reasoning is not None
+        effort = request.get_effective_reasoning_effort()
+        thinking_enabled = effort.lower() not in ("none", "off", "disabled") if effort is not None else (
+            "r1" in m or "think" in m or "reason" in m
         )
 
         search_enabled = "search" in m
@@ -613,133 +620,8 @@ class DeepSeekWebModule(BaseModuleAdapter):
         request: ChatCompletionRequest,
         ctx: ModuleExecutionContext,
     ) -> ChatCompletionResponse:
-        """Handle non-streaming chat completion request by consuming the upstream SSE stream."""
-        user_token = extract_user_token(ctx.credentials)
-        if not user_token:
-            raise ValueError("user_token credential is required")
-
-        persist_session = str(ctx.credentials.get("persist_session", "false")).lower() in ("true", "1", "yes")
-        try:
-            history_window = int(ctx.credentials.get("history_window", 20))
-        except (ValueError, TypeError):
-            history_window = 20
-
-        model_id = ctx.model_id or request.model
-        model_type, thinking_enabled, search_enabled = self._resolve_model_options(model_id, request)
-
-        # Handle tools serialization
-        nonce = uuid.uuid4().hex[:8]
-        tool_prompt = serialize_tools_prompt(request.tools, nonce) if request.tools else ""
-        prompt = build_prompt_from_messages(request.messages, history_window, tool_prompt)
-
-        async with self.create_http_client(ctx, timeout=120.0) as client:
-            access_token = await self._acquire_access_token(client, user_token)
-
-            # Session handling
-            session_id = None
-            if persist_session and user_token in self._session_cache:
-                session_id = self._session_cache[user_token]
-            else:
-                session_id = await self._create_session(client, access_token)
-                if persist_session:
-                    self._session_cache[user_token] = session_id
-
-            try:
-                resp = await self._send_completion_request(
-                    client, access_token, session_id, model_type, thinking_enabled, search_enabled, prompt
-                )
-
-                # Retry once if session expired or failed with persistent session
-                if resp.status_code != 200 and persist_session:
-                    logger.warning("Reused session failed, creating fresh session and retrying...")
-                    await resp.aclose()
-                    self._session_cache.pop(user_token, None)
-                    session_id = await self._create_session(client, access_token)
-                    self._session_cache[user_token] = session_id
-                    resp = await self._send_completion_request(
-                        client, access_token, session_id, model_type, thinking_enabled, search_enabled, prompt
-                    )
-
-                if resp.status_code != 200:
-                    body_text = await resp.aread()
-                    await resp.aclose()
-                    raise RuntimeError(f"DeepSeek upstream error HTTP {resp.status_code}: {body_text.decode('utf-8', errors='ignore')}")
-
-                # Collect SSE stream
-                content_accum: List[str] = []
-                reasoning_accum: List[str] = []
-                search_results: List[Dict[str, Any]] = []
-
-                current_path = ""
-                thinking_model = is_thinking_model(model_id)
-
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    if line.startswith("data:"):
-                        payload = line[5:].strip()
-                        if payload == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(payload)
-                        except Exception:
-                            continue
-
-                        current_path, chunks, s_results = process_deepseek_sse_data(
-                            data, current_path, thinking_model
-                        )
-                        for target, text in chunks:
-                            if target == "thinking":
-                                reasoning_accum.append(text)
-                            else:
-                                content_accum.append(text)
-                        if s_results:
-                            search_results.extend(s_results)
-
-                await resp.aclose()
-
-                raw_content = "".join(content_accum)
-                reasoning_content = "".join(reasoning_accum) or None
-
-                # Append citations if any
-                citations = append_search_citations(search_results, model_id)
-                if citations:
-                    raw_content = f"{raw_content}\n\n{citations}" if raw_content else citations
-
-                # Parse tool calls if tools were requested
-                tool_calls: Optional[List[ToolCall]] = None
-                finish_reason = "stop"
-                if request.tools:
-                    raw_content, parsed_tools = parse_tool_calls_from_text(raw_content, nonce)
-                    if parsed_tools:
-                        tool_calls = parsed_tools
-                        finish_reason = "tool_calls"
-
-                choice = ChatCompletionChoice(
-                    index=0,
-                    message=ChatMessage(
-                        role="assistant",
-                        content=raw_content or ("" if tool_calls else None),
-                        reasoning_content=reasoning_content,
-                        tool_calls=tool_calls,
-                    ),
-                    finish_reason=finish_reason,
-                )
-
-                return ChatCompletionResponse(
-                    id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                    model=model_id,
-                    created=int(time.time()),
-                    choices=[choice],
-                    usage=UsageInfo(
-                        prompt_tokens=len(prompt) // 4,
-                        completion_tokens=(len(raw_content) + len(reasoning_content or "")) // 4,
-                        total_tokens=(len(prompt) + len(raw_content) + len(reasoning_content or "")) // 4,
-                    ),
-                )
-            finally:
-                if not persist_session and session_id:
-                    await self._delete_session(client, access_token, session_id)
+        return await collect_chat_completion(self.stream_chat(request, ctx), ctx.model_id or request.model,
+                                             require_complete=True)
 
     async def stream_chat(
         self,
@@ -749,18 +631,7 @@ class DeepSeekWebModule(BaseModuleAdapter):
         """Handle streaming chat completion request yielding OpenAI SSE chunks."""
         user_token = extract_user_token(ctx.credentials)
         if not user_token:
-            err_chunk = ChatCompletionChunk(
-                model=request.model,
-                choices=[
-                    ChatCompletionChunkChoice(
-                        index=0,
-                        delta=ChatCompletionChunkDelta(content="Error: user_token is required"),
-                        finish_reason="stop",
-                    )
-                ],
-            )
-            yield f"data: {err_chunk.model_dump_json()}\n\ndata: [DONE]\n\n"
-            return
+            raise normalize_upstream_error(status_code=401, response_body="user_token is required")
 
         persist_session = str(ctx.credentials.get("persist_session", "false")).lower() in ("true", "1", "yes")
         try:
@@ -771,12 +642,24 @@ class DeepSeekWebModule(BaseModuleAdapter):
         model_id = ctx.model_id or request.model
         model_type, thinking_enabled, search_enabled = self._resolve_model_options(model_id, request)
 
-        # Build prompt
-        prompt = build_prompt_from_messages(request.messages, history_window)
+        nonce = uuid.uuid4().hex[:8]
+        tools = request.tools or []
+        allowed_names = set()
+        for tool in tools:
+            function = tool.get("function") or {}
+            name = function.get("name")
+            if tool.get("type") != "function" or not isinstance(name, str) or not name.strip():
+                raise RouterException("DeepSeek requires named function tools", ErrorCategory.INVALID_REQUEST, status_code=422)
+            allowed_names.add(name)
+        tool_prompt = serialize_tools_prompt(tools, nonce) if tools else ""
+        prompt = build_prompt_from_messages(request.messages, history_window, tool_prompt)
+        tool_text = []
+        tool_size = 0
 
         client = self.create_http_client(ctx, timeout=120.0)
         session_id = None
         access_token = None
+        resp = None
 
         try:
             await client.__aenter__()
@@ -793,8 +676,12 @@ class DeepSeekWebModule(BaseModuleAdapter):
                 client, access_token, session_id, model_type, thinking_enabled, search_enabled, prompt
             )
 
-            # Retry once with fresh session if reused session failed
-            if resp.status_code != 200 and persist_session:
+            # Only a session-expiry response can justify creating a new session.
+            session_expired = False
+            if persist_session and resp.status_code in (400, 404, 410):
+                body = (await resp.aread()).decode("utf-8", errors="replace").lower()
+                session_expired = "session" in body and any(word in body for word in ("expired", "not found", "invalid"))
+            if session_expired:
                 await resp.aclose()
                 self._session_cache.pop(user_token, None)
                 session_id = await self._create_session(client, access_token)
@@ -806,20 +693,8 @@ class DeepSeekWebModule(BaseModuleAdapter):
             if resp.status_code != 200:
                 body_text = await resp.aread()
                 await resp.aclose()
-                err_chunk = ChatCompletionChunk(
-                    model=model_id,
-                    choices=[
-                        ChatCompletionChunkChoice(
-                            index=0,
-                            delta=ChatCompletionChunkDelta(
-                                content=f"DeepSeek upstream error HTTP {resp.status_code}: {body_text.decode('utf-8', errors='ignore')}"
-                            ),
-                            finish_reason="stop",
-                        )
-                    ],
-                )
-                yield f"data: {err_chunk.model_dump_json()}\n\ndata: [DONE]\n\n"
-                return
+                raise normalize_upstream_error(status_code=resp.status_code,
+                                               response_body=body_text.decode("utf-8", errors="replace"))
 
             completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
             created_ts = int(time.time())
@@ -843,18 +718,26 @@ class DeepSeekWebModule(BaseModuleAdapter):
             thinking_model = is_thinking_model(model_id)
             search_results: List[Dict[str, Any]] = []
 
+            terminal = False
+            usage = None
             async for line in resp.aiter_lines():
                 if not line:
                     continue
                 if line.startswith("data:"):
                     payload = line[5:].strip()
                     if payload == "[DONE]":
+                        terminal = True
                         break
                     try:
                         data = json.loads(payload)
                     except Exception:
                         continue
 
+                    if data.get("usage"):
+                        usage = UsageInfo.model_validate(data["usage"])
+                    if data.get("v") == "FINISHED" and data.get("p") in ("response/status", "status"):
+                        terminal = True
+                        break
                     current_path, chunks, s_results = process_deepseek_sse_data(
                         data, current_path, thinking_model
                     )
@@ -877,6 +760,12 @@ class DeepSeekWebModule(BaseModuleAdapter):
                             )
                             yield f"data: {c.model_dump_json()}\n\n"
                         else:
+                            if tools:
+                                tool_text.append(text)
+                                tool_size += len(text.encode("utf-8"))
+                                if tool_size > 8 * 1024 * 1024:
+                                    raise normalize_upstream_error(status_code=502, response_body="DeepSeek tool response exceeds assembly limit")
+                                continue
                             c = ChatCompletionChunk(
                                 id=completion_id,
                                 created=created_ts,
@@ -891,7 +780,21 @@ class DeepSeekWebModule(BaseModuleAdapter):
                             )
                             yield f"data: {c.model_dump_json()}\n\n"
 
+            if not terminal:
+                raise normalize_upstream_error(status_code=502, response_body="DeepSeek stream ended before terminal event")
             await resp.aclose()
+            parsed_tools = []
+            if tools:
+                content, parsed_tools = parse_tool_calls_from_text("".join(tool_text), nonce, allowed_names)
+                delta = {}
+                if content:
+                    delta["content"] = content
+                if parsed_tools:
+                    delta["tool_calls"] = [{"index": i, **call.model_dump()} for i, call in enumerate(parsed_tools)]
+                if delta:
+                    c = ChatCompletionChunk(id=completion_id, created=created_ts, model=model_id,
+                        choices=[ChatCompletionChunkChoice(index=0, delta=ChatCompletionChunkDelta(**delta))])
+                    yield f"data: {c.model_dump_json()}\n\n"
 
             # Append citations at the end if web search was enabled
             citations = append_search_citations(search_results, model_id)
@@ -912,6 +815,7 @@ class DeepSeekWebModule(BaseModuleAdapter):
 
             # Final finish stop chunk
             stop_chunk = ChatCompletionChunk(
+                usage=usage,
                 id=completion_id,
                 created=created_ts,
                 model=model_id,
@@ -919,28 +823,21 @@ class DeepSeekWebModule(BaseModuleAdapter):
                     ChatCompletionChunkChoice(
                         index=0,
                         delta=ChatCompletionChunkDelta(),
-                        finish_reason="stop",
+                        finish_reason="tool_calls" if parsed_tools else "stop",
                     )
                 ],
             )
             yield f"data: {stop_chunk.model_dump_json()}\n\n"
             yield "data: [DONE]\n\n"
 
+        except RouterException:
+            raise
         except Exception as e:
-            logger.error(f"Error in DeepSeek Web stream: {e}", exc_info=True)
-            err_chunk = ChatCompletionChunk(
-                model=model_id,
-                choices=[
-                    ChatCompletionChunkChoice(
-                        index=0,
-                        delta=ChatCompletionChunkDelta(content=f"\n[Error: {str(e)}]"),
-                        finish_reason="stop",
-                    )
-                ],
-            )
-            yield f"data: {err_chunk.model_dump_json()}\n\ndata: [DONE]\n\n"
+            raise normalize_upstream_error(exception=e)
 
         finally:
+            if resp is not None:
+                await resp.aclose()
             if not persist_session and session_id and access_token:
                 try:
                     await self._delete_session(client, access_token, session_id)

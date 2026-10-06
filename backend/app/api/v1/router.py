@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db, AsyncSessionLocal, _safe_close_session
-from app.api.deps import get_router_key_dep
+from app.api.deps import get_router_key_dep, get_inference_key_dep
 from app.models.entities import RouterApiKey, DiscoveredModel, RoutingProfile, FusionProfile, JudgeProfile, Provider
 from app.schemas.chat import (
     ChatCompletionRequest,
@@ -30,198 +30,54 @@ from app.core.errors import RouterException
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible API"])
 
+async def _metadata_cards(db):
+    models = (await db.scalars(select(DiscoveredModel).where(
+        DiscoveredModel.enabled == True, DiscoveredModel.available == True,
+        DiscoveredModel.is_visible == True, DiscoveredModel.provider.has(Provider.enabled == True),
+    ))).all()
+    cards = [ModelCard(id=m.canonical_slug, root=m.provider_model_id,
+        context_length=m.context_length, max_tokens=m.max_output_tokens,
+        reasoning_effort=m.reasoning_effort, temperature=m.temperature, model_type=m.model_type) for m in models]
+    for kind, entity in (("route", RoutingProfile), ("fusion", FusionProfile), ("judge", JudgeProfile)):
+        for profile in (await db.scalars(select(entity).where(entity.enabled == True))).all():
+            identifier = f"{kind}/{profile.slug}"
+            cards.append(ModelCard(id=identifier, root=identifier, context_length=getattr(profile, "context_length", None)))
+    return list({card.id: card for card in cards}.values())
+
+
+def _metadata_allowed(router_key, model_id):
+    if router_key is None:
+        return True
+    try:
+        RoutingEngine._check_permissions(router_key, model_id)
+        return True
+    except RouterException as exc:
+        if exc.status_code != 403:
+            raise
+        return False
+
+
 @router.get("/models", response_model=ModelListResponse)
-async def list_models(
-    db: AsyncSession = Depends(get_db),
-    router_key: Optional[RouterApiKey] = Depends(get_router_key_dep),
-):
-    cards = []
+async def list_models(db: AsyncSession = Depends(get_db), router_key: Optional[RouterApiKey] = Depends(get_router_key_dep)):
+    return ModelListResponse(data=[card for card in await _metadata_cards(db) if _metadata_allowed(router_key, card.id)])
 
-    # 1. Discovered Models
-    query = select(DiscoveredModel).where(
-        DiscoveredModel.enabled == True,
-        DiscoveredModel.available == True,
-        DiscoveredModel.is_visible == True,
-        DiscoveredModel.provider.has(Provider.enabled == True),
-    )
-    result = await db.execute(query)
-    models = result.scalars().all()
-
-    for m in models:
-        # Check router_key permissions
-        if router_key:
-            if "direct" not in router_key.permissions:
-                continue
-            if "*" not in router_key.allowed_models and m.canonical_slug not in router_key.allowed_models and m.provider_model_id not in router_key.allowed_models:
-                continue
-
-        cards.append(
-            ModelCard(
-                id=m.canonical_slug,
-                root=m.provider_model_id,
-                context_length=m.context_length,
-                max_tokens=m.max_output_tokens,
-                reasoning_effort=getattr(m, "reasoning_effort", None),
-                temperature=getattr(m, "temperature", None),
-                model_type=getattr(m, "model_type", "openai"),
-            )
-        )
-
-    # 2. Routing Profiles
-    if not router_key or "routes" in router_key.permissions:
-        r_query = select(RoutingProfile).where(RoutingProfile.enabled == True)
-        r_res = await db.execute(r_query)
-        for r in r_res.scalars().all():
-            if router_key and "*" not in router_key.allowed_routes and r.slug not in router_key.allowed_routes:
-                continue
-            cards.append(ModelCard(id=f"route/{r.slug}", root=f"route/{r.slug}"))
-
-    # 3. Fusion Profiles
-    if not router_key or "fusion" in router_key.permissions:
-        f_query = select(FusionProfile).where(FusionProfile.enabled == True)
-        f_res = await db.execute(f_query)
-        for f in f_res.scalars().all():
-            if router_key and "*" not in router_key.allowed_fusions and f.slug not in router_key.allowed_fusions:
-                continue
-            cards.append(ModelCard(id=f"fusion/{f.slug}", root=f"fusion/{f.slug}"))
-
-    # 4. Judge Profiles
-    if not router_key or "judge" in router_key.permissions or "routes" in router_key.permissions:
-        j_query = select(JudgeProfile).where(JudgeProfile.enabled == True)
-        j_res = await db.execute(j_query)
-        for j in j_res.scalars().all():
-            allowed_j = getattr(router_key, "allowed_judges", ["*"]) or ["*"]
-            if router_key and "*" not in allowed_j and j.slug not in allowed_j:
-                continue
-            cards.append(ModelCard(id=f"judge/{j.slug}", root=f"judge/{j.slug}"))
-
-    # Deduplicate cards by id
-    seen = set()
-    unique_cards = []
-    for c in cards:
-        if c.id not in seen:
-            seen.add(c.id)
-            unique_cards.append(c)
-
-    return ModelListResponse(data=unique_cards)
 
 @router.get("/models/{model_id:path}", response_model=ModelCard)
-async def retrieve_model(
-    model_id: str,
-    db: AsyncSession = Depends(get_db),
-    router_key: Optional[RouterApiKey] = Depends(get_router_key_dep),
-):
-    m_id = model_id.strip()
+async def retrieve_model(model_id: str, db: AsyncSession = Depends(get_db), router_key: Optional[RouterApiKey] = Depends(get_router_key_dep)):
+    cards = await _metadata_cards(db)
+    wanted = await _normalize_profile_id(model_id.strip(), db)
+    card = next((card for card in cards if card.id == wanted or card.root == wanted), None)
+    # Exact IDs (including native tags) win before Ollama's compatibility suffix.
+    if card is None and wanted.endswith(":latest"):
+        wanted = await _normalize_profile_id(wanted.removesuffix(":latest"), db)
+        card = next((card for card in cards if card.id == wanted or card.root == wanted), None)
+    if card is None:
+        return JSONResponse(status_code=404, content={"error": {"message": "Model not found", "type": "invalid_request_error", "code": "model_not_found"}})
+    permission_id = wanted if wanted == card.root else card.id
+    if not _metadata_allowed(router_key, permission_id):
+        return JSONResponse(status_code=403, content={"error": {"message": "Forbidden", "type": "auth_error"}})
+    return card
 
-    # 1. Routing profile
-    if m_id.startswith("route/"):
-        slug = m_id.removeprefix("route/")
-        if router_key:
-            if "routes" not in router_key.permissions:
-                return JSONResponse(status_code=403, content={"error": {"message": "Forbidden", "type": "auth_error"}})
-            if "*" not in router_key.allowed_routes and slug not in router_key.allowed_routes:
-                return JSONResponse(status_code=403, content={"error": {"message": "Forbidden", "type": "auth_error"}})
-        r_res = await db.execute(select(RoutingProfile).where(RoutingProfile.slug == slug, RoutingProfile.enabled == True))
-        profile = r_res.scalar_one_or_none()
-        if profile:
-            return ModelCard(id=f"route/{profile.slug}", root=f"route/{profile.slug}")
-
-    # 2. Fusion profile
-    if m_id.startswith("fusion/"):
-        slug = m_id.removeprefix("fusion/")
-        if router_key:
-            if "fusion" not in router_key.permissions:
-                return JSONResponse(status_code=403, content={"error": {"message": "Forbidden", "type": "auth_error"}})
-            if "*" not in router_key.allowed_fusions and slug not in router_key.allowed_fusions:
-                return JSONResponse(status_code=403, content={"error": {"message": "Forbidden", "type": "auth_error"}})
-        f_res = await db.execute(select(FusionProfile).where(FusionProfile.slug == slug, FusionProfile.enabled == True))
-        profile = f_res.scalar_one_or_none()
-        if profile:
-            return ModelCard(id=f"fusion/{profile.slug}", root=f"fusion/{profile.slug}")
-
-    # 3. Judge profile
-    if m_id.startswith("judge/") or m_id.startswith("smart/"):
-        slug = m_id.removeprefix("judge/").removeprefix("smart/")
-        if router_key:
-            if "judge" not in router_key.permissions and "routes" not in router_key.permissions:
-                return JSONResponse(status_code=403, content={"error": {"message": "Forbidden", "type": "auth_error"}})
-            allowed_j = getattr(router_key, "allowed_judges", ["*"]) or ["*"]
-            if "*" not in allowed_j and slug not in allowed_j:
-                return JSONResponse(status_code=403, content={"error": {"message": "Forbidden", "type": "auth_error"}})
-        j_res = await db.execute(select(JudgeProfile).where(JudgeProfile.slug == slug, JudgeProfile.enabled == True))
-        profile = j_res.scalar_one_or_none()
-        if profile:
-            return ModelCard(id=f"judge/{profile.slug}", root=f"judge/{profile.slug}")
-
-    # 3. Discovered Model (by canonical_slug or provider_model_id)
-    query = select(DiscoveredModel).where(
-        DiscoveredModel.enabled == True,
-        DiscoveredModel.available == True,
-        DiscoveredModel.is_visible == True,
-        DiscoveredModel.provider.has(Provider.enabled == True),
-        (DiscoveredModel.canonical_slug == m_id) | (DiscoveredModel.provider_model_id == m_id),
-    )
-    result = await db.execute(query)
-    model_obj = result.scalars().first()
-
-    if not model_obj and ":" in m_id:
-        # Strip trailing tag if present (e.g. gemini-3.8-flash:latest)
-        base_name = m_id.split(":", 1)[0]
-        query2 = select(DiscoveredModel).where(
-            DiscoveredModel.enabled == True,
-            DiscoveredModel.available == True,
-            DiscoveredModel.is_visible == True,
-            DiscoveredModel.provider.has(Provider.enabled == True),
-            (DiscoveredModel.canonical_slug == base_name) | (DiscoveredModel.provider_model_id == base_name),
-        )
-        result2 = await db.execute(query2)
-        model_obj = result2.scalars().first()
-
-    if model_obj:
-        if router_key:
-            if "direct" not in router_key.permissions:
-                return JSONResponse(status_code=403, content={"error": {"message": "Forbidden", "type": "auth_error"}})
-            if "*" not in router_key.allowed_models and model_obj.canonical_slug not in router_key.allowed_models and model_obj.provider_model_id not in router_key.allowed_models:
-                return JSONResponse(status_code=403, content={"error": {"message": "Forbidden", "type": "auth_error"}})
-        return ModelCard(
-            id=model_obj.canonical_slug,
-            root=model_obj.provider_model_id,
-            context_length=model_obj.context_length,
-            max_tokens=model_obj.max_output_tokens,
-            reasoning_effort=getattr(model_obj, "reasoning_effort", None),
-            temperature=getattr(model_obj, "temperature", None),
-            model_type=getattr(model_obj, "model_type", "openai"),
-        )
-
-    # 4. Check if bare slug matches a route
-    r_res = await db.execute(select(RoutingProfile).where(RoutingProfile.slug == m_id, RoutingProfile.enabled == True))
-    profile = r_res.scalar_one_or_none()
-    if profile:
-        return ModelCard(id=f"route/{profile.slug}", root=f"route/{profile.slug}")
-
-    # 5. Check if bare slug matches a fusion profile
-    f_res = await db.execute(select(FusionProfile).where(FusionProfile.slug == m_id, FusionProfile.enabled == True))
-    f_profile = f_res.scalar_one_or_none()
-    if f_profile:
-        return ModelCard(id=f"fusion/{f_profile.slug}", root=f"fusion/{f_profile.slug}")
-
-    # 4. Bare Judge profile slug
-    j_res = await db.execute(select(JudgeProfile).where(JudgeProfile.slug == m_id, JudgeProfile.enabled == True))
-    j_profile = j_res.scalar_one_or_none()
-    if j_profile:
-        return ModelCard(id=f"judge/{j_profile.slug}", root=f"judge/{j_profile.slug}")
-
-    return JSONResponse(
-        status_code=404,
-        content={
-            "error": {
-                "message": f"Model '{model_id}' not found",
-                "type": "invalid_request_error",
-                "param": "model",
-                "code": "model_not_found",
-            }
-        },
-    )
 
 async def _resolve_is_fusion(model_str: str, db: Optional[AsyncSession] = None) -> tuple[bool, str]:
     """Returns (is_fusion, normalized_model_str). Handles explicit 'fusion/slug' and bare slug."""
@@ -265,6 +121,17 @@ async def _resolve_is_judge(model_str: str, db: Optional[AsyncSession] = None) -
             await _safe_close_session(session)
     return False, model_str
 
+async def _normalize_profile_id(model_id, db):
+    fusion, model_id = await _resolve_is_fusion(model_id, db)
+    if fusion:
+        return model_id
+    judge, model_id = await _resolve_is_judge(model_id, db)
+    if judge or model_id.startswith("route/"):
+        return model_id
+    profile = await db.scalar(select(RoutingProfile).where(RoutingProfile.slug == model_id, RoutingProfile.enabled == True))
+    return f"route/{profile.slug}" if profile else model_id
+
+
 async def _prepare_chat_payload(payload, request, response, db, router_key, *, compress=True):
     """Shared request boundary for Chat, Responses, Messages and decisions."""
     import hashlib
@@ -274,10 +141,8 @@ async def _prepare_chat_payload(payload, request, response, db, router_key, *, c
     payload = payload.model_copy(deep=True)
     headers = dict(request.headers)
     try:
-        fusion, payload.model = await _resolve_is_fusion(payload.model.strip(), session)
-        judge = False
-        if not fusion:
-            judge, payload.model = await _resolve_is_judge(payload.model, session)
+        payload.model = await _normalize_profile_id(payload.model.strip(), session)
+        fusion, judge = payload.model.startswith("fusion/"), payload.model.startswith("judge/")
         if router_key is not None:
             RoutingEngine._check_permissions(router_key, payload.model)
         sec_cfg = await GuardrailRegistry.get_security_config(session)
@@ -335,6 +200,26 @@ async def _prepare_chat_payload(payload, request, response, db, router_key, *, c
             if isinstance(checked, Response):
                 return checked
             payload = checked
+        if router_key is not None and not hasattr(request.state, "key_reservation"):
+            from app.core.admission import admission
+            from app.compression.tokenizer import count_messages_tokens
+            from app.services.api_key_service import ApiKeyService
+            prompt_tokens = count_messages_tokens(payload.messages)
+            output_tokens = payload.get_effective_max_tokens()
+            if router_key.rate_limit_tpm is not None and output_tokens is None:
+                output_tokens = router_key.rate_limit_tpm - prompt_tokens
+                if output_tokens <= 0:
+                    from app.core.errors import ErrorCategory
+                    raise RouterException("API key TPM budget cannot cover an output token", ErrorCategory.RATE_LIMIT, status_code=429, retry_after=60)
+                payload = payload.model_copy(update={"max_tokens": output_tokens})
+            reservation = admission.reserve("router-key", router_key.id, rpm=router_key.rate_limit_rpm,
+                tpm=router_key.rate_limit_tpm, tokens=prompt_tokens + (output_tokens or 0))
+            try:
+                await ApiKeyService.admit_inference(session, router_key)
+            except BaseException:
+                reservation.finish(0)
+                raise
+            request.state.key_reservation = reservation
         return payload, context
     except (HTTPException, RouterException):
         raise
@@ -348,6 +233,21 @@ async def _prepare_chat_payload(payload, request, response, db, router_key, *, c
 
 async def _secure_outbound(content, request, db, router_key, model_id):
     from app.security.registry import GuardrailRegistry
+    # Meter actual structured usage; never count SSE chunks as tokens.
+    if isinstance(content, str):
+        values = []
+        for line in content.splitlines():
+            if line.startswith("data:") and line[5:].strip() != "[DONE]":
+                try:
+                    values.append(json.loads(line[5:]))
+                except ValueError:
+                    pass
+    else:
+        values = [content.model_dump() if hasattr(content, "model_dump") else content]
+    for value in values:
+        usage = value.get("usage") if isinstance(value, dict) else None
+        if isinstance(usage, dict) and isinstance(usage.get("total_tokens"), int):
+            request.state.key_actual_tokens = usage["total_tokens"]
     session = db if db is not None else AsyncSessionLocal()
     try:
         result = await GuardrailRegistry.run_post_call_hooks(
@@ -371,7 +271,7 @@ async def chat_completions(
     request: Request,
     response: Response,
     db: Optional[AsyncSession] = Depends(lambda: None),
-    router_key: Optional[RouterApiKey] = Depends(get_router_key_dep),
+    router_key: Optional[RouterApiKey] = Depends(get_inference_key_dep),
 ):
     req_id = f"req_{uuid.uuid4().hex[:16]}"
     try:
@@ -657,7 +557,7 @@ async def systemone_decision(
     request: Request,
     response: Response,
     db: Optional[AsyncSession] = Depends(lambda: None),
-    router_key: Optional[RouterApiKey] = Depends(get_router_key_dep),
+    router_key: Optional[RouterApiKey] = Depends(get_inference_key_dep),
 ):
     req_id = f"dec_{uuid.uuid4().hex[:16]}"
     envelope = ChatCompletionRequest(model=payload.model, messages=[ChatMessage(
@@ -708,20 +608,252 @@ async def systemone_decision(
         if db is None:
             await _safe_close_session(session)
 
+async def _native_chat_stream(source, model):
+    """Use the common UTF-8/SSE collector; expose only newly assembled deltas."""
+    from contextlib import aclosing
+    from copy import deepcopy
+    from app.modules.base import ChatStreamAccumulator
+    accumulator = ChatStreamAccumulator()
+    previous = {}
+    async with aclosing(source):
+        async for chunk in source:
+            accumulator.feed(chunk)
+            if accumulator.error:
+                accumulator.response(model)
+            state = accumulator.choices.get(0)
+            if state:
+                old = previous.get(0, {})
+                delta = {}
+                for key, field in (("content", "content"), ("reasoning", "reasoning_content")):
+                    text = "".join(state[key][len(old.get(key, [])):])
+                    if text:
+                        delta[field] = text
+                details = []
+                for index, detail in state["reasoning_details"].items():
+                    prior = old.get("reasoning_details", {}).get(index, {})
+                    changed = {k: (v[len(prior.get(k, "")):] if k in ("thinking", "signature") else v)
+                               for k, v in detail.items() if prior.get(k) != v}
+                    if changed:
+                        details.append({"type": detail.get("type"), "index": index, **changed})
+                if details:
+                    delta["reasoning_details"] = details
+                calls = []
+                for index, call in state["calls"].items():
+                    prior = old.get("calls", {}).get(index, {})
+                    fn, before = call["function"], prior.get("function", {})
+                    change = {"index": index, "function": {k: v[len(before.get(k, "")):]
+                              for k, v in fn.items() if v != before.get(k, "")}}
+                    for key in ("id", "extra_content"):
+                        if call.get(key) and call.get(key) != prior.get(key):
+                            change[key] = call[key]
+                    if change["function"] or len(change) > 2:
+                        calls.append(change)
+                if calls:
+                    delta["tool_calls"] = calls
+                if delta or state["finish"] != old.get("finish"):
+                    yield {"choices": [{"delta": delta, "finish_reason": state["finish"]}]}
+                previous = deepcopy(accumulator.choices)
+            if accumulator.usage is not None:
+                yield {"choices": [], "usage": accumulator.usage.model_dump()}
+            if accumulator.done:
+                break
+        accumulator.response(model, require_complete=True)
+
+
+def _anthropic_stop_reason(finish):
+    return {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use",
+            "function_call": "tool_use", "content_filter": "refusal"}.get(finish, "end_turn")
+
+
+def _anthropic_payload(resp):
+    message = resp.choices[0].message
+    content = [{k: v for k, v in detail.items() if k != "index"}
+               for detail in message.reasoning_details or []
+               if detail.get("type") in ("thinking", "redacted_thinking")]
+    if message.content:
+        content.append({"type": "text", "text": message.content})
+    for call in message.tool_calls or []:
+        arguments = json.loads(call.function.arguments)
+        if not isinstance(arguments, dict):
+            raise ValueError("Upstream tool input must be an object")
+        content.append({"type": "tool_use", "id": call.id, "name": call.function.name, "input": arguments})
+    return {"id": resp.id, "type": "message", "role": "assistant", "content": content,
+            "model": resp.model, "stop_reason": _anthropic_stop_reason(resp.choices[0].finish_reason),
+            "stop_sequence": None, "usage": {"input_tokens": resp.usage.prompt_tokens,
+            "output_tokens": resp.usage.completion_tokens} if resp.usage is not None else None}
+
+
+def _anthropic_chat_request(body):
+    from app.schemas.chat import ToolCall, FunctionCall
+
+    def string(value, label):
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{label} must be a non-empty string")
+        return value
+
+    def blocks(value, role):
+        if isinstance(value, str):
+            return [{"type": "text", "text": value}], [], [], []
+        if not isinstance(value, list) or not value:
+            raise ValueError("Message content must be a string or non-empty block array")
+        content, calls, details, results = [], [], [], []
+        for part in value:
+            if not isinstance(part, dict):
+                raise ValueError("Content blocks must be objects")
+            kind = part.get("type")
+            if kind == "text" and isinstance(part.get("text"), str):
+                content.append(dict(part))
+            elif kind == "image" and role == "user":
+                source = part.get("source")
+                if not isinstance(source, dict):
+                    raise ValueError("Image source must be an object")
+                if source.get("type") == "url":
+                    url = string(source.get("url"), "Image URL")
+                    if not url.startswith(("https://", "http://")):
+                        raise ValueError("Image URL must use HTTP(S)")
+                elif source.get("type") == "base64":
+                    import base64
+                    media = source.get("media_type")
+                    if media not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+                        raise ValueError("Unsupported image media type")
+                    data = string(source.get("data"), "Image data")
+                    base64.b64decode(data, validate=True)
+                    url = f"data:{media};base64,{data}"
+                else:
+                    raise ValueError("Unsupported image source")
+                content.append({"type": "image_url", "image_url": {"url": url}})
+            elif kind == "tool_use" and role == "assistant":
+                if not isinstance(part.get("input"), dict):
+                    raise ValueError("Tool input must be an object")
+                calls.append(ToolCall(id=string(part.get("id"), "Tool ID"), function=FunctionCall(
+                    name=string(part.get("name"), "Tool name"), arguments=json.dumps(part["input"]))))
+            elif kind == "tool_result" and role == "user":
+                result_content = part.get("content", "")
+                if isinstance(result_content, list):
+                    result_content, _, _, nested = blocks(result_content, "user")
+                    if nested:
+                        raise ValueError("Nested tool results are not supported")
+                elif not isinstance(result_content, str):
+                    raise ValueError("Tool result content must be a string or blocks")
+                # Keep is_error as a native tool_result block for lossless adapter roundtrips.
+                if "is_error" in part and not isinstance(part["is_error"], bool):
+                    raise ValueError("is_error must be boolean")
+                results.append(ChatMessage(role="tool", tool_call_id=string(part.get("tool_use_id"), "Tool result ID"),
+                                           content=result_content))
+            elif kind == "thinking" and role == "assistant":
+                if not isinstance(part.get("thinking"), str) or not isinstance(part.get("signature"), str):
+                    raise ValueError("Thinking requires text and an opaque signature")
+                details.append(dict(part))
+            elif kind == "redacted_thinking" and role == "assistant":
+                string(part.get("data"), "Redacted thinking data")
+                details.append(dict(part))
+            else:
+                raise ValueError(f"Unsupported {role} content block: {kind}")
+        return content, calls, details, results
+
+    if not isinstance(body, dict):
+        raise ValueError("Messages request must be an object")
+    model = string(body.get("model"), "model")
+    maximum = body.get("max_tokens")
+    if type(maximum) is not int or maximum <= 0:
+        raise ValueError("max_tokens must be a positive integer")
+    raw_messages = body.get("messages")
+    if not isinstance(raw_messages, list) or not raw_messages:
+        raise ValueError("messages must be a non-empty array")
+    if "stream" in body and not isinstance(body["stream"], bool):
+        raise ValueError("stream must be boolean")
+    messages = []
+    if body.get("system"):
+        content, _, _, _ = blocks(body["system"], "system")
+        messages.append(ChatMessage(role="system", content=content))
+    call_ids = set()
+    for raw in raw_messages:
+        if not isinstance(raw, dict) or raw.get("role") not in ("user", "assistant"):
+            raise ValueError("Message role must be user or assistant")
+        content, calls, details, results = blocks(raw.get("content"), raw["role"])
+        for result in results:
+            if result.tool_call_id not in call_ids:
+                raise ValueError("Tool result has no preceding tool_use")
+        for call in calls:
+            if call.id in call_ids:
+                raise ValueError("Duplicate tool_use ID")
+            call_ids.add(call.id)
+        messages.extend(results)
+        if content or calls or details:
+            messages.append(ChatMessage(role=raw["role"], content=content or None,
+                                        tool_calls=calls or None, reasoning_details=details or None))
+    tools = body.get("tools")
+    converted = None
+    names = set()
+    if tools is not None:
+        if not isinstance(tools, list):
+            raise ValueError("tools must be an array")
+        converted = []
+        for tool in tools:
+            if not isinstance(tool, dict) or not isinstance(tool.get("input_schema"), dict):
+                raise ValueError("Tool requires an input_schema object")
+            name = string(tool.get("name"), "Tool name")
+            if name in names:
+                raise ValueError("Duplicate tool name")
+            names.add(name)
+            converted.append({"type": "function", "function": {"name": name, "parameters": tool["input_schema"],
+                             **({"description": tool["description"]} if "description" in tool else {})}})
+    choice, parallel = None, None
+    if "tool_choice" in body:
+        raw = body["tool_choice"]
+        if not isinstance(raw, dict) or raw.get("type") not in ("auto", "any", "none", "tool"):
+            raise ValueError("Invalid tool_choice")
+        if raw["type"] == "tool":
+            name = string(raw.get("name"), "Chosen tool name")
+            if name not in names:
+                raise ValueError("Chosen tool is not declared")
+            choice = {"type": "function", "function": {"name": name}}
+        else:
+            choice = {"auto": "auto", "any": "required", "none": "none"}[raw["type"]]
+        if choice != "none" and not names:
+            raise ValueError("tool_choice requires tools")
+        if "disable_parallel_tool_use" in raw:
+            if not isinstance(raw["disable_parallel_tool_use"], bool):
+                raise ValueError("disable_parallel_tool_use must be boolean")
+            parallel = not raw["disable_parallel_tool_use"]
+    thinking = body.get("thinking")
+    if thinking is not None:
+        if not isinstance(thinking, dict) or thinking.get("type") not in ("enabled", "disabled", "adaptive"):
+            raise ValueError("Invalid thinking configuration")
+        if thinking["type"] == "enabled":
+            budget = thinking.get("budget_tokens")
+            if type(budget) is not int or not 1024 <= budget < maximum:
+                raise ValueError("Thinking budget must be at least 1024 and below max_tokens")
+        if thinking["type"] != "disabled" and choice not in (None, "auto", "none"):
+            raise ValueError("Thinking does not support forced tool choice")
+    for key in ("temperature", "top_p"):
+        if key in body and (type(body[key]) not in (int, float) or not 0 <= body[key] <= 1):
+            raise ValueError(f"{key} must be between zero and one")
+    stops = body.get("stop_sequences")
+    if stops is not None and (not isinstance(stops, list) or any(not isinstance(s, str) for s in stops)):
+        raise ValueError("stop_sequences must be strings")
+    return ChatCompletionRequest(model=model, messages=messages, max_tokens=maximum,
+        stream=body.get("stream", False), stream_options={"include_usage": True},
+        temperature=body.get("temperature"), top_p=body.get("top_p"), stop=stops,
+        tools=converted, tool_choice=choice, parallel_tool_calls=parallel, thinking=thinking)
+
+
 def _responses_payload(response: ChatCompletionResponse, response_id: str) -> dict:
     message = response.choices[0].message if response.choices else None
     text = message.content if message else ""
+    finish = response.choices[0].finish_reason if response.choices else None
+    terminal = "incomplete" if finish == "length" else "completed"
     output = []
     if text or not (message and message.tool_calls):
         output.append({
             "id": f"msg_{uuid.uuid4().hex[:16]}", "type": "message",
-            "status": "completed", "role": "assistant",
+            "status": terminal, "role": "assistant",
             "content": [{"type": "output_text", "text": text or "", "annotations": []}],
         })
     for call in (message.tool_calls or []) if message else []:
         output.append({
             "id": f"fc_{uuid.uuid4().hex[:16]}", "type": "function_call",
-            "status": "completed", "call_id": call.id,
+            "status": terminal, "call_id": call.id,
             "name": call.function.name, "arguments": call.function.arguments,
             **({"extra_content": call.extra_content} if call.extra_content else {}),
         })
@@ -730,9 +862,9 @@ def _responses_payload(response: ChatCompletionResponse, response_id: str) -> di
         "id": response_id,
         "object": "response",
         "created_at": int(time.time()),
-        "status": "completed",
+        "status": terminal,
         "error": None,
-        "incomplete_details": None,
+        "incomplete_details": {"reason": "max_output_tokens"} if finish == "length" else None,
         "model": response.model,
         "output": output,
         "output_text": text or "",
@@ -740,7 +872,7 @@ def _responses_payload(response: ChatCompletionResponse, response_id: str) -> di
             "input_tokens": usage.prompt_tokens if usage else 0,
             "output_tokens": usage.completion_tokens if usage else 0,
             "total_tokens": usage.total_tokens if usage else 0,
-        },
+        } if usage is not None else None,
         "metadata": {},
     }
 
@@ -760,67 +892,62 @@ async def _responses_event_stream(source: AsyncGenerator[str, None], model: str,
     text_item = None
     text_index = None
     usage = None
-    async for chunk in source:
-        if isinstance(chunk, bytes):
-            chunk = chunk.decode()
-        for line in chunk.splitlines():
-            if not line.startswith("data:"):
-                continue
-            raw = line[5:].strip()
-            if not raw or raw == "[DONE]":
-                continue
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if "error" in data:
-                yield event("response.failed", response={"id": response_id, "status": "failed", "error": data["error"]})
-                return
-            if data.get("usage"):
-                usage = UsageInfo(**data["usage"])
-            choices = data.get("choices") or []
-            delta = choices[0].get("delta") or {} if choices else {}
-            text = delta.get("content")
-            if text:
-                if text_item is None:
-                    text_index = len(output)
-                    text_item = {"id": f"msg_{uuid.uuid4().hex[:16]}", "type": "message", "status": "in_progress", "role": "assistant", "content": []}
-                    output.append(text_item)
-                    yield event("response.output_item.added", output_index=text_index, item=text_item)
-                    part = {"type": "output_text", "text": "", "annotations": []}
-                    yield event("response.content_part.added", item_id=text_item["id"], output_index=text_index, content_index=0, part=part)
-                    text_item["content"].append(part)
-                text_item["content"][0]["text"] += text
-                yield event("response.output_text.delta", item_id=text_item["id"], output_index=text_index, content_index=0, delta=text)
-            for position, call in enumerate(delta.get("tool_calls") or []):
-                index = call.get("index", position)
-                function = call.get("function") or {}
-                if index not in calls:
-                    item = {"id": f"fc_{uuid.uuid4().hex[:16]}", "type": "function_call", "status": "in_progress", "call_id": "", "name": "", "arguments": ""}
-                    calls[index] = {"item": item, "output_index": len(output), "added": False}
-                    output.append(item)
-                state = calls[index]
-                item = state["item"]
-                if call.get("id"):
-                    item["call_id"] = call["id"]
-                if call.get("extra_content"):
-                    item["extra_content"] = call["extra_content"]
-                if function.get("name"):
-                    item["name"] += function["name"]
-                arguments = function.get("arguments") or ""
-                item["arguments"] += arguments
-                # Wait for identity before exposing a call; early arguments remain buffered.
-                if not state["added"] and item["call_id"] and item["name"]:
-                    yield event("response.output_item.added", output_index=state["output_index"], item={**item, "arguments": ""})
-                    state["added"] = True
-                    arguments = item["arguments"]
-                if state["added"] and arguments:
-                    yield event("response.function_call_arguments.delta", item_id=item["id"], output_index=state["output_index"], delta=arguments)
+    finish = None
+    from contextlib import aclosing
+    stream = _native_chat_stream(source, model)
+    async with aclosing(stream):
+        try:
+            async for data in stream:
+                if data.get("usage"):
+                    usage = UsageInfo(**data["usage"])
+                choices = data.get("choices") or []
+                if choices:
+                    finish = choices[0].get("finish_reason") or finish
+                delta = choices[0].get("delta") or {} if choices else {}
+                text = delta.get("content")
+                if text:
+                    if text_item is None:
+                        text_index = len(output)
+                        text_item = {"id": f"msg_{uuid.uuid4().hex[:16]}", "type": "message", "status": "in_progress", "role": "assistant", "content": []}
+                        output.append(text_item)
+                        yield event("response.output_item.added", output_index=text_index, item=text_item)
+                        part = {"type": "output_text", "text": "", "annotations": []}
+                        yield event("response.content_part.added", item_id=text_item["id"], output_index=text_index, content_index=0, part=part)
+                        text_item["content"].append(part)
+                    text_item["content"][0]["text"] += text
+                    yield event("response.output_text.delta", item_id=text_item["id"], output_index=text_index, content_index=0, delta=text)
+                for position, call in enumerate(delta.get("tool_calls") or []):
+                    index = call.get("index", position)
+                    function = call.get("function") or {}
+                    if index not in calls:
+                        item = {"id": f"fc_{uuid.uuid4().hex[:16]}", "type": "function_call", "status": "in_progress", "call_id": "", "name": "", "arguments": ""}
+                        calls[index] = {"item": item, "output_index": len(output), "added": False}
+                        output.append(item)
+                    state = calls[index]
+                    item = state["item"]
+                    if call.get("id"):
+                        item["call_id"] = call["id"]
+                    if call.get("extra_content"):
+                        item["extra_content"] = call["extra_content"]
+                    if function.get("name"):
+                        item["name"] += function["name"]
+                    arguments = function.get("arguments") or ""
+                    item["arguments"] += arguments
+                    # Wait for identity before exposing a call; early arguments remain buffered.
+                    if not state["added"] and item["call_id"] and item["name"]:
+                        yield event("response.output_item.added", output_index=state["output_index"], item={**item, "arguments": ""})
+                        state["added"] = True
+                        arguments = item["arguments"]
+                    if state["added"] and arguments:
+                        yield event("response.function_call_arguments.delta", item_id=item["id"], output_index=state["output_index"], delta=arguments)
+        except (ValueError, TypeError, RouterException, HTTPException):
+            yield event("response.failed", response={"id": response_id, "status": "failed", "error": {"type": "upstream_error", "message": "Upstream stream failed or ended before completion"}})
+            return
     if any(not state["added"] for state in calls.values()):
         yield event("response.failed", response={"id": response_id, "status": "failed", "error": {"type": "upstream_error", "message": "Function call is missing call_id or name"}})
         return
     for index, item in enumerate(output):
-        item["status"] = "completed"
+        item["status"] = "incomplete" if finish == "length" else "completed"
         if item["type"] == "function_call":
             yield event("response.function_call_arguments.done", item_id=item["id"], output_index=index, name=item["name"], arguments=item["arguments"])
         else:
@@ -828,16 +955,16 @@ async def _responses_event_stream(source: AsyncGenerator[str, None], model: str,
             yield event("response.output_text.done", item_id=item["id"], output_index=index, content_index=0, text=part["text"])
             yield event("response.content_part.done", item_id=item["id"], output_index=index, content_index=0, part=part)
         yield event("response.output_item.done", output_index=index, item=item)
-    completed = _responses_payload(ChatCompletionResponse(model=model, choices=[], usage=usage), response_id)
+    completed = _responses_payload(ChatCompletionResponse(model=model, choices=[ChatCompletionChoice(message=ChatMessage(role="assistant"), finish_reason=finish)], usage=usage), response_id)
     completed["output"] = output
     completed["output_text"] = text_item["content"][0]["text"] if text_item else ""
-    yield event("response.completed", response=completed)
+    yield event("response.incomplete" if finish == "length" else "response.completed", response=completed)
 
 
 @router.post("/responses")
 async def responses_api(
     payload: ResponsesRequest,
-    router_key: Optional[RouterApiKey] = Depends(get_router_key_dep),
+    router_key: Optional[RouterApiKey] = Depends(get_inference_key_dep),
     db: AsyncSession = Depends(get_db),
     request: Request = None,
     response: Response = None,
@@ -860,31 +987,68 @@ async def responses_api(
     return _responses_payload(result, req_id)
 
 async def _anthropic_event_stream(source: AsyncGenerator[str, None], model: str, message_id: str):
-    yield f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': {'id': message_id, 'type': 'message', 'role': 'assistant', 'content': [], 'model': model, 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': 0, 'output_tokens': 0}}})}\n\n"
-    yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
-    output_tokens = 0
-    async for chunk in source:
-        for line in chunk.splitlines():
-            if not line.startswith("data: "):
-                continue
-            raw = line[6:].strip()
-            if not raw or raw == "[DONE]":
-                continue
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if "error" in data:
-                yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': data['error'].get('type', 'api_error'), 'message': data['error'].get('message', 'Request failed')}})}\n\n"
-                return
-            delta = data.get("choices", [{}])[0].get("delta", {}).get("content") if data.get("choices") else None
-            if delta:
-                output_tokens += 1
-                event = {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta}}
-                yield f"event: content_block_delta\ndata: {json.dumps(event)}\n\n"
-    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-    yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn', 'stop_sequence': None}, 'usage': {'output_tokens': output_tokens}})}\n\n"
-    yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+    from contextlib import aclosing
+
+    def event(kind, **fields):
+        return f"event: {kind}\ndata: {json.dumps({'type': kind, **fields})}\n\n"
+
+    blocks, calls = {}, {}
+    finish, usage = None, None
+    stream = _native_chat_stream(source, model)
+    async with aclosing(stream):
+        try:
+            yield event("message_start", message={"id": message_id, "type": "message", "role": "assistant",
+                "content": [], "model": model, "stop_reason": None, "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0}})
+            async for data in stream:
+                if data.get("usage") is not None:
+                    usage = UsageInfo.model_validate(data["usage"])
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                finish = choices[0].get("finish_reason") or finish
+                delta = choices[0].get("delta") or {}
+                for detail in delta.get("reasoning_details") or []:
+                    key = ("thinking", detail.get("index", 0))
+                    if key not in blocks:
+                        blocks[key] = len(blocks)
+                        block = {"type": detail["type"], **({"data": detail["data"]} if detail["type"] == "redacted_thinking"
+                                 else {"thinking": "", "signature": ""})}
+                        yield event("content_block_start", index=blocks[key], content_block=block)
+                    for field in ("thinking", "signature"):
+                        if detail.get(field):
+                            yield event("content_block_delta", index=blocks[key], delta={"type": field+"_delta", field: detail[field]})
+                text = delta.get("content")
+                if text:
+                    if "text" not in blocks:
+                        blocks["text"] = len(blocks)
+                        yield event("content_block_start", index=blocks["text"], content_block={"type": "text", "text": ""})
+                    yield event("content_block_delta", index=blocks["text"], delta={"type": "text_delta", "text": text})
+                for call in delta.get("tool_calls") or []:
+                    key = ("tool", call["index"])
+                    state = calls.setdefault(key, {"id": "", "name": "", "arguments": ""})
+                    state["id"] = call.get("id") or state["id"]
+                    fn = call.get("function") or {}
+                    state["name"] += fn.get("name") or ""
+                    arguments = fn.get("arguments") or ""
+                    state["arguments"] += arguments
+                    if key not in blocks and state["id"] and state["name"]:
+                        blocks[key] = len(blocks)
+                        yield event("content_block_start", index=blocks[key], content_block={
+                            "type": "tool_use", "id": state["id"], "name": state["name"], "input": {}})
+                        arguments = state["arguments"]
+                    if key in blocks and arguments:
+                        yield event("content_block_delta", index=blocks[key], delta={"type": "input_json_delta", "partial_json": arguments})
+            for key, call in calls.items():
+                if key not in blocks or not isinstance(json.loads(call["arguments"]), dict):
+                    raise ValueError("Incomplete upstream tool call")
+            for index in blocks.values():
+                yield event("content_block_stop", index=index)
+            yield event("message_delta", delta={"stop_reason": _anthropic_stop_reason(finish), "stop_sequence": None},
+                        usage={"input_tokens": usage.prompt_tokens, "output_tokens": usage.completion_tokens} if usage is not None else {})
+            yield event("message_stop")
+        except (ValueError, TypeError, RouterException, HTTPException):
+            yield event("error", error={"type": "api_error", "message": "Upstream stream failed or ended before completion"})
 
 
 @router.post("/messages")
@@ -892,61 +1056,40 @@ async def anthropic_messages_inbound(
     request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
-    router_key: Optional[RouterApiKey] = Depends(get_router_key_dep),
+    router_key: Optional[RouterApiKey] = Depends(get_inference_key_dep),
 ):
     try:
-        body = await request.json()
-        model = body.get("model", "")
-        system_text = body.get("system", "")
-        anthropic_msgs = body.get("messages", [])
-
-        messages = []
-        if system_text:
-            messages.append(ChatMessage(role="system", content=system_text))
-        for message in anthropic_msgs:
-            messages.append(ChatMessage(role=message.get("role", "user"), content=message.get("content", "")))
-
-        is_stream = bool(body.get("stream", False))
-        req = ChatCompletionRequest(
-            model=model,
-            messages=messages,
-            temperature=body.get("temperature"),
-            top_p=body.get("top_p"),
-            max_tokens=body.get("max_tokens"),
-            stop=body.get("stop_sequences"),
-            stream=is_stream,
-            tools=body.get("tools"),
-            tool_choice=body.get("tool_choice"),
-        )
-
+        req = _anthropic_chat_request(await request.json())
+    except (ValueError, TypeError, KeyError):
+        return JSONResponse(status_code=400, content={"type": "error", "error": {
+            "type": "invalid_request_error", "message": "Invalid Messages request"}})
+    try:
         resp = await chat_completions(req, request, response, db, router_key)
         if isinstance(resp, StreamingResponse):
-            message_id = f"msg_{uuid.uuid4().hex[:16]}"
-            return StreamingResponse(
-                _anthropic_event_stream(resp.body_iterator, req.model, message_id),
-                media_type="text/event-stream", headers=dict(resp.headers),
-            )
+            return StreamingResponse(_anthropic_event_stream(resp.body_iterator, req.model, f"msg_{uuid.uuid4().hex[:16]}"),
+                media_type="text/event-stream", headers={k: v for k, v in resp.headers.items() if k.lower() != "content-length"})
+        if isinstance(resp, JSONResponse):
+            data = json.loads(resp.body)
+            error = data.get("error", {})
+            return JSONResponse(status_code=resp.status_code, headers={k: v for k, v in resp.headers.items()
+                if k.lower() != "content-length"}, content={"type": "error", "error": {
+                "type": _anthropic_error_type(resp.status_code), "message": error.get("message", "Request failed")}})
         if isinstance(resp, Response):
             return resp
-        content_text = resp.choices[0].message.content if resp.choices else ""
-        return {
-            "id": resp.id,
-            "type": "message",
-            "role": "assistant",
-            "content": [{"type": "text", "text": content_text}],
-            "model": resp.model,
-            "stop_reason": "end_turn",
-            "stop_sequence": None,
-            "usage": {
-                "input_tokens": resp.usage.prompt_tokens if resp.usage else 0,
-                "output_tokens": resp.usage.completion_tokens if resp.usage else 0,
-            },
-        }
-    except HTTPException:
-        raise
-    except (ValueError, TypeError) as exc:
-        return JSONResponse(status_code=400, content={"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid Messages request"}})
+        return _anthropic_payload(resp)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"type": "error", "error": {
+            "type": _anthropic_error_type(exc.status_code), "message": str(exc.detail)}})
     except RouterException as exc:
-        return JSONResponse(status_code=exc.status_code, content={"type": "error", "error": {"type": exc.category.value.lower(), "message": exc.message}})
-    except Exception as exc:
-        return JSONResponse(status_code=500, content={"type": "error", "error": {"type": "api_error", "message": str(exc)}})
+        return JSONResponse(status_code=exc.status_code, content={"type": "error", "error": {
+            "type": _anthropic_error_type(exc.status_code), "message": exc.message}})
+    except Exception:
+        logger.exception("Native Messages response failed")
+        return JSONResponse(status_code=502, content={"type": "error", "error": {
+            "type": "api_error", "message": "Upstream Messages response is invalid"}})
+
+
+def _anthropic_error_type(status_code):
+    return {400: "invalid_request_error", 401: "authentication_error", 403: "permission_error",
+            404: "not_found_error", 413: "request_too_large", 422: "invalid_request_error",
+            429: "rate_limit_error", 529: "overloaded_error"}.get(status_code, "api_error")

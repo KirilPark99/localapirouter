@@ -12,7 +12,8 @@ from urllib.parse import urlencode
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
-from app.modules.base import BaseModuleAdapter, ModuleExecutionContext
+from app.core.errors import normalize_upstream_error, RouterException, ErrorCategory
+from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_chat_completion
 from app.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -181,7 +182,9 @@ def parse_zai_sse_line(line: str) -> Optional[Tuple[str, str, bool]]:
     if not line.startswith("data:"):
         return None
     raw = line[5:].strip()
-    if not raw or raw == "[DONE]":
+    if not raw:
+        return None
+    if raw == "[DONE]":
         return ("text", "", True)
 
     try:
@@ -192,7 +195,7 @@ def parse_zai_sse_line(line: str) -> Optional[Tuple[str, str, bool]]:
     # Error check across root and nested data envelopes
     err_msg = extract_zai_frame_error(data)
     if err_msg:
-        raise RuntimeError(f"Z.ai upstream error: {err_msg}")
+        raise normalize_upstream_error(status_code=403 if "FRONTEND_CAPTCHA_REQUIRED" in err_msg else 502, response_body=err_msg)
 
     # Standard choices format
     choices = data.get("choices")
@@ -298,7 +301,7 @@ class ZaiWebAdapter(BaseModuleAdapter):
                                         "chat": True,
                                         "streaming": True,
                                         "vision": bool(caps.get("vision", False)),
-                                        "tools": bool(caps.get("mcp", False) or caps.get("returnFc", False)),
+                                        "tools": False,
                                         "reasoning": bool(caps.get("think", False) or caps.get("reasoning_effort", False)),
                                     },
                                     context_length=1048576,
@@ -315,21 +318,21 @@ class ZaiWebAdapter(BaseModuleAdapter):
             DiscoveredModelData(
                 provider_model_id="glm-5.3",
                 display_name="GLM-5.3 (Z.ai)",
-                capabilities={"chat": True, "streaming": True, "vision": False, "tools": True, "reasoning": True},
+                capabilities={"chat": True, "streaming": True, "vision": False, "tools": False, "reasoning": True},
                 context_length=1048576,
                 max_output_tokens=16384,
             ),
             DiscoveredModelData(
                 provider_model_id="glm-5.3-flash",
                 display_name="GLM-5.3-Flash (Z.ai)",
-                capabilities={"chat": True, "streaming": True, "vision": True, "tools": True, "reasoning": True},
+                capabilities={"chat": True, "streaming": True, "vision": True, "tools": False, "reasoning": True},
                 context_length=1048576,
                 max_output_tokens=16384,
             ),
             DiscoveredModelData(
                 provider_model_id="glm-5.2",
                 display_name="GLM-5.2 (Z.ai)",
-                capabilities={"chat": True, "streaming": True, "vision": False, "tools": True, "reasoning": True},
+                capabilities={"chat": True, "streaming": True, "vision": False, "tools": False, "reasoning": True},
                 context_length=1048576,
                 max_output_tokens=16384,
             ),
@@ -342,6 +345,7 @@ class ZaiWebAdapter(BaseModuleAdapter):
         prompt: str,
         model: str,
         fe_version: str,
+        effort: str = "high",
     ) -> Tuple[str, str]:
         user_message_id = str(uuid.uuid4())
         effort_supported = model.lower() in ("glm-5.3", "glm-5.2", "x-preview-l", "glm-5.3-flash")
@@ -369,8 +373,8 @@ class ZaiWebAdapter(BaseModuleAdapter):
                 "flags": [],
                 "features": [{"server": "tool_selector_h", "status": "hidden", "type": "tool_selector"}],
                 "mcp_servers": [],
-                "enable_thinking": True,
-                "reasoning_effort": "high" if effort_supported else None,
+                "enable_thinking": effort not in ("none", "off", "disabled"),
+                "reasoning_effort": effort if effort_supported else None,
                 "auto_web_search": False,
                 "message_version": 1,
                 "extra": {
@@ -386,7 +390,7 @@ class ZaiWebAdapter(BaseModuleAdapter):
         headers["Accept"] = "application/json"
         resp = await client.post(ZAI_NEW_CHAT_URL, headers=headers, json=payload, timeout=15.0)
         if resp.status_code != 200:
-            raise RuntimeError(f"Failed to create Z.ai chat session: HTTP {resp.status_code}")
+            raise normalize_upstream_error(status_code=resp.status_code, response_body=(await resp.aread()).decode("utf-8", errors="replace"))
         data = resp.json()
         chat_id = data.get("id") or ""
         return chat_id, user_message_id
@@ -396,62 +400,26 @@ class ZaiWebAdapter(BaseModuleAdapter):
         request: ChatCompletionRequest,
         ctx: ModuleExecutionContext,
     ) -> ChatCompletionResponse:
-        full_content = ""
-        full_reasoning = ""
-        model_name = request.model or ctx.model_id or ZAI_DEFAULT_MODEL
-
-        async for chunk_str in self.stream_chat(request, ctx):
-            if not chunk_str.startswith("data: "):
-                continue
-            data_part = chunk_str[6:].strip()
-            if data_part == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data_part)
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                content = delta.get("content", "")
-                reasoning = delta.get("reasoning_content", "")
-                if content:
-                    full_content += content
-                if reasoning:
-                    full_reasoning += reasoning
-            except Exception:
-                pass
-
-        if not full_content and not full_reasoning:
-            raise RuntimeError("Z.ai chat completed with empty response")
-
-        msg = ChatMessage(role="assistant", content=full_content)
-        if full_reasoning:
-            msg.reasoning_content = full_reasoning
-
-        return ChatCompletionResponse(
-            id=f"chatcmpl-zai-{uuid.uuid4().hex[:12]}",
-            object="chat.completion",
-            created=int(time.time()),
-            model=model_name,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=msg,
-                    finish_reason="stop",
-                )
-            ],
-            usage=UsageInfo(
-                prompt_tokens=len(str(request.messages)) // 4,
-                completion_tokens=(len(full_content) + len(full_reasoning)) // 4,
-                total_tokens=(len(str(request.messages)) + len(full_content) + len(full_reasoning)) // 4,
-            ),
-        )
+        model = request.model or ctx.model_id or ZAI_DEFAULT_MODEL
+        return await collect_chat_completion(self.stream_chat(request, ctx), model, require_complete=True)
 
     async def stream_chat(
         self,
         request: ChatCompletionRequest,
         ctx: ModuleExecutionContext,
     ) -> AsyncGenerator[str, None]:
+        if request.tools or request.tool_choice is not None or request.parallel_tool_calls is not None:
+            raise RouterException("Z.ai native tools are not implemented", ErrorCategory.INVALID_REQUEST, status_code=422)
+        unsupported = ("temperature", "top_p", "stop", "seed", "response_format", "max_tokens",
+                       "max_completion_tokens", "presence_penalty", "frequency_penalty", "logit_bias")
+        fields = [key for key in unsupported if getattr(request, key, None) is not None]
+        if fields or request.n not in (None, 1):
+            raise RouterException("Unsupported Z.ai generation options: " + ", ".join(fields),
+                                  ErrorCategory.INVALID_REQUEST, status_code=422)
+        effort = request.get_effective_reasoning_effort() or "high"
         token = self._get_token(ctx)
         if not token:
-            raise RuntimeError("Missing Z.ai token")
+            raise normalize_upstream_error(status_code=401, response_body="Missing Z.ai token")
         user_id = extract_zai_user_id(token)
         if not user_id:
             raise RuntimeError("Invalid Z.ai JWT: user_id missing")
@@ -490,7 +458,7 @@ class ZaiWebAdapter(BaseModuleAdapter):
         async with self.create_http_client(ctx) as client:
             fe_version = await get_zai_fe_version(client)
             chat_id, user_msg_id = await self._create_chat(
-                client, token, user_prompt, upstream_model, fe_version
+                client, token, user_prompt, upstream_model, fe_version, effort
             )
 
             timestamp = int(time.time() * 1000)
@@ -513,10 +481,10 @@ class ZaiWebAdapter(BaseModuleAdapter):
                 "vlm_tools_enable": False,
                 "vlm_web_search_enable": False,
                 "vlm_website_mode": False,
-                "enable_thinking": True,
+                "enable_thinking": effort not in ("none", "off", "disabled"),
             }
             if effort_supported:
-                features_payload["reasoning_effort"] = "high"
+                features_payload["reasoning_effort"] = effort
 
             body_payload = {
                 "stream": True,
@@ -546,34 +514,16 @@ class ZaiWebAdapter(BaseModuleAdapter):
             async with client.stream("POST", comp_url, headers=headers, json=body_payload, timeout=ctx.timeout or 120.0) as resp:
                 if resp.status_code != 200:
                     err_text = await resp.aread()
-                    raise RuntimeError(f"Z.ai chat failed (HTTP {resp.status_code}): {err_text.decode('utf-8', errors='ignore')[:300]}")
+                    raise normalize_upstream_error(status_code=resp.status_code, response_body=(await resp.aread()).decode("utf-8", errors="replace"))
 
                 async for line in resp.aiter_lines():
                     if not line:
                         continue
-                    try:
-                        parsed = parse_zai_sse_line(line)
-                    except Exception as e:
-                        if role_emitted:
-                            chunk = {
-                                "id": resp_id,
-                                "object": "chat.completion.chunk",
-                                "created": created_ts,
-                                "model": model_name,
-                                "choices": [{"index": 0, "delta": {"content": f"\n\n[Z.ai upstream error: {e}]"}, "finish_reason": "stop"}],
-                            }
-                            yield f"data: {json.dumps(chunk)}\n\n"
-                            yield "data: [DONE]\n\n"
-                            return
-                        raise
+                    parsed = parse_zai_sse_line(line)
 
                     if not parsed:
                         continue
                     kind, text, done = parsed
-
-                    if done:
-                        yield "data: [DONE]\n\n"
-                        return
 
                     if text:
                         if not role_emitted:
@@ -597,4 +547,17 @@ class ZaiWebAdapter(BaseModuleAdapter):
                         }
                         yield f"data: {json.dumps(chunk)}\n\n"
 
-                yield "data: [DONE]\n\n"
+                    if done:
+                        raw = line[5:].strip()
+                        terminal_data = json.loads(raw) if raw != "[DONE]" else {}
+                        choice = (terminal_data.get("choices") or [{}])[0]
+                        terminal = {"id": resp_id, "object": "chat.completion.chunk", "created": created_ts,
+                                    "model": model_name, "choices": [{"index": 0, "delta": {},
+                                    "finish_reason": choice.get("finish_reason") or "stop"}]}
+                        if terminal_data.get("usage"):
+                            terminal["usage"] = terminal_data["usage"]
+                        yield f"data: {json.dumps(terminal)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+
+                raise normalize_upstream_error(status_code=502, response_body="Z.ai stream ended before terminal event")

@@ -1,4 +1,7 @@
 import os
+import asyncio
+import hashlib
+from contextlib import aclosing
 import json
 import time
 import uuid
@@ -58,6 +61,7 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
     def __init__(self):
         super().__init__()
         self._token_cache: Dict[str, Dict[str, Any]] = {}
+        self._refresh_locks: Dict[str, asyncio.Lock] = {}
 
     def _find_local_auth_file(self) -> Optional[Path]:
         for p in LOCAL_AUTH_PATHS:
@@ -121,53 +125,56 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
         return {}
 
     async def _get_valid_access_token(self, ctx: ModuleExecutionContext) -> Tuple[str, str]:
-        """
-        Returns (access_token, email), auto-refreshing via xAI OAuth if needed.
-        """
         raw = self._resolve_raw_tokens(ctx)
-        refresh_token = _clean_str(raw.get("refresh_token"))
-        access_token = _clean_str(raw.get("access_token"))
-        email = _clean_str(raw.get("email"))
-
-        cache_key = refresh_token or access_token
-        cached = self._token_cache.get(cache_key)
-        now = time.time()
-        if cached and cached.get("expires_at", 0) > now + 60:
-            return cached["access_token"], email or cached.get("email", "")
-
-        if refresh_token:
+        refresh = _clean_str(raw.get("refresh_token"))
+        access = _clean_str(raw.get("access_token"))
+        identity = _clean_str(raw.get("email"))
+        key = str(ctx.extra_config.get("credential_id") or
+                  hashlib.sha256((refresh or access).encode()).hexdigest())
+        async with self._refresh_locks.setdefault(key, asyncio.Lock()):
+            cached = self._token_cache.get(key) or {}
+            persist = ctx.extra_config.get("persist_credentials")
+            if cached.get("pending_persistence") and persist:
+                await persist(cached["pending_persistence"])
+                cached.pop("pending_persistence", None)
+            if cached.get("expires_at", 0) > time.time() + 60:
+                return cached["access_token"], identity or cached.get("email", "")
+            refresh = cached.get("refresh_token") or refresh
+            if not refresh:
+                if access:
+                    return access, identity
+                raise normalize_upstream_error(status_code=401, response_body="Missing CLI credentials")
             async with self.create_http_client(ctx) as client:
-                try:
-                    resp = await client.post(
-                        GROK_TOKEN_URL,
-                        data={
-                            "grant_type": "refresh_token",
-                            "client_id": GROK_CLIENT_ID,
-                            "refresh_token": refresh_token,
-                        },
-                        headers={"Content-Type": "application/x-www-form-urlencoded"},
-                        timeout=15.0,
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        new_access = data.get("access_token")
-                        expires_in = data.get("expires_in", 21600)
-                        if new_access:
-                            self._token_cache[cache_key] = {
-                                "access_token": new_access,
-                                "email": email,
-                                "expires_at": now + expires_in,
-                            }
-                            return new_access, email
-                    else:
-                        logger.warning(f"xAI OAuth refresh returned HTTP {resp.status_code}: {resp.text[:200]}")
-                except Exception as e:
-                    logger.warning(f"xAI OAuth refresh failed: {e}")
-
-        if access_token:
-            return access_token, email
-
-        raise ValueError("No xAI Grok Builder CLI token found. Log in via `grok login` or configure credentials.")
+                resp = await client.post(
+                    GROK_TOKEN_URL,
+                    data={"client_id": GROK_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": refresh},
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=15.0,
+                )
+                if resp.status_code != 200:
+                    # Never return a known-stale access token after refresh rejection.
+                    raise normalize_upstream_error(status_code=401 if resp.status_code == 400 else resp.status_code,
+                                                   response_body="CLI token refresh rejected")
+                data = resp.json()
+                access = data.get("access_token")
+                if not isinstance(access, str) or not access:
+                    raise normalize_upstream_error(status_code=502, response_body="Refresh response has no access token")
+                rotated = data.get("refresh_token") or refresh
+                fields = {"access_token": access, "refresh_token": rotated}
+                if data.get("id_token"):
+                    fields["id_token"] = data["id_token"]
+                self._token_cache[key] = {**fields, "email": identity,
+                                          "expires_at": time.time() + float(data.get("expires_in", 21600))}
+                cached = self._token_cache[key]
+                if not ctx.extra_config.get("credential_id"):
+                    alias = hashlib.sha256(rotated.encode()).hexdigest()
+                    self._token_cache[alias] = cached
+                    self._refresh_locks[alias] = self._refresh_locks[key]
+                if persist:
+                    cached["pending_persistence"] = fields
+                    await persist(fields)
+                    cached.pop("pending_persistence", None)
+                ctx.credentials.update(fields)
+                return access, identity
 
     def _build_headers(self, access_token: str) -> Dict[str, str]:
         return {
@@ -285,6 +292,7 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
         request: ChatCompletionRequest,
         ctx: ModuleExecutionContext,
     ) -> AsyncGenerator[str, None]:
+        options = tool_options(request)
         access_token, _ = await self._get_valid_access_token(ctx)
         model = request.model or ctx.model_id or "grok-4.7"
         if model.startswith("grok_builder_cli/"):
@@ -301,7 +309,7 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
             "include": ["reasoning.encrypted_content"],
         }
 
-        body.update(tool_options(request))
+        body.update(options)
 
         async with self.create_http_client(ctx) as client:
             async with client.stream(
@@ -313,7 +321,12 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
             ) as resp:
                 if resp.status_code != 200:
                     err_body = await resp.aread()
+                    try:
+                        retry_after = float(resp.headers["Retry-After"])
+                    except (KeyError, ValueError):
+                        retry_after = None
                     raise normalize_upstream_error(
+                        retry_after=retry_after,
                         status_code=resp.status_code,
                         response_body=err_body.decode("utf-8", errors="replace"),
                     )
@@ -321,5 +334,6 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
                 chunk_id = f"chatcmpl-grok-{uuid.uuid4().hex[:12]}"
                 created = int(time.time())
 
-                async for chunk in responses_to_chat(resp.aiter_lines(), model, chunk_id, created):
-                    yield chunk
+                async with aclosing(responses_to_chat(resp.aiter_lines(), model, chunk_id, created)) as source:
+                    async for chunk in source:
+                        yield chunk

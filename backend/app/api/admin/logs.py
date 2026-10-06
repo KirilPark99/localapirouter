@@ -4,14 +4,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.api.deps import get_current_admin
 from app.services.log_service import LogService
-from app.schemas.entities import RequestLogRead, LogsSummaryResponse
+from app.schemas.entities import RequestLogRead, LogsSummaryResponse, LogDateFilter
 
 router = APIRouter(prefix="/logs", tags=["Admin Logs"])
 
 @router.get("/summary", response_model=LogsSummaryResponse)
 async def get_logs_summary(
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    start_date: Optional[LogDateFilter] = None,
+    end_date: Optional[LogDateFilter] = None,
     mode: Optional[str] = None,
     status: Optional[str] = None,
     status_code: Optional[int] = None,
@@ -48,8 +48,8 @@ async def list_logs(
     response: Response,
     limit: int = 50,
     offset: int = 0,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    start_date: Optional[LogDateFilter] = None,
+    end_date: Optional[LogDateFilter] = None,
     mode: Optional[str] = None,
     status: Optional[str] = None,
     status_code: Optional[int] = None,

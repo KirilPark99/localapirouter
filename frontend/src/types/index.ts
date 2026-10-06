@@ -294,6 +294,7 @@ export interface FusionProfile {
   judge_thinking_effort?: string | null;
   judge_temperature?: number | null;
   temperature?: number | null;
+  context_length?: number | null;
   system_prompt?: string;
   min_successful_candidates: number;
   max_parallelism: number;

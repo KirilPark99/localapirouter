@@ -4,13 +4,14 @@ import time
 import uuid
 import logging
 import asyncio
+import threading
 import subprocess
 import urllib.request
 import urllib.error
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
-from app.modules.base import BaseModuleAdapter, ModuleExecutionContext
+from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_chat_completion
 from app.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -18,7 +19,7 @@ from app.schemas.chat import (
     ChatMessage,
     UsageInfo,
 )
-from app.core.errors import RouterException, ErrorCategory
+from app.core.errors import RouterException, ErrorCategory, normalize_upstream_error
 from app.adapters.base import DiscoveredModelData
 
 logger = logging.getLogger("app.modules.duckduckgo_web")
@@ -310,41 +311,8 @@ class DuckDuckGoWebAdapter(BaseModuleAdapter):
         request: ChatCompletionRequest,
         ctx: ModuleExecutionContext,
     ) -> ChatCompletionResponse:
-        full_content = ""
-        async for chunk_str in self.stream_chat(request, ctx):
-            if not chunk_str.startswith("data: "):
-                continue
-            data_part = chunk_str[6:].strip()
-            if data_part == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data_part)
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                content = delta.get("content", "")
-                if content:
-                    full_content += content
-            except Exception:
-                pass
-
-        model_name = normalize_model(request.model or ctx.model_id)
-        return ChatCompletionResponse(
-            id=f"chatcmpl-ddg-{uuid.uuid4().hex[:12]}",
-            object="chat.completion",
-            created=int(time.time()),
-            model=model_name,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=ChatMessage(role="assistant", content=full_content),
-                    finish_reason="stop",
-                )
-            ],
-            usage=UsageInfo(
-                prompt_tokens=len(str(request.messages)) // 4,
-                completion_tokens=len(full_content) // 4,
-                total_tokens=(len(str(request.messages)) + len(full_content)) // 4,
-            ),
-        )
+        model = normalize_model(request.model or ctx.model_id)
+        return await collect_chat_completion(self.stream_chat(request, ctx), model, require_complete=True)
 
     async def stream_chat(
         self,
@@ -354,113 +322,129 @@ class DuckDuckGoWebAdapter(BaseModuleAdapter):
         model = normalize_model(request.model or ctx.model_id)
         payload = self._build_payload(request, model)
 
-        queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+        queue = asyncio.Queue(maxsize=64)
+        loop = asyncio.get_running_loop()
+        stop = threading.Event()
+        active_response = []
         req_id = f"chatcmpl-ddg-{uuid.uuid4().hex[:12]}"
         created_ts = int(time.time())
+
+        def deliver(item):
+            # Bounded backpressure; callbacks mutate asyncio.Queue only on its loop.
+            while not stop.is_set():
+                acknowledged = threading.Event()
+                accepted = []
+                def put():
+                    try:
+                        if not stop.is_set():
+                            queue.put_nowait(item)
+                            accepted.append(True)
+                    except asyncio.QueueFull:
+                        pass
+                    finally:
+                        acknowledged.set()
+                try:
+                    loop.call_soon_threadsafe(put)
+                except RuntimeError:
+                    return
+                while not acknowledged.wait(.05):
+                    if stop.is_set():
+                        return
+                if accepted:
+                    return
+                stop.wait(.01)
 
         def _worker():
             try:
                 cookie_val = ctx.credentials.get("cookie")
                 opener = build_opener(ctx.proxy_url)
                 auth_headers = self._acquire_auth_headers_sync(ctx.proxy_url, cookie_val)
-
+                if stop.is_set():
+                    return
                 base_cookie = "5=1; ah=wt-wt; dcs=1; dcm=3; isRecentChatOn=1"
                 cookie_header = f"{base_cookie}; {cookie_val.strip()}" if cookie_val and cookie_val.strip() else base_cookie
-
-                headers = {
-                    "Content-Type": "application/json",
-                    "Accept": "text/event-stream",
-                    "User-Agent": DEFAULT_USER_AGENT,
-                    "Origin": DUCKDUCKGO_BASE,
-                    "Referer": f"{DUCKDUCKGO_BASE}/",
-                    "Cookie": cookie_header,
-                    **auth_headers,
-                }
-
+                headers = {"Content-Type": "application/json", "Accept": "text/event-stream",
+                           "User-Agent": DEFAULT_USER_AGENT, "Origin": DUCKDUCKGO_BASE,
+                           "Referer": f"{DUCKDUCKGO_BASE}/", "Cookie": cookie_header, **auth_headers}
                 data_bytes = json.dumps(payload).encode("utf-8")
                 req = urllib.request.Request(CHAT_URL, data=data_bytes, headers=headers, method="POST")
-
                 try:
-                    resp = opener.open(req, timeout=60)
+                    resp = opener.open(req, timeout=ctx.timeout or 60)
                 except urllib.error.HTTPError as e:
-                    # Retry once if 418 challenge occurred
-                    if e.code == 418:
-                        next_hash = e.headers.get("x-vqd-hash-1")
-                        if next_hash:
-                            headers["x-vqd-hash-1"] = solve_challenge_sync(next_hash, DEFAULT_USER_AGENT)
-                            headers.pop("x-vqd-4", None)
-                        else:
-                            auth_headers = self._acquire_auth_headers_sync(ctx.proxy_url, cookie_val)
-                            headers.update(auth_headers)
-                        req = urllib.request.Request(CHAT_URL, data=data_bytes, headers=headers, method="POST")
-                        resp = opener.open(req, timeout=60)
+                    if e.code != 418:
+                        raise
+                    next_hash = e.headers.get("x-vqd-hash-1")
+                    if next_hash:
+                        headers["x-vqd-hash-1"] = solve_challenge_sync(next_hash, DEFAULT_USER_AGENT)
+                        headers.pop("x-vqd-4", None)
                     else:
-                        err_body = e.read().decode("utf-8", errors="ignore")
-                        if "ERR_MODEL_RESTRICTED" in err_body or e.code == 404:
-                            queue.put_nowait(f"__RESTRICTED__:{model}")
-                            return
-                        if "ERR_RATE_LIMIT" in err_body or e.code == 429:
-                            queue.put_nowait(f"__RATELIMIT__:{e.code}")
-                            return
-                        raise RuntimeError(f"DuckDuckGo error {e.code}: {err_body[:300]}")
-
+                        headers.update(self._acquire_auth_headers_sync(ctx.proxy_url, cookie_val))
+                    if stop.is_set():
+                        return
+                    req = urllib.request.Request(CHAT_URL, data=data_bytes, headers=headers, method="POST")
+                    resp = opener.open(req, timeout=ctx.timeout or 60)
+                active_response.append(resp)
+                if stop.is_set():
+                    resp.close()
+                    return
+                terminal = False
                 with resp:
                     for line_bytes in resp:
-                        line = line_bytes.decode("utf-8", errors="ignore").strip()
-                        if not line:
+                        if stop.is_set():
+                            return
+                        line = line_bytes.decode("utf-8", errors="replace").strip()
+                        if not line.startswith("data:"):
                             continue
-                        if line.startswith("data: "):
-                            raw_data = line[6:].strip()
-                            if raw_data == "[DONE]":
-                                break
-                            try:
-                                data = json.loads(raw_data)
-                                content = data.get("message") or data.get("content") or ""
-                                if content:
-                                    chunk = {
-                                        "id": req_id,
-                                        "object": "chat.completion.chunk",
-                                        "created": created_ts,
-                                        "model": model,
-                                        "choices": [
-                                            {
-                                                "index": 0,
-                                                "delta": {"content": content},
-                                                "finish_reason": None,
-                                            }
-                                        ],
-                                    }
-                                    queue.put_nowait(f"data: {json.dumps(chunk)}\n\n")
-                            except Exception:
-                                pass
+                        raw = line[5:].strip()
+                        if raw == "[DONE]":
+                            terminal = True
+                            break
+                        data = json.loads(raw)
+                        if data.get("error"):
+                            raise normalize_upstream_error(response_body=data)
+                        content = data.get("message") or data.get("content") or ""
+                        if content:
+                            chunk = {"id": req_id, "object": "chat.completion.chunk", "created": created_ts,
+                                     "model": model, "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}]}
+                            deliver(f"data: {json.dumps(chunk)}\n\n")
+                if not terminal and not stop.is_set():
+                    raise normalize_upstream_error(status_code=502, response_body="DuckDuckGo stream ended before terminal event")
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
+                e.close()
+                if "ERR_MODEL_RESTRICTED" in body:
+                    deliver(RouterException(f"Модель '{model}' требует DuckDuckGo Pro", ErrorCategory.AUTH_ERROR,
+                                            status_code=403, upstream_status=e.code))
+                else:
+                    try:
+                        retry_after = float(e.headers["Retry-After"])
+                    except (KeyError, TypeError, ValueError):
+                        retry_after = None
+                    deliver(normalize_upstream_error(status_code=e.code, response_body=body, retry_after=retry_after))
             except Exception as e:
-                logger.error(f"DuckDuckGo stream error: {e}")
-                queue.put_nowait(f"__ERROR__:{str(e)}")
+                deliver(e if isinstance(e, RouterException) else normalize_upstream_error(exception=e))
             finally:
-                queue.put_nowait(None)
+                deliver(None)
 
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, _worker)
-
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            if item.startswith("__RESTRICTED__:"):
-                m_name = item[len("__RESTRICTED__:"):]
-                raise RouterException(
-                    f"Модель '{m_name}' доступна только по платной подписке DuckDuckGo Pro. Доступные бесплатные модели: gpt-5.6-luna, gpt-5.4-mini, claude-haiku-4-5, mistral-small-2603, tinfoil/gpt-oss-120b, tinfoil/gemma4-31b.",
-                    category=ErrorCategory.AUTH_ERROR,
-                    status_code=403,
-                )
-            if item.startswith("__RATELIMIT__:"):
-                raise RouterException(
-                    "DuckDuckGo временно ограничил этот IP по частоте запросов (HTTP 429). Привяжите прокси к профилю DuckDuckGo в панели управления или подождите минуту.",
-                    category=ErrorCategory.RATE_LIMIT,
-                    status_code=429,
-                )
-            if item.startswith("__ERROR__:"):
-                raise RuntimeError(item[len("__ERROR__:"):])
-            yield item
-
-        yield "data: [DONE]\n\n"
+        worker = loop.run_in_executor(None, _worker)
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+            terminal = {"id": req_id, "object": "chat.completion.chunk", "created": created_ts,
+                        "model": model, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+            yield f"data: {json.dumps(terminal)}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            stop.set()
+            if active_response:
+                active_response[0].close()
+            # A blocked connect is bounded by HTTP timeout; never hang cancellation.
+            try:
+                await asyncio.wait_for(asyncio.shield(worker), .5)
+            except (TimeoutError, asyncio.CancelledError):
+                pass

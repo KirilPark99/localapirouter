@@ -1,5 +1,6 @@
 """Responses wire format shared by the Codex and Grok CLI endpoints."""
 import json
+from contextlib import aclosing
 from typing import Any, AsyncGenerator, AsyncIterator
 
 from app.core.errors import ErrorCategory, RouterException, normalize_upstream_error
@@ -45,6 +46,26 @@ def messages_to_input(messages: list[ChatMessage]) -> list[dict[str, Any]]:
 
 def tool_options(request: ChatCompletionRequest) -> dict[str, Any]:
     options = {}
+    unsupported = ("temperature", "top_p", "stop", "seed", "response_format",
+                   "presence_penalty", "frequency_penalty", "logit_bias", "user", "metadata")
+    fields = [key for key in unsupported if getattr(request, key, None) is not None]
+    if request.n not in (None, 1):
+        fields.append("n")
+    if request.reasoning and set(request.reasoning) - {"effort"}:
+        fields.append("reasoning")
+    if request.thinking and request.thinking != {"type": "disabled"}:
+        fields.append("thinking")
+    if fields:
+        raise RouterException("Unsupported CLI options: " + ", ".join(fields),
+                              ErrorCategory.INVALID_REQUEST, status_code=422)
+    maximum = request.get_effective_max_tokens()
+    if maximum is not None:
+        options["max_output_tokens"] = maximum
+    effort = request.get_effective_reasoning_effort()
+    if effort is not None:
+        options["reasoning"] = {"effort": effort}
+    if request.prompt_cache_key is not None:
+        options["prompt_cache_key"] = request.prompt_cache_key
     if request.tools is not None:
         tools = []
         for tool in request.tools:
@@ -107,71 +128,74 @@ async def responses_to_chat(lines: AsyncIterator[str], model: str,
             return {"tool_calls": [{"index": state["index"], "function": {"arguments": suffix}}]}
         return None
 
-    async for line in lines:
-        if not line.startswith("data:"):
-            continue
-        raw = line[5:].strip()
-        if not raw or raw == "[DONE]":
-            continue
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        kind = event.get("type", "")
-        if kind in ("error", "response.failed"):
-            error = event.get("error") or event.get("response", {}).get("error") or event
-            raise normalize_upstream_error(status_code=event.get("status") or 502, response_body={"error": error})
-        if kind in ("response.output_text.delta", "response.text.delta"):
-            text_seen = True
-            yield chunk({"content": event.get("delta", "")})
-        elif kind in ("response.reasoning_summary_part.delta", "response.reasoning.delta", "response.reasoning_summary_text.delta"):
-            yield chunk({"reasoning_content": event.get("delta", "")})
-        elif kind == "response.content_part.delta":
-            delta = event.get("delta", {})
-            text_seen = True
-            yield chunk({"content": delta.get("text", "") if isinstance(delta, dict) else str(delta)})
-        elif kind in ("response.output_item.added", "response.output_item.done"):
-            item = event.get("item") or {}
-            if item.get("type") == "function_call":
-                delta = call_delta(event.get("output_index", 0), item)
-                if delta:
-                    yield chunk(delta)
-        elif kind == "response.function_call_arguments.delta":
-            index = event.get("output_index")
-            if index not in calls:
-                index = next((i for i, c in calls.items() if c["item_id"] == event.get("item_id")), index)
-            if index not in calls:
-                invalid("Upstream function argument delta arrived without a function call")
-            state = calls[index]
-            args = event.get("delta", "")
-            state["arguments"] += args
-            yield chunk({"tool_calls": [{"index": state["index"], "function": {"arguments": args}}]})
-        elif kind == "response.function_call_arguments.done":
-            index = event.get("output_index", 0)
-            delta = call_delta(index, event, event.get("arguments", ""))
-            if delta:
-                yield chunk(delta)
-        elif kind in ("response.completed", "response.incomplete"):
-            response = event.get("response") or {}
-            for index, item in enumerate(response.get("output") or []):
+    async with aclosing(lines):
+        async for line in lines:
+            if not line.startswith("data:"):
+                continue
+            raw = line[5:].strip()
+            if not raw or raw == "[DONE]":
+                continue
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            kind = event.get("type", "")
+            if kind in ("error", "response.failed"):
+                error = event.get("error") or event.get("response", {}).get("error") or event
+                raise normalize_upstream_error(status_code=event.get("status") or 502, response_body={"error": error})
+            if kind in ("response.output_text.delta", "response.text.delta"):
+                text_seen = True
+                yield chunk({"content": event.get("delta", "")})
+            elif kind in ("response.reasoning_summary_part.delta", "response.reasoning.delta", "response.reasoning_summary_text.delta"):
+                yield chunk({"reasoning_content": event.get("delta", "")})
+            elif kind == "response.content_part.delta":
+                delta = event.get("delta", {})
+                text_seen = True
+                yield chunk({"content": delta.get("text", "") if isinstance(delta, dict) else str(delta)})
+            elif kind in ("response.output_item.added", "response.output_item.done"):
+                item = event.get("item") or {}
                 if item.get("type") == "function_call":
-                    delta = call_delta(index, item)
+                    delta = call_delta(event.get("output_index", 0), item)
                     if delta:
                         yield chunk(delta)
-                elif item.get("type") == "message" and not text_seen:
-                    for part in item.get("content", []):
-                        if part.get("type") == "output_text":
-                            yield chunk({"content": part.get("text", "")})
-            raw_usage = response.get("usage")
-            usage = None
-            if raw_usage:
-                usage = {"prompt_tokens": raw_usage.get("input_tokens", 0),
-                         "completion_tokens": raw_usage.get("output_tokens", 0),
-                         "total_tokens": raw_usage.get("total_tokens", 0)}
-            reason = "length" if kind == "response.incomplete" else ("tool_calls" if calls else "stop")
-            yield chunk({}, reason, usage)
-            finished = True
-            break
+            elif kind == "response.function_call_arguments.delta":
+                index = event.get("output_index")
+                if index not in calls:
+                    index = next((i for i, c in calls.items() if c["item_id"] == event.get("item_id")), index)
+                if index not in calls:
+                    invalid("Upstream function argument delta arrived without a function call")
+                state = calls[index]
+                args = event.get("delta", "")
+                state["arguments"] += args
+                yield chunk({"tool_calls": [{"index": state["index"], "function": {"arguments": args}}]})
+            elif kind == "response.function_call_arguments.done":
+                index = event.get("output_index", 0)
+                delta = call_delta(index, event, event.get("arguments", ""))
+                if delta:
+                    yield chunk(delta)
+            elif kind in ("response.completed", "response.incomplete"):
+                response = event.get("response") or {}
+                for index, item in enumerate(response.get("output") or []):
+                    if item.get("type") == "function_call":
+                        delta = call_delta(index, item)
+                        if delta:
+                            yield chunk(delta)
+                    elif item.get("type") == "message" and not text_seen:
+                        for part in item.get("content", []):
+                            if part.get("type") == "output_text":
+                                yield chunk({"content": part.get("text", "")})
+                raw_usage = response.get("usage")
+                usage = None
+                if raw_usage:
+                    usage = {"prompt_tokens": raw_usage.get("input_tokens", 0),
+                             "completion_tokens": raw_usage.get("output_tokens", 0),
+                             "total_tokens": raw_usage.get("total_tokens", 0),
+                             "prompt_tokens_details": raw_usage.get("input_tokens_details"),
+                             "completion_tokens_details": raw_usage.get("output_tokens_details")}
+                reason = "length" if kind == "response.incomplete" else ("tool_calls" if calls else "stop")
+                yield chunk({}, reason, usage)
+                finished = True
+                break
     if not finished:
-        yield chunk({}, "tool_calls" if calls else "stop")
+        raise normalize_upstream_error(status_code=502, response_body="Responses stream ended before terminal event")
     yield "data: [DONE]\n\n"

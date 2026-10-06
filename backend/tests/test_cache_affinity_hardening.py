@@ -15,9 +15,9 @@ def request(**kwargs):
 
 def target():
     provider = NS(id=1, enabled=True, adapter_type="generic_openai", base_url="https://synthetic.invalid", adapter_configuration={}, extra_headers={}, updated_at=None)
-    model = NS(id=2, provider=provider, provider_model_id="synthetic", canonical_slug="synthetic/model", enabled=True, available=True, temperature=0.7, reasoning_effort="high", updated_at=None)
+    model = NS(id=2, provider_id=1, provider=provider, provider_model_id="synthetic", canonical_slug="synthetic/model", enabled=True, available=True, temperature=0.7, reasoning_effort="high", updated_at=None)
     cred = NS(id=3, enabled=True, provider=provider, metadata_json={}, updated_at=None)
-    candidate = NS(id=4, is_active=True, candidate_type="model", target_profile_id=None, provider=provider, model=model, credential_id=3, credential=cred, credential_group=None, temperature=0.5, thinking_effort="medium", updated_at=None)
+    candidate = NS(id=4, priority_order=0, is_active=True, candidate_type="model", target_profile_id=None, provider=provider, model=model, credential_id=3, credential=cred, credential_group=None, temperature=0.5, thinking_effort="medium", updated_at=None)
     profile = NS(id=5, enabled=True, candidates=[candidate], temperature=0.3, thinking_effort="low", strategy="priority", randomize_candidates=False, updated_at=None)
     return profile, candidate, cred, model
 
@@ -96,14 +96,15 @@ async def test_priority_group_affinity_and_parameters(monkeypatch, stream, expli
     profile.strategy = "cache-optimized"
     profile.name = "Synthetic"
     profile.timeout_seconds = 60
-    profile.fallback_conditions = []
+    profile.fallback_conditions = None
+    profile.retry_count = 0
     candidate.credential_id = None
     candidate.credential_group = "synthetic"
     model.display_name = "Synthetic"
     model.input_price_per_1m = model.output_price_per_1m = 0
     provider = candidate.provider
     provider.name = "Synthetic"
-    creds = [NS(id=i, name=f"credential-{i}", provider=provider, enabled=True,
+    creds = [NS(id=i, provider_id=provider.id, rpm_limit=None, tpm_limit=None, max_concurrency=None, name=f"credential-{i}", provider=provider, enabled=True,
                 encrypted_api_key="synthetic-not-a-real-secret", proxy=None,
                 metadata_json={}) for i in (101, 102)]
     db = NS(execute=AsyncMock(return_value=NS(scalars=lambda: NS(all=lambda: creds))))

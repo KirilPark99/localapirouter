@@ -2,7 +2,7 @@ import hashlib
 import secrets
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
-from sqlalchemy import select
+from sqlalchemy import select, update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.entities import RouterApiKey
 from app.schemas.entities import (
@@ -84,13 +84,13 @@ class ApiKeyService:
             k.allowed_fusions = data.allowed_fusions
         if data.allowed_judges is not None:
             k.allowed_judges = data.allowed_judges
-        if data.rate_limit_rpm is not None:
+        if "rate_limit_rpm" in data.model_fields_set:
             k.rate_limit_rpm = data.rate_limit_rpm
-        if data.rate_limit_tpm is not None:
+        if "rate_limit_tpm" in data.model_fields_set:
             k.rate_limit_tpm = data.rate_limit_tpm
-        if data.request_limit is not None:
+        if "request_limit" in data.model_fields_set:
             k.request_limit = data.request_limit
-        if data.expiration_date is not None:
+        if "expiration_date" in data.model_fields_set:
             k.expiration_date = data.expiration_date
         if data.ip_restrictions is not None:
             k.ip_restrictions = data.ip_restrictions
@@ -132,15 +132,24 @@ class ApiKeyService:
         if expiration and now > expiration:
             return False, None, "API Key has expired"
 
-        if key_obj.request_limit and key_obj.total_requests >= key_obj.request_limit:
+        if key_obj.request_limit is not None and key_obj.total_requests >= key_obj.request_limit:
             return False, None, "API Key request limit reached"
 
-        # Update last used and total requests
-        key_obj.last_used_at = now
-        key_obj.total_requests += 1
-        await db.commit()
-
         return True, key_obj, "OK"
+
+    @classmethod
+    async def admit_inference(cls, db: AsyncSession, key: RouterApiKey):
+        from app.core.errors import RouterException, ErrorCategory
+        now = datetime.now(timezone.utc)
+        result = await db.execute(update(RouterApiKey).where(
+            RouterApiKey.id == key.id, RouterApiKey.enabled == True,
+            or_(RouterApiKey.expiration_date.is_(None), RouterApiKey.expiration_date > now),
+            or_(RouterApiKey.request_limit.is_(None), RouterApiKey.total_requests < RouterApiKey.request_limit),
+        ).values(total_requests=RouterApiKey.total_requests + 1, last_used_at=now).execution_options(synchronize_session=False))
+        if result.rowcount != 1:
+            await db.rollback()
+            raise RouterException("API key inference quota reached or key is no longer active", ErrorCategory.RATE_LIMIT, status_code=429)
+        await db.commit()
 
     @staticmethod
     def _build_read(k: RouterApiKey) -> RouterApiKeyRead:
@@ -154,7 +163,7 @@ class ApiKeyService:
             allowed_models=k.allowed_models,
             allowed_routes=k.allowed_routes,
             allowed_fusions=k.allowed_fusions,
-            allowed_judges=getattr(k, "allowed_judges", ["*"]) or ["*"],
+            allowed_judges=k.allowed_judges if k.allowed_judges is not None else ["*"],
             rate_limit_rpm=k.rate_limit_rpm,
             rate_limit_tpm=k.rate_limit_tpm,
             request_limit=k.request_limit,

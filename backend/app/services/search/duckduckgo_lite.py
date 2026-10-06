@@ -109,7 +109,6 @@ def parse_duckduckgo_lite(raw_html: str, max_results: int = 10) -> List[Dict[str
 
     capped_html = raw_html[:MAX_HTML_BYTES]
     anchors = list(ANCHOR_RE.finditer(capped_html))
-    snippets = list(SNIPPET_RE.finditer(capped_html))
 
     results: List[Dict[str, str]] = []
 
@@ -131,8 +130,10 @@ def parse_duckduckgo_lite(raw_html: str, max_results: int = 10) -> List[Dict[str
 
         title = strip_tags(raw_title)
         snippet = ""
-        if i < len(snippets):
-            snippet = strip_tags(snippets[i].group(1))
+        group_end = anchors[i + 1].start() if i + 1 < len(anchors) else len(capped_html)
+        local_snippet = SNIPPET_RE.search(capped_html, a_match.end(), group_end)
+        if local_snippet:
+            snippet = strip_tags(local_snippet.group(1))
 
         results.append(
             {

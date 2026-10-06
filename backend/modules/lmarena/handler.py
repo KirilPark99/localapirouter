@@ -7,7 +7,8 @@ import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
-from app.modules.base import BaseModuleAdapter, ModuleExecutionContext
+from app.core.errors import normalize_upstream_error, RouterException, ErrorCategory
+from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_chat_completion
 from app.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -281,7 +282,7 @@ def parse_arena_sse_line(line: str) -> Optional[Tuple[str, str]]:
     elif code == "d":
         if isinstance(val, dict) and val.get("finishReason") == "error":
             return ("error", "Arena stream finished with an error")
-        return ("done", "")
+        return ("done", val if isinstance(val, dict) else {})
     elif code == "3":
         err_msg = val if isinstance(val, str) else (val.get("error") or val.get("message") or "Unknown error")
         return ("error", str(err_msg))
@@ -362,50 +363,8 @@ class LMArenaAdapter(BaseModuleAdapter):
         request: ChatCompletionRequest,
         ctx: ModuleExecutionContext,
     ) -> ChatCompletionResponse:
-        full_content = ""
-        full_reasoning = ""
-        model_name = request.model or ctx.model_id or "claude-sonnet-5"
-
-        async for chunk_str in self.stream_chat(request, ctx):
-            if not chunk_str.startswith("data: "):
-                continue
-            data_part = chunk_str[6:].strip()
-            if data_part == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data_part)
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                content = delta.get("content", "")
-                reasoning = delta.get("reasoning_content", "")
-                if content:
-                    full_content += content
-                if reasoning:
-                    full_reasoning += reasoning
-            except Exception:
-                pass
-
-        msg = ChatMessage(role="assistant", content=full_content)
-        if full_reasoning:
-            msg.reasoning_content = full_reasoning
-
-        return ChatCompletionResponse(
-            id=f"chatcmpl-lma-{uuid.uuid4().hex[:12]}",
-            object="chat.completion",
-            created=int(time.time()),
-            model=model_name,
-            choices=[
-                ChatCompletionChoice(
-                    index=0,
-                    message=msg,
-                    finish_reason="stop",
-                )
-            ],
-            usage=UsageInfo(
-                prompt_tokens=len(str(request.messages)) // 4,
-                completion_tokens=(len(full_content) + len(full_reasoning)) // 4,
-                total_tokens=(len(str(request.messages)) + len(full_content) + len(full_reasoning)) // 4,
-            ),
-        )
+        model = request.model or ctx.model_id or "claude-sonnet-5"
+        return await collect_chat_completion(self.stream_chat(request, ctx), model, require_complete=True)
 
     async def stream_chat(
         self,
@@ -474,7 +433,7 @@ class LMArenaAdapter(BaseModuleAdapter):
                             err_decoded = str(err_json["error"])
                     except Exception:
                         pass
-                    raise RuntimeError(f"Arena error (HTTP {resp.status_code}): {err_decoded[:300]}")
+                    raise normalize_upstream_error(status_code=resp.status_code, response_body=(await resp.aread()).decode("utf-8", errors="replace"))
 
                 async for line in resp.aiter_lines():
                     if not line:
@@ -486,10 +445,20 @@ class LMArenaAdapter(BaseModuleAdapter):
                     if kind == "heartbeat":
                         continue
                     if kind == "done":
+                        terminal = {"id": req_id, "object": "chat.completion.chunk", "created": created_ts,
+                                    "model": model_name, "choices": [{"index": 0, "delta": {},
+                                    "finish_reason": val.get("finishReason") or "stop"}]}
+                        raw_usage = val.get("usage")
+                        if raw_usage:
+                            prompt = raw_usage.get("promptTokens", raw_usage.get("prompt_tokens", 0))
+                            completion = raw_usage.get("completionTokens", raw_usage.get("completion_tokens", 0))
+                            terminal["usage"] = {"prompt_tokens": prompt, "completion_tokens": completion,
+                                                 "total_tokens": prompt + completion}
+                        yield f"data: {json.dumps(terminal)}\n\n"
                         yield "data: [DONE]\n\n"
                         return
                     if kind == "error":
-                        raise RuntimeError(f"Arena upstream error: {val}")
+                        raise normalize_upstream_error(status_code=502, response_body=f"Arena upstream error: {val}")
 
                     if not role_emitted:
                         role_emitted = True
@@ -512,4 +481,4 @@ class LMArenaAdapter(BaseModuleAdapter):
                     }
                     yield f"data: {json.dumps(chunk)}\n\n"
 
-                yield "data: [DONE]\n\n"
+                raise normalize_upstream_error(status_code=502, response_body="Arena stream ended before terminal event")

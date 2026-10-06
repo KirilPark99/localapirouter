@@ -3,6 +3,7 @@ import { Plus, Trash2, Edit2, Merge, Sparkles, Scale, CheckCircle2, GitFork, Key
 import { apiRequest } from "../api/client";
 import { FusionProfile, Provider, Credential, DiscoveredModel, RoutingProfile, FusionParticipant } from "../types";
 import { Modal } from "../components/Modal";
+import { ProfileContextWindow, contextPresetFor } from "../components/ProfileContextWindow";
 import { getHiddenModelIds, isModelVisible } from "../utils/models";
 import { useI18n } from "../i18n/context";
 
@@ -34,6 +35,8 @@ export const FusionPage: React.FC = () => {
   const [formStrategy, setFormStrategy] = useState<"synthesize" | "best_of_n" | "consensus" | "critique_and_rewrite">("synthesize");
   const [formTempPreset, setFormTempPreset] = useState<string>("inherit");
   const [formCustomTemp, setFormCustomTemp] = useState<string>("");
+  const [formContextPreset, setFormContextPreset] = useState("auto");
+  const [formCustomContext, setFormCustomContext] = useState("");
   
   // Judge state
   const [formJudgeType, setFormJudgeType] = useState<"model" | "profile">("model");
@@ -121,6 +124,8 @@ export const FusionPage: React.FC = () => {
     setFormName("");
     setFormSlug("");
     setFormStrategy("synthesize");
+    setFormContextPreset("auto");
+    setFormCustomContext("");
     setFormTempPreset("inherit");
     setFormCustomTemp("");
     setFormJudgeType("model");
@@ -150,6 +155,8 @@ export const FusionPage: React.FC = () => {
     setFormName(f.name);
     setFormSlug(f.slug);
     setFormStrategy(f.strategy);
+    setFormContextPreset(contextPresetFor(f.context_length));
+    setFormCustomContext(f.context_length ? String(f.context_length) : "");
 
     // Profile temperature
     if (f.temperature !== null && f.temperature !== undefined) {
@@ -375,6 +382,7 @@ export const FusionPage: React.FC = () => {
         judge_thinking_effort: effJudgeThinking,
         judge_temperature: effJudgeTemp,
         temperature: effProfileTemp,
+        context_length: formContextPreset === "auto" ? null : Number(formContextPreset === "custom" ? formCustomContext : formContextPreset),
         min_successful_candidates: formMinSuccess,
         max_parallelism: 5,
         timeout_seconds: formTimeout,
@@ -746,6 +754,9 @@ export const FusionPage: React.FC = () => {
               <option value="critique_and_rewrite">Critique & Rewrite (Judge critiques flaws and writes optimal response)</option>
             </select>
           </div>
+
+          <ProfileContextWindow preset={formContextPreset} customValue={formCustomContext}
+            onPresetChange={setFormContextPreset} onCustomChange={setFormCustomContext} />
 
           {/* Profile Default Temperature */}
           <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl space-y-2">

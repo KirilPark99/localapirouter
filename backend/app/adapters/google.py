@@ -61,11 +61,31 @@ class GoogleAIStudioAdapter(BaseProviderAdapter):
 
         data = resp.json()
         models_raw = data.get("models", [])
+        seen_pages = set()
+        while data.get("nextPageToken"):
+            page = data["nextPageToken"]
+            if not isinstance(page, str) or page in seen_pages or len(seen_pages) >= 1000:
+                raise self.normalize_error(exception=httpx.RemoteProtocolError("Invalid or repeated Google models pagination cursor"))
+            seen_pages.add(page)
+            try:
+                resp = await client.get(url, headers=headers, params={**params, "pageToken": page})
+            except Exception as exc:
+                raise self.normalize_error(exception=exc)
+            if resp.status_code != 200:
+                raise self.normalize_error(status_code=resp.status_code, response_body=resp.text)
+            data = resp.json()
+            if not isinstance(data, dict) or not isinstance(data.get("models", []), list):
+                raise self.normalize_error(exception=httpx.RemoteProtocolError("Invalid Google models page"))
+            models_raw.extend(data.get("models", []))
         discovered: List[DiscoveredModelData] = []
+        seen_models = set()
 
         for m in models_raw:
             raw_name = m.get("name", "")  # e.g. "models/gemini-2.5-flash"
             model_id = raw_name.replace("models/", "")
+            if not model_id or model_id in seen_models:
+                continue
+            seen_models.add(model_id)
             methods = m.get("supportedGenerationMethods", [])
             # Only include models capable of generating content
             if "generateContent" not in methods and "chat" not in methods:

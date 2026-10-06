@@ -32,7 +32,10 @@ async def create_provider(
     username: str = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await ProviderService.create_provider(db, data)
+    try:
+        return await ProviderService.create_provider(db, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 @router.put("/{provider_id}", response_model=ProviderRead)
 async def update_provider(

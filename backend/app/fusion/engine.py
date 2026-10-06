@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import aclosing
 import time
 import uuid
 import json
@@ -195,6 +196,9 @@ class FusionEngine:
                     request_id=req_id,
                 )
 
+            if profile.max_parallelism <= 0 or profile.timeout_seconds <= 0 or profile.min_successful_candidates <= 0:
+                raise RouterException('Invalid fusion execution constraints', ErrorCategory.INVALID_REQUEST)
+
             # STEP 2: Async fan-out to all participants
             sem = asyncio.Semaphore(profile.max_parallelism)
 
@@ -202,8 +206,14 @@ class FusionEngine:
                 async with sem:
                     return await cls._execute_single_participant(idx, part, request, profile.timeout_seconds, profile=profile)
 
-            tasks = [run_participant(idx, p) for idx, p in enumerate(active_participants)]
-            results = await asyncio.gather(*tasks)
+            tasks = [asyncio.create_task(run_participant(idx, p)) for idx, p in enumerate(active_participants)]
+            try:
+                results = await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
             # STEP 3: Collect candidate results
             successful_candidates = []
@@ -213,7 +223,7 @@ class FusionEngine:
             for r in results:
                 total_cand_p_tokens += r["prompt_tokens"]
                 total_cand_c_tokens += r["completion_tokens"]
-                is_succ = r["content"] is not None
+                is_succ = isinstance(r["content"], str) and bool(r["content"].strip())
 
                 participants_trace.append({
                     "idx": r["idx"],
@@ -253,13 +263,9 @@ class FusionEngine:
             # STEP 4: Build Judge Request
             judge_messages = cls._build_judge_prompt(profile, request.messages, successful_candidates)
             judge_t0 = time.perf_counter()
-            judge_temp = profile.judge_temperature if profile.judge_temperature is not None else (
-                profile.temperature if profile.temperature is not None else (
-                    request.temperature if request.temperature is not None else (
-                        getattr(profile.judge_model, "temperature", None) if (profile.judge_model and getattr(profile.judge_model, "temperature", None) is not None) else 0.7
-                    )
-                )
-            )
+            judge_temp = RoutingEngine._apply_model_defaults(request, profile.judge_model,
+                candidate_temperature=profile.judge_temperature, profile_temperature=profile.temperature).temperature
+
 
             if judge_is_profile:
                 judge_req = ChatCompletionRequest(
@@ -284,7 +290,7 @@ class FusionEngine:
                     )
                 except Exception as e:
                     re = e if isinstance(e, RouterException) else (
-                        RouterException(f"Judge routing profile timed out after {profile.timeout_seconds}s", ErrorCategory.UPSTREAM_TIMEOUT, request_id=req_id)
+                        RouterException(f"Judge routing profile timed out after {profile.timeout_seconds}s", ErrorCategory.TIMEOUT, request_id=req_id)
                         if isinstance(e, asyncio.TimeoutError) else
                         RouterException(f"Judge routing profile failed: {e}", ErrorCategory.UPSTREAM_5XX, request_id=req_id)
                     )
@@ -299,8 +305,8 @@ class FusionEngine:
                 )
                 judge_provider = profile.judge_provider
                 judge_cred = profile.judge_credential
-                if judge_cred and not judge_cred.enabled:
-                    judge_cred = None
+                if profile.judge_credential_id is not None and (not judge_cred or not judge_cred.enabled):
+                    raise RouterException("Assigned judge credential unavailable", ErrorCategory.AUTH_ERROR)
                 if not judge_cred:
                     j_query = select(ProviderCredential).where(
                         ProviderCredential.provider_id == judge_provider.id,
@@ -315,7 +321,7 @@ class FusionEngine:
                         c for c in judge_creds
                         if circuit_breaker.is_available(c.id, profile.judge_model.provider_model_id if profile.judge_model else None)[0]
                     ]
-                    judge_cred = (avail_creds or judge_creds)[0] if judge_creds else None
+                    judge_cred = avail_creds[0] if avail_creds else None
 
                 if not judge_cred:
                     raise RouterException("Judge credential not found or disabled", ErrorCategory.AUTH_ERROR, request_id=req_id)
@@ -334,7 +340,7 @@ class FusionEngine:
                 judge_req = RoutingEngine._apply_thinking_effort(judge_req, eff_judge_thinking)
                 try:
                     judge_resp = await asyncio.wait_for(
-                        judge_adapter.chat_completions(
+                        RoutingEngine._dispatch_chat(judge_adapter, judge_cred, judge_provider, profile.judge_model,
                             base_url=judge_provider.base_url,
                             api_key=judge_api_key,
                             model_id=profile.judge_model.provider_model_id,
@@ -346,14 +352,14 @@ class FusionEngine:
                         ),
                         timeout=profile.timeout_seconds,
                     )
-                    circuit_breaker.record_success(judge_cred.id, profile.judge_model.provider_model_id if profile.judge_model else None)
+
                 except Exception as e:
                     re = e if isinstance(e, RouterException) else (
-                        RouterException(f"Judge request timed out after {profile.timeout_seconds}s", ErrorCategory.UPSTREAM_TIMEOUT, request_id=req_id)
+                        RouterException(f"Judge request timed out after {profile.timeout_seconds}s", ErrorCategory.TIMEOUT, request_id=req_id)
                         if isinstance(e, asyncio.TimeoutError) else
                         judge_adapter.normalize_error(exception=e)
                     )
-                    circuit_breaker.record_failure(judge_cred.id, re.category, re.retry_after, re.message, profile.judge_model.provider_model_id if profile.judge_model else None)
+
                     re.request_id = req_id
                     raise re
 
@@ -481,7 +487,7 @@ class FusionEngine:
         except Exception as e:
             total_latency = round((time.perf_counter() - t0) * 1000, 2)
             err_msg = str(e)
-            re = RouterException(f"Fusion error: {err_msg}", ErrorCategory.INTERNAL_ERROR, request_id=req_id)
+            re = RouterException(f"Fusion error: {err_msg}", ErrorCategory.UNKNOWN, request_id=req_id)
             await _safe_record_log(
                 db=db,
                 request_id=req_id,
@@ -528,11 +534,8 @@ class FusionEngine:
                     part_req = request.model_copy(deep=True)
                     part_req.model = profile_model
                     part_req.stream = False
-                    cand_temp = getattr(part, "temperature", None)
-                    prof_temp = getattr(profile, "temperature", None) if profile else None
-                    eff_temp = cand_temp if cand_temp is not None else prof_temp
-                    if eff_temp is not None:
-                        part_req.temperature = float(eff_temp)
+                    part_req = RoutingEngine._apply_model_defaults(part_req,
+                        candidate_temperature=part.temperature, profile_temperature=getattr(profile, 'temperature', None))
                     if getattr(part, "thinking_effort", None):
                         part_req = RoutingEngine._apply_thinking_effort(part_req, part.thinking_effort)
                     resp = await asyncio.wait_for(
@@ -611,15 +614,8 @@ class FusionEngine:
             or getattr(model_obj, "reasoning_effort", None)
         )
         part_req = RoutingEngine._apply_thinking_effort(part_req, eff_part_thinking)
-        cand_temp = getattr(part, "temperature", None)
-        prof_temp = getattr(profile, "temperature", None) if profile else None
-        eff_temp = cand_temp if cand_temp is not None else (
-            prof_temp if prof_temp is not None else (
-                request.temperature if request.temperature is not None else getattr(model_obj, "temperature", None)
-            )
-        )
-        if eff_temp is not None:
-            part_req.temperature = float(eff_temp)
+        part_req = RoutingEngine._apply_model_defaults(part_req, model_obj,
+            candidate_temperature=part.temperature, profile_temperature=getattr(profile, 'temperature', None))
 
         # Credentials to try: specific key or all available keys for this provider/group
         if part.credential_id is not None:
@@ -657,7 +653,7 @@ class FusionEngine:
         for cred in creds_to_try:
             cand_prov_model_id = model_obj.provider_model_id if model_obj else None
             is_avail, _ = circuit_breaker.is_available(cred.id, cand_prov_model_id)
-            if not is_avail and len(creds_to_try) > 1:
+            if not is_avail:
                 continue
 
             try:
@@ -665,7 +661,7 @@ class FusionEngine:
                 proxy_url = ProxyService.build_proxy_url(cred.proxy) if cred.proxy else None
 
                 resp = await asyncio.wait_for(
-                    adapter.chat_completions(
+                    RoutingEngine._dispatch_chat(adapter, cred, provider, model_obj,
                         base_url=provider.base_url,
                         api_key=api_key,
                         model_id=model_obj.provider_model_id,
@@ -681,7 +677,7 @@ class FusionEngine:
                 content = resp.choices[0].message.content if resp.choices else ""
                 p_toks = resp.usage.prompt_tokens if resp.usage else 0
                 c_toks = resp.usage.completion_tokens if resp.usage else 0
-                circuit_breaker.record_success(cred.id, cand_prov_model_id)
+
                 return {
                     "idx": idx,
                     "label": label,
@@ -699,7 +695,7 @@ class FusionEngine:
                 re = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
                 last_err = re.message
                 last_status_code = re.status_code
-                circuit_breaker.record_failure(cred.id, re.category, re.retry_after, re.message, cand_prov_model_id)
+
 
         latency = round((time.perf_counter() - p_t0) * 1000, 2)
         return {
@@ -747,6 +743,7 @@ class FusionEngine:
             approx_input_tokens = 0
             approx_output_tokens = 0
             judge_t0 = 0.0
+            tasks = []
 
             try:
                 if router_key:
@@ -800,6 +797,8 @@ class FusionEngine:
                         request_id=req_id,
                     )
 
+                if profile.max_parallelism <= 0 or profile.timeout_seconds <= 0 or profile.min_successful_candidates <= 0:
+                    raise RouterException('Invalid fusion execution constraints', ErrorCategory.INVALID_REQUEST)
                 sem = asyncio.Semaphore(profile.max_parallelism)
                 result_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
 
@@ -843,7 +842,7 @@ class FusionEngine:
                 for r in results:
                     total_cand_p_tokens += r["prompt_tokens"]
                     total_cand_c_tokens += r["completion_tokens"]
-                    is_succ = r["content"] is not None
+                    is_succ = isinstance(r["content"], str) and bool(r["content"].strip())
 
                     participants_trace.append({
                         "idx": r["idx"],
@@ -910,6 +909,8 @@ class FusionEngine:
                         raw_json = line[6:].strip()
                         try:
                             c_data = json.loads(raw_json)
+                            if c_data.get('error'):
+                                raise RouterException(str(c_data['error'].get('message', 'Fusion judge stream failed')), ErrorCategory.UPSTREAM_5XX)
                             c_data["model"] = model_str
                             choices = c_data.get("choices") or []
                             if choices:
@@ -924,59 +925,61 @@ class FusionEngine:
                                 has_seen_usage = True
                                 approx_input_tokens = c_data["usage"].get("prompt_tokens", approx_input_tokens)
                                 approx_output_tokens = c_data["usage"].get("completion_tokens", approx_output_tokens)
+                                c_data['usage'] = {'prompt_tokens': total_cand_p_tokens + approx_input_tokens,
+                                    'completion_tokens': total_cand_c_tokens + approx_output_tokens,
+                                    'total_tokens': total_cand_p_tokens + total_cand_c_tokens + approx_input_tokens + approx_output_tokens}
                             else:
                                 approx_output_tokens += 1
                             return f"data: {json.dumps(c_data)}"
-                        except Exception:
-                            return line
+                        except RouterException:
+                            raise
+                        except (ValueError, TypeError):
+                            raise RouterException("Invalid fusion judge SSE", ErrorCategory.UPSTREAM_5XX)
                     return line
 
-                judge_temp = profile.judge_temperature if profile.judge_temperature is not None else (
-                    profile.temperature if profile.temperature is not None else (
-                        request.temperature if request.temperature is not None else (
-                            getattr(profile.judge_model, "temperature", None) if (profile.judge_model and getattr(profile.judge_model, "temperature", None) is not None) else 0.5
-                        )
-                    )
-                )
+                judge_temp = RoutingEngine._apply_model_defaults(request, profile.judge_model,
+                    candidate_temperature=profile.judge_temperature, profile_temperature=profile.temperature).temperature
+
 
                 if judge_is_profile:
                     judge_req = ChatCompletionRequest(
                         model=f"route/{profile.judge_routing_profile.slug}",
                         messages=judge_prompt_messages,
                         temperature=judge_temp,
-                        max_tokens=request.max_tokens,
+                        max_tokens=request.get_effective_max_tokens(),
                         stream=True,
                     )
                     if profile.judge_thinking_effort:
                         judge_req = RoutingEngine._apply_thinking_effort(judge_req, profile.judge_thinking_effort)
 
-                    async for chunk in RoutingEngine.route_stream_chat(
+                    async with aclosing(RoutingEngine.route_stream_chat(
                         db=session,
                         request=judge_req,
                         router_key=None,
                         request_id=f"{req_id}_judge",
                         record_log=False,
-                    ):
-                        lines = chunk.split("\n")
-                        processed_lines = []
-                        for l in lines:
-                            pl = _process_chunk_line(l)
-                            if pl:
-                                processed_lines.append(pl)
-                        if processed_lines:
-                            yield "\n".join(processed_lines) + "\n\n"
+                    )) as source:
+                        async for chunk in source:
+                            lines = chunk.split("\n")
+                            processed_lines = []
+                            for l in lines:
+                                pl = _process_chunk_line(l)
+                                if pl:
+                                    processed_lines.append(pl)
+                            if processed_lines:
+                                yield "\n".join(processed_lines) + "\n\n"
                 else:
                     judge_req = ChatCompletionRequest(
                         model=profile.judge_model.provider_model_id,
                         messages=judge_prompt_messages,
                         temperature=judge_temp,
-                        max_tokens=request.max_tokens,
+                        max_tokens=request.get_effective_max_tokens(),
                         stream=True,
                     )
                     judge_provider = profile.judge_provider
                     judge_cred = profile.judge_credential
-                    if judge_cred and not judge_cred.enabled:
-                        judge_cred = None
+                    if profile.judge_credential_id is not None and (not judge_cred or not judge_cred.enabled):
+                        raise RouterException("Assigned judge credential unavailable", ErrorCategory.AUTH_ERROR)
                     if not judge_cred:
                         j_query = select(ProviderCredential).where(
                             ProviderCredential.provider_id == judge_provider.id,
@@ -991,7 +994,7 @@ class FusionEngine:
                             c for c in judge_creds
                             if circuit_breaker.is_available(c.id, profile.judge_model.provider_model_id if profile.judge_model else None)[0]
                         ]
-                        judge_cred = (avail_creds or judge_creds)[0] if judge_creds else None
+                        judge_cred = avail_creds[0] if avail_creds else None
 
                     if not judge_cred:
                         raise RouterException("Judge credential not found or disabled", ErrorCategory.AUTH_ERROR, request_id=req_id)
@@ -1009,7 +1012,7 @@ class FusionEngine:
                     )
                     judge_req = RoutingEngine._apply_thinking_effort(judge_req, eff_judge_thinking)
 
-                    async for chunk in judge_adapter.stream_chat(
+                    async with aclosing(RoutingEngine._dispatch_stream(judge_adapter, judge_cred, judge_provider, profile.judge_model,
                         base_url=judge_provider.base_url,
                         api_key=judge_api_key,
                         model_id=profile.judge_model.provider_model_id,
@@ -1018,18 +1021,17 @@ class FusionEngine:
                         configuration=judge_provider.adapter_configuration,
                         proxy_url=judge_proxy,
                         timeout=profile.timeout_seconds,
-                    ):
-                        lines = chunk.split("\n")
-                        processed_lines = []
-                        for l in lines:
-                            pl = _process_chunk_line(l)
-                            if pl:
-                                processed_lines.append(pl)
-                        if processed_lines:
-                            yield "\n".join(processed_lines) + "\n\n"
+                    )) as source:
+                        async for chunk in source:
+                            lines = chunk.split("\n")
+                            processed_lines = []
+                            for l in lines:
+                                pl = _process_chunk_line(l)
+                                if pl:
+                                    processed_lines.append(pl)
+                            if processed_lines:
+                                yield "\n".join(processed_lines) + "\n\n"
 
-                if judge_cred and profile and profile.judge_model:
-                    circuit_breaker.record_success(judge_cred.id, profile.judge_model.provider_model_id)
 
                 # Stream completed successfully
                 judge_latency = round((time.perf_counter() - judge_t0) * 1000, 2)
@@ -1155,8 +1157,6 @@ class FusionEngine:
                         "error_category": re.category.value if hasattr(re.category, "value") else str(re.category),
                     })
 
-                if judge_cred and profile and profile.judge_model:
-                    circuit_breaker.record_failure(judge_cred.id, re.category, re.retry_after, re.message, profile.judge_model.provider_model_id)
 
                 try:
                     await asyncio.shield(
@@ -1239,14 +1239,23 @@ class FusionEngine:
                 yield f"data: {json.dumps(err_dict)}\n\n"
                 yield "data: [DONE]\n\n"
 
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
         if db is not None:
-            async for chunk in _stream_runner(db):
-                yield chunk
+            async with aclosing(_stream_runner(db)) as source:
+                async for chunk in source:
+                    yield chunk
         else:
             fresh_db = AsyncSessionLocal()
             try:
-                async for chunk in _stream_runner(fresh_db):
-                    yield chunk
+                async with aclosing(_stream_runner(fresh_db)) as source:
+                    async for chunk in source:
+                        yield chunk
             finally:
                 await _safe_close_session(fresh_db)
 

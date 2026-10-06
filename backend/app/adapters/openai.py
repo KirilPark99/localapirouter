@@ -225,6 +225,8 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
             payload["presence_penalty"] = request.presence_penalty
         if request.frequency_penalty is not None:
             payload["frequency_penalty"] = request.frequency_penalty
+        if request.logit_bias is not None:
+            payload["logit_bias"] = request.logit_bias
         if request.response_format is not None:
             payload["response_format"] = request.response_format
         if request.seed is not None:
@@ -308,53 +310,35 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
                     pass
             raise self.normalize_error(status_code=resp.status_code, response_body=resp.text, retry_after=retry_after)
 
-        data = resp.json()
         try:
-            res = ChatCompletionResponse.model_validate(data)
-            for choice in res.choices:
-                if choice.message and choice.message.content and not choice.message.reasoning_content:
-                    r_c, c_c = _extract_reasoning_and_content(choice.message.content)
-                    if r_c is not None:
-                        choice.message.reasoning_content = r_c
-                        choice.message.content = c_c
-            return res
-        except Exception:
-            # Normalize choice structure if slight differences
-            choices = []
-            for idx, c in enumerate(data.get("choices", [])):
-                msg = c.get("message", {})
-                content_raw = msg.get("content", "")
-                reasoning_raw = msg.get("reasoning_content")
-                if not reasoning_raw and content_raw:
-                    r_c, c_c = _extract_reasoning_and_content(content_raw)
-                    if r_c is not None:
-                        reasoning_raw = r_c
-                        content_raw = c_c
-                choices.append(
-                    ChatCompletionChoice(
-                        index=idx,
-                        message=ChatMessage(
-                            role=msg.get("role", "assistant"),
-                            content=content_raw,
-                            reasoning_content=reasoning_raw,
-                            tool_calls=msg.get("tool_calls"),
-                            tool_call_id=msg.get("tool_call_id"),
-                            name=msg.get("name"),
-                        ),
-                        finish_reason=c.get("finish_reason", "stop"),
-                    )
-                )
-            usage_data = data.get("usage", {})
-            return ChatCompletionResponse(
-                id=data.get("id", "chatcmpl-fallback"),
-                model=data.get("model", model_id),
-                choices=choices,
-                usage=UsageInfo(
-                    prompt_tokens=usage_data.get("prompt_tokens", 0),
-                    completion_tokens=usage_data.get("completion_tokens", 0),
-                    total_tokens=usage_data.get("total_tokens", 0),
-                ),
-            )
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise self.normalize_error(exception=httpx.RemoteProtocolError("Upstream Chat response must be an object"))
+            if data.get("error") is not None:
+                error = data["error"]
+                code = str(error.get("code")) if isinstance(error, dict) else ""
+                status = int(code) if code.isdigit() and 400 <= int(code) <= 599 else 502
+                raise self.normalize_error(status_code=status, response_body=data)
+            if not isinstance(data.get("choices"), list) or not data["choices"]:
+                raise self.normalize_error(exception=httpx.RemoteProtocolError("Upstream Chat response has no choices"))
+            normalized = {**data, "model": data.get("model") or model_id, "choices": []}
+            for index, choice in enumerate(data["choices"]):
+                if not isinstance(choice, dict) or not isinstance(choice.get("message"), dict):
+                    raise self.normalize_error(exception=httpx.RemoteProtocolError("Invalid upstream Chat choice"))
+                message = {"role": "assistant", **choice["message"]}
+                normalized["choices"].append({"index": index, **choice, "message": message})
+            response = ChatCompletionResponse.model_validate(normalized)
+            for choice in response.choices:
+                if choice.message.content and not choice.message.reasoning_content:
+                    reasoning, content = _extract_reasoning_and_content(choice.message.content)
+                    if reasoning is not None:
+                        choice.message.reasoning_content = reasoning
+                        choice.message.content = content
+            return response
+        except RouterException:
+            raise
+        except (ValueError, TypeError, KeyError) as exc:
+            raise self.normalize_error(exception=httpx.RemoteProtocolError(f"Invalid upstream Chat response: {type(exc).__name__}"))
 
     async def stream_chat(
         self,

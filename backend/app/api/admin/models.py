@@ -135,16 +135,19 @@ async def add_model_manually(
     if not provider_id or not provider_model_id:
         raise HTTPException(status_code=400, detail="provider_id and provider_model_id are required")
 
-    return await ModelDiscoveryService.add_model_manually(
-        db=db,
-        provider_id=provider_id,
-        credential_id=credential_id,
-        provider_model_id=provider_model_id,
-        display_name=display_name,
-        context_length=context_length,
-        max_output_tokens=max_output,
-        model_type=model_type,
-    )
+    try:
+        return await ModelDiscoveryService.add_model_manually(
+            db=db,
+            provider_id=provider_id,
+            credential_id=credential_id,
+            provider_model_id=provider_model_id,
+            display_name=display_name,
+            context_length=context_length,
+            max_output_tokens=max_output,
+            model_type=model_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 @router.put("/{model_id}", response_model=DiscoveredModelRead)
 async def update_model(

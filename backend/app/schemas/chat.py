@@ -15,9 +15,10 @@ class ToolCall(BaseModel):
     extra_content: Optional[Dict[str, Any]] = None
 
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant", "tool", "function"]
+    role: Literal["system", "developer", "user", "assistant", "tool", "function"]
     content: Optional[Union[str, List[Dict[str, Any]]]] = None
     reasoning_content: Optional[str] = None
+    reasoning_details: Optional[List[Dict[str, Any]]] = None
     name: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = None
     tool_call_id: Optional[str] = None
@@ -60,11 +61,24 @@ class ResponsesRequest(BaseModel):
                         content=output if isinstance(output, str) else json.dumps(output)))
                 elif kind == "message":
                     role = item.get("role", "user")
-                    if role == "developer":
-                        role = "system"
                     content = item.get("content")
                     if isinstance(content, list):
-                        content = [{**part, "type": "text"} if part.get("type") in ("input_text", "output_text") else part for part in content]
+                        converted = []
+                        for part in content:
+                            if not isinstance(part, dict):
+                                raise ValueError("Responses content blocks must be objects")
+                            if part.get("type") in ("input_text", "output_text", "text"):
+                                converted.append({**part, "type": "text"})
+                            elif part.get("type") == "input_image":
+                                image_url = part.get("image_url")
+                                if not isinstance(image_url, str) or not image_url:
+                                    raise ValueError("Responses input_image requires an image_url; file IDs are not supported")
+                                converted.append({"type": "image_url", "image_url": {
+                                    "url": image_url, **({"detail": part["detail"]} if "detail" in part else {}),
+                                }})
+                            else:
+                                raise ValueError(f"Unsupported Responses content type: {part.get('type')}")
+                        content = converted
                     messages.append(ChatMessage(role=role, content=content,
                         tool_calls=item.get("tool_calls"), tool_call_id=item.get("tool_call_id")))
                 elif kind != "reasoning":
@@ -200,6 +214,7 @@ class ChatCompletionChunkDelta(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
     reasoning_content: Optional[str] = None
+    reasoning_details: Optional[List[Dict[str, Any]]] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
 
 class ChatCompletionChunkChoice(BaseModel):

@@ -1,4 +1,5 @@
 from typing import Optional
+from ipaddress import ip_address, ip_network
 from fastapi import Depends, HTTPException, Header, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +46,33 @@ async def get_current_admin(
         )
     return username
 
+def _check_key_ip(request, key):
+    if not key.ip_restrictions:
+        return
+    try:
+        peer = ip_address(request.client.host) if request.client else None
+        allowed = peer is not None and any(peer in ip_network(value, strict=False) for value in key.ip_restrictions)
+    except ValueError:
+        allowed = False
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Client IP is not allowed by this API key")
+
+
+async def _admin_simulation_key(request, db):
+    value = request.headers.get("X-Router-Key-Id")
+    if value is None:
+        return None
+    if not value.isascii() or not value.isdigit() or int(value) <= 0:
+        raise HTTPException(status_code=400, detail="Router key ID must be a positive integer")
+    key = await ApiKeyService.get_key(db, int(value))
+    if key is None:
+        raise HTTPException(status_code=404, detail="Router key does not exist")
+    if not key.enabled:
+        raise HTTPException(status_code=403, detail="Router key is disabled")
+    _check_key_ip(request, key)
+    return key
+
+
 async def get_router_key_dep(
     request: Request,
     authorization: Optional[str] = Header(None),
@@ -62,7 +90,7 @@ async def get_router_key_dep(
                     AdminUser.is_active == True,
                 ))).scalar_one_or_none()
                 if active_admin:
-                    return None
+                    return await _admin_simulation_key(request, db)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization: Bearer sk-router-...",
@@ -87,16 +115,21 @@ async def get_router_key_dep(
         ))).scalar_one_or_none()
         if not active_admin:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin account is inactive")
-        sim_key_id = request.headers.get("X-Router-Key-Id")
-        if sim_key_id and sim_key_id.isdigit():
-            sim_key = (await db.execute(select(RouterApiKey).where(RouterApiKey.id == int(sim_key_id)))).scalar_one_or_none()
-            if sim_key:
-                return sim_key
-        return None
+        return await _admin_simulation_key(request, db)
 
     # Check Router API key
     valid, key_obj, err_msg = await ApiKeyService.authenticate_key(db, raw_token)
     if not valid:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=err_msg)
 
+    _check_key_ip(request, key_obj)
     return key_obj
+
+
+async def get_inference_key_dep(request: Request, router_key=Depends(get_router_key_dep)):
+    try:
+        yield router_key
+    finally:
+        reservation = getattr(request.state, "key_reservation", None)
+        if reservation is not None:
+            reservation.finish(getattr(request.state, "key_actual_tokens", None))

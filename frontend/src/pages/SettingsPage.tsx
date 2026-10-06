@@ -29,6 +29,7 @@ export const SettingsPage: React.FC = () => {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [logContent, setLogContent] = useState(false);
+  const [savingPrivacy, setSavingPrivacy] = useState(false);
   const [newPassword, setNewPassword] = useState("");
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
@@ -85,15 +86,19 @@ export const SettingsPage: React.FC = () => {
   }, []);
 
   const handleTogglePrivacy = async (val: boolean) => {
-    setLogContent(val);
+    if (savingPrivacy) return;
+    setSavingPrivacy(true);
     try {
       await apiRequest("/api/admin/settings", {
         method: "POST",
         body: JSON.stringify({ log_request_content: val }),
       });
+      setLogContent(val);
       setMsg({ text: "Privacy setting updated successfully.", ok: true });
     } catch (err: any) {
       setMsg({ text: err.message, ok: false });
+    } finally {
+      setSavingPrivacy(false);
     }
   };
 
@@ -555,6 +560,7 @@ export const SettingsPage: React.FC = () => {
           <input
             type="checkbox"
             checked={logContent}
+            disabled={savingPrivacy}
             onChange={(e) => handleTogglePrivacy(e.target.checked)}
             className="rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-0 cursor-pointer w-4 h-4"
           />

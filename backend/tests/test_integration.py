@@ -282,7 +282,7 @@ async def test_model_visibility_and_filtering():
 @pytest.mark.asyncio
 async def test_retrieve_model_endpoint_and_ollama_compatibility():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization":"Bearer " + __import__("app.services.auth_service",fromlist=["AuthService"]).AuthService.create_access_token("admin")}) as client:
         async with AsyncSessionLocal() as db:
             p = Provider(name="Retrieve Test Provider", slug="retrieve-test", adapter_type="generic_openai", base_url="https://api.test.com")
             db.add(p)

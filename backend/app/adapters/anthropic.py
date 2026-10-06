@@ -46,12 +46,32 @@ class AnthropicAdapter(BaseProviderAdapter):
 
         if resp.status_code == 200:
             data = resp.json()
-            models_data = data.get("data", [])
+            if not isinstance(data, dict) or not isinstance(data.get("data", []), list):
+                raise self.normalize_error(exception=httpx.RemoteProtocolError("Invalid Anthropic models page"))
+            models_data = list(data.get("data", []))
+            seen_pages = set()
+            while data.get("has_more") is True:
+                cursor = data.get("last_id")
+                if not isinstance(cursor, str) or not cursor or cursor in seen_pages or len(seen_pages) >= 1000:
+                    raise self.normalize_error(exception=httpx.RemoteProtocolError("Invalid or repeated Anthropic pagination cursor"))
+                seen_pages.add(cursor)
+                try:
+                    resp = await client.get(url, headers=headers, params={"after_id": cursor})
+                except Exception as exc:
+                    raise self.normalize_error(exception=exc)
+                if resp.status_code != 200:
+                    raise self.normalize_error(status_code=resp.status_code, response_body=resp.text)
+                data = resp.json()
+                if not isinstance(data, dict) or not isinstance(data.get("data", []), list):
+                    raise self.normalize_error(exception=httpx.RemoteProtocolError("Invalid Anthropic models page"))
+                models_data.extend(data.get("data", []))
             discovered: List[DiscoveredModelData] = []
+            seen_models = set()
             for m in models_data:
                 mid = m.get("id")
-                if not mid:
+                if not mid or mid in seen_models:
                     continue
+                seen_models.add(mid)
                 name = m.get("display_name") or mid
                 discovered.append(
                     DiscoveredModelData(
@@ -112,41 +132,68 @@ class AnthropicAdapter(BaseProviderAdapter):
         except Exception as e:
             return False, str(e), 0
 
-    def _convert_messages_to_anthropic(
-        self, messages: List[ChatMessage]
-    ) -> Tuple[Optional[str], List[Dict[str, Any]]]:
-        system_prompts: List[str] = []
-        anthropic_msgs: List[Dict[str, Any]] = []
-
-        for m in messages:
-            if m.role == "system":
-                if isinstance(m.content, str):
-                    system_prompts.append(m.content)
-                elif isinstance(m.content, list):
-                    text_parts = [p.get("text", "") for p in m.content if isinstance(p, dict) and p.get("type") == "text"]
-                    system_prompts.append("\n".join(text_parts))
-            else:
-                role = "assistant" if m.role == "assistant" else "user"
-                content_val = m.content or ""
-                
-                # Merge consecutive identical roles
-                if anthropic_msgs and anthropic_msgs[-1]["role"] == role:
-                    prev_content = anthropic_msgs[-1]["content"]
-                    if isinstance(prev_content, str) and isinstance(content_val, str):
-                        anthropic_msgs[-1]["content"] = f"{prev_content}\n\n{content_val}"
+    def _convert_messages_to_anthropic(self, messages: List[ChatMessage]) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+        def blocks(content):
+            if content is None or content == "":
+                return []
+            if isinstance(content, str):
+                return [{"type": "text", "text": content}]
+            converted = []
+            for part in content:
+                kind = part.get("type")
+                if kind == "image_url":
+                    image = part.get("image_url", {})
+                    url = image if isinstance(image, str) else image.get("url", "")
+                    if not isinstance(url, str) or not url:
+                        raise self.normalize_error(status_code=400, response_body="Image requires a URL")
+                    if url.startswith("data:"):
+                        meta, sep, data = url[5:].partition(",")
+                        if not sep or not meta.endswith(";base64"):
+                            raise self.normalize_error(status_code=400, response_body="Image data URL must be base64")
+                        source = {"type": "base64", "media_type": meta[:-7], "data": data}
                     else:
-                        anthropic_msgs.append({"role": role, "content": content_val})
+                        source = {"type": "url", "url": url}
+                    converted.append({"type": "image", "source": source})
+                elif kind in ("text", "image", "thinking", "redacted_thinking", "tool_use", "tool_result"):
+                    converted.append(dict(part))
                 else:
-                    anthropic_msgs.append({"role": role, "content": content_val})
+                    raise self.normalize_error(status_code=400, response_body=f"Unsupported Anthropic content block: {kind}")
+            return converted
 
-        # Ensure first message is user
+        system_prompts = []
+        anthropic_msgs = []
+        for message in messages:
+            if message.role in ("system", "developer"):
+                system_prompts.extend(p["text"] for p in blocks(message.content) if p.get("type") == "text")
+                continue
+            role = "assistant" if message.role == "assistant" else "user"
+            if message.role in ("tool", "function"):
+                if not message.tool_call_id:
+                    raise self.normalize_error(status_code=400, response_body="Anthropic tool results require tool_call_id")
+                content = [{"type": "tool_result", "tool_use_id": message.tool_call_id,
+                            "content": message.content if isinstance(message.content, str) else blocks(message.content)}]
+            else:
+                content = [{k: value for k, value in detail.items() if k != "index"}
+                           for detail in (message.reasoning_details or [])
+                           if detail.get("type") in ("thinking", "redacted_thinking")]
+                content.extend(blocks(message.content))
+                for call in message.tool_calls or []:
+                    try:
+                        arguments = json.loads(call.function.arguments or "{}")
+                    except (ValueError, TypeError):
+                        raise self.normalize_error(status_code=400, response_body="Tool arguments must be a JSON object")
+                    if not isinstance(arguments, dict):
+                        raise self.normalize_error(status_code=400, response_body="Tool arguments must be a JSON object")
+                    content.append({"type": "tool_use", "id": call.id, "name": call.function.name, "input": arguments})
+            if anthropic_msgs and anthropic_msgs[-1]["role"] == role:
+                anthropic_msgs[-1]["content"].extend(content)
+            else:
+                anthropic_msgs.append({"role": role, "content": content})
         if not anthropic_msgs:
             anthropic_msgs = [{"role": "user", "content": "Hello"}]
         elif anthropic_msgs[0]["role"] != "user":
             anthropic_msgs.insert(0, {"role": "user", "content": "Begin conversation."})
-
-        system_str = "\n\n".join(system_prompts) if system_prompts else None
-        return system_str, anthropic_msgs
+        return "\n\n".join(system_prompts) if system_prompts else None, anthropic_msgs
 
     def _prepare_payload(self, model_id: str, request: ChatCompletionRequest) -> Dict[str, Any]:
         system_str, messages = self._convert_messages_to_anthropic(request.messages)
@@ -176,6 +223,18 @@ class AnthropicAdapter(BaseProviderAdapter):
                     "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
                 })
             payload["tools"] = tools_list
+        if request.tool_choice is not None or (request.tools and request.parallel_tool_calls is not None):
+            choice = request.tool_choice or "auto"
+            if isinstance(choice, str):
+                if choice not in ("auto", "none", "required"):
+                    raise self.normalize_error(status_code=400, response_body="Unsupported tool_choice")
+                payload["tool_choice"] = {"type": "any" if choice == "required" else choice}
+            elif choice.get("type") == "function" and choice.get("function", {}).get("name"):
+                payload["tool_choice"] = {"type": "tool", "name": choice["function"]["name"]}
+            else:
+                raise self.normalize_error(status_code=400, response_body="Unsupported tool_choice")
+            if request.parallel_tool_calls is not None and payload["tool_choice"]["type"] != "none":
+                payload["tool_choice"]["disable_parallel_tool_use"] = not request.parallel_tool_calls
 
         # Anthropic thinking parameter translation
         eff_budget = request.get_effective_thinking_budget() if hasattr(request, "get_effective_thinking_budget") else None
@@ -278,65 +337,86 @@ class AnthropicAdapter(BaseProviderAdapter):
             ),
         )
 
-    async def stream_chat(
-        self,
-        base_url: str,
-        api_key: str,
-        model_id: str,
-        request: ChatCompletionRequest,
-        extra_headers: Dict[str, Any],
-        configuration: Dict[str, Any],
-        proxy_url: Optional[str] = None,
-        timeout: float = 60.0,
-    ) -> AsyncGenerator[str, None]:
+    async def stream_chat(self, base_url: str, api_key: str, model_id: str, request: ChatCompletionRequest,
+                          extra_headers: Dict[str, Any], configuration: Dict[str, Any],
+                          proxy_url: Optional[str] = None, timeout: float = 60.0) -> AsyncGenerator[str, None]:
         client = await http_client_manager.get_client(proxy_url=proxy_url, timeout=timeout)
         url = f"{base_url.rstrip('/')}/v1/messages"
-        headers = self._build_headers(api_key, extra_headers)
-        payload = self._prepare_payload(model_id, request)
-        payload["stream"] = True
-
+        payload = {**self._prepare_payload(model_id, request), "stream": True}
         cmpl_id = f"chatcmpl-{uuid.uuid4().hex}"
-
+        usage = {}; tool_indices = {}; finish = None
+        def chunk(delta, finish_reason=None, final_usage=None):
+            value = {"id": cmpl_id, "object": "chat.completion.chunk", "model": model_id,
+                     "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+            if final_usage is not None:
+                value["choices"] = []; value["usage"] = final_usage
+            return "data: " + json.dumps(value) + "\n\n"
         try:
-            async with client.stream("POST", url, headers=headers, json=payload) as resp:
+            async with client.stream("POST", url, headers=self._build_headers(api_key, extra_headers), json=payload) as resp:
                 if resp.status_code != 200:
-                    err_body = await resp.aread()
-                    raise self.normalize_error(status_code=resp.status_code, response_body=err_body.decode("utf-8", errors="ignore"))
-
+                    error = (await resp.aread()).decode("utf-8", errors="replace")
+                    raise self.normalize_error(status_code=resp.status_code, response_body=error)
                 async for line in resp.aiter_lines():
-                    clean_line = line.strip()
-                    if not clean_line or clean_line.startswith("event:") or clean_line.startswith(":"):
+                    if not line.startswith("data:"):
                         continue
-                    if clean_line.startswith("data: "):
-                        raw_data = clean_line[6:].strip()
-                        try:
-                            event = json.loads(raw_data)
-                            event_type = event.get("type")
-                            if event_type == "content_block_delta":
-                                delta_text = event.get("delta", {}).get("text", "")
-                                chunk = {
-                                    "id": cmpl_id,
-                                    "object": "chat.completion.chunk",
-                                    "model": model_id,
-                                    "choices": [{"index": 0, "delta": {"content": delta_text}, "finish_reason": None}],
-                                }
-                                yield f"data: {json.dumps(chunk)}\n\n"
-                            elif event_type == "message_delta":
-                                stop_reason = event.get("delta", {}).get("stop_reason")
-                                finish = "stop" if stop_reason == "end_turn" else (stop_reason or None)
-                                chunk = {
-                                    "id": cmpl_id,
-                                    "object": "chat.completion.chunk",
-                                    "model": model_id,
-                                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
-                                }
-                                yield f"data: {json.dumps(chunk)}\n\n"
-                            elif event_type == "message_stop":
-                                yield "data: [DONE]\n\n"
-                                break
-                        except Exception:
-                            continue
-        except Exception as e:
-            if isinstance(e, RouterException):
-                raise
-            raise self.normalize_error(exception=e)
+                    try:
+                        event = json.loads(line[5:].strip())
+                    except ValueError:
+                        raise self.normalize_error(exception=httpx.RemoteProtocolError("Invalid Anthropic SSE JSON"))
+                    if not isinstance(event, dict):
+                        raise self.normalize_error(exception=httpx.RemoteProtocolError("Invalid Anthropic SSE event"))
+                    kind = event.get("type"); delta = event.get("delta") or {}; index = event.get("index", 0)
+                    if kind == "error":
+                        err = event.get("error") or {}
+                        status = {"overloaded_error": 529, "rate_limit_error": 429, "authentication_error": 401,
+                                  "permission_error": 403, "invalid_request_error": 400}.get(err.get("type"), 502)
+                        raise self.normalize_error(status_code=status, response_body=event)
+                    if kind == "message_start":
+                        message = event.get("message") or {}
+                        cmpl_id = message.get("id", cmpl_id); usage.update(message.get("usage") or {})
+                        yield chunk({"role": "assistant"})
+                    elif kind == "content_block_start":
+                        block = event.get("content_block") or {}; block_type = block.get("type")
+                        if block_type == "tool_use":
+                            tool_indices[index] = len(tool_indices)
+                            yield chunk({"tool_calls": [{"index": tool_indices[index], "id": block["id"], "type": "function",
+                                "function": {"name": block["name"], "arguments": json.dumps(block["input"]) if block.get("input") else ""}}]})
+                        elif block_type in ("thinking", "redacted_thinking"):
+                            yield chunk({"reasoning_details": [{**block, "index": index}]})
+                        elif block_type == "text" and block.get("text"):
+                            yield chunk({"content": block["text"]})
+                    elif kind == "content_block_delta":
+                        delta_type = delta.get("type")
+                        if delta_type == "text_delta":
+                            yield chunk({"content": delta.get("text", "")})
+                        elif delta_type == "input_json_delta":
+                            if index not in tool_indices:
+                                raise self.normalize_error(exception=httpx.RemoteProtocolError("Tool delta without tool block"))
+                            yield chunk({"tool_calls": [{"index": tool_indices[index], "function": {"arguments": delta.get("partial_json", "")}}]})
+                        elif delta_type in ("thinking_delta", "signature_delta"):
+                            field = "thinking" if delta_type == "thinking_delta" else "signature"
+                            converted = {"reasoning_details": [{"type": "thinking", "index": index, field: delta.get(field, "")}]}
+                            if field == "thinking": converted["reasoning_content"] = delta.get(field, "")
+                            yield chunk(converted)
+                    elif kind == "message_delta":
+                        usage.update(event.get("usage") or {})
+                        reason = delta.get("stop_reason")
+                        if reason:
+                            finish = {"tool_use": "tool_calls", "max_tokens": "length", "end_turn": "stop", "stop_sequence": "stop"}.get(reason, reason)
+                            yield chunk({}, finish)
+                    elif kind == "message_stop":
+                        if not finish:
+                            raise self.normalize_error(exception=httpx.RemoteProtocolError("Anthropic message stopped without finish reason"))
+                        prompt = usage.get("input_tokens", 0) + usage.get("cache_creation_input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+                        completion = usage.get("output_tokens", 0)
+                        info = {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
+                        if usage.get("cache_read_input_tokens"):
+                            info["prompt_tokens_details"] = {"cached_tokens": usage["cache_read_input_tokens"]}
+                        yield chunk({}, final_usage=info)
+                        yield "data: [DONE]\n\n"
+                        return
+                raise self.normalize_error(exception=httpx.RemoteProtocolError("Anthropic stream ended before message_stop"))
+        except RouterException:
+            raise
+        except Exception as exc:
+            raise self.normalize_error(exception=exc)

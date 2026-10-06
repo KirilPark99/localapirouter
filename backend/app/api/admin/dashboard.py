@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.api.deps import get_current_admin
 from app.services.log_service import LogService
-from app.schemas.entities import DashboardStats, DetailedAnalyticsResponse
+from app.schemas.entities import DashboardStats, DetailedAnalyticsResponse, LogDateFilter
 
 router = APIRouter(prefix="/dashboard", tags=["Admin Dashboard"])
 
@@ -19,8 +19,8 @@ async def get_stats(
 async def get_detailed_stats(
     period: str = "all",
     granularity: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    start_date: Optional[LogDateFilter] = None,
+    end_date: Optional[LogDateFilter] = None,
     filter_type: Optional[str] = None,
     filter_value: Optional[str] = None,
     username: str = Depends(get_current_admin),

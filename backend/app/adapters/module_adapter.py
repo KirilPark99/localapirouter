@@ -1,4 +1,5 @@
 import json
+from contextlib import aclosing
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 from app.adapters.base import BaseProviderAdapter, DiscoveredModelData
@@ -110,8 +111,9 @@ class CustomModuleAdapter(BaseProviderAdapter):
         timeout: float = 60.0,
     ) -> AsyncGenerator[str, None]:
         adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout, model_id)
-        async for chunk in adapter.stream_chat(request, ctx):
-            yield chunk
+        async with aclosing(adapter.stream_chat(request, ctx)) as source:
+            async for chunk in source:
+                yield chunk
 
     def normalize_error(
         self,
@@ -123,6 +125,8 @@ class CustomModuleAdapter(BaseProviderAdapter):
         if isinstance(exception, RouterException):
             return exception
         from app.core.errors import ErrorCategory
+        if status_code is not None:
+            return super().normalize_error(status_code, response_body, exception, retry_after)
         err_msg = str(exception or response_body or "")
         if "ERR_RATE_LIMIT" in err_msg or "429" in err_msg or status_code == 429:
             if "Arena" in err_msg:
@@ -144,7 +148,7 @@ class CustomModuleAdapter(BaseProviderAdapter):
                 status_code=429,
                 retry_after=retry_after or 60.0,
             )
-        if "ERR_MODEL_RESTRICTED" in err_msg or "403" in err_msg or status_code == 403:
+        if "ERR_MODEL_RESTRICTED" in err_msg:
             return RouterException(
                 err_msg if "доступна только по платной подписке" in err_msg else "Запрошенная модель ограничена и требует платной подписки DuckDuckGo Pro.",
                 ErrorCategory.AUTH_ERROR,

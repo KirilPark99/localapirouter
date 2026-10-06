@@ -205,7 +205,7 @@ def test_lmarena_module_cookie_and_models():
     # SSE parser
     assert parse_arena_sse_line('0:"hello"') == ("text", "hello")
     assert parse_arena_sse_line('g:"thinking"') == ("thinking", "thinking")
-    assert parse_arena_sse_line('d:{"finishReason":"stop"}') == ("done", "")
+    assert parse_arena_sse_line('d:{"finishReason":"stop"}') == ("done", {"finishReason": "stop"})
     assert parse_arena_sse_line('2:[{"type":"heartbeat"}]') == ("heartbeat", "")
     assert parse_arena_sse_line('d:{"finishReason":"error"}') == ("error", "Arena stream finished with an error")
 
@@ -310,7 +310,8 @@ def test_zai_web_module():
     try:
         parse_zai_sse_line(error_frame)
         assert False, "Should have raised RuntimeError on upstream error frame"
-    except RuntimeError as e:
+    except __import__("app.core.errors", fromlist=["RouterException"]).RouterException as e:
+        assert e.upstream_status == 403
         assert "FRONTEND_CAPTCHA_REQUIRED" in str(e)
         assert "captcha_verify_param" in str(e)
 

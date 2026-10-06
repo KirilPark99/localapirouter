@@ -55,7 +55,11 @@ async def test_rate_limit_isolates_to_specific_model():
     assert status_cred["status"] == CredentialStatus.DEGRADED
     assert "gemini-2.5-flash" in status_cred["model_cooldowns"]
 
-    # 5. Success on gemini-2.5-flash clears its cooldown
+    # 5. Late success preserves cooldown; only a success after expiry clears it.
+    from datetime import datetime, timezone, timedelta
+    circuit_breaker.record_success(cred_id, "gemini-2.5-flash")
+    assert not circuit_breaker.is_available(cred_id, "gemini-2.5-flash")[0]
+    circuit_breaker._model_cooldown_until[(cred_id, "gemini-2.5-flash")] = datetime.now(timezone.utc) - timedelta(seconds=1)
     circuit_breaker.record_success(cred_id, "gemini-2.5-flash")
     avail_flash_recovered, _ = circuit_breaker.is_available(cred_id, "gemini-2.5-flash")
     assert avail_flash_recovered is True

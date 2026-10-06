@@ -87,6 +87,8 @@ class CircuitBreaker:
 
     def record_success(self, cred_id: int, model_id: Optional[str] = None):
         """Record successful request through this credential."""
+        if not self.is_available(cred_id, model_id)[0]:
+            return  # A late in-flight success cannot clear another request's cooldown.
         self._consecutive_failures[cred_id] = 0
         if self._statuses.get(cred_id) in (CredentialStatus.DEGRADED, CredentialStatus.RATE_LIMITED, CredentialStatus.COOLDOWN):
             self._statuses[cred_id] = CredentialStatus.HEALTHY

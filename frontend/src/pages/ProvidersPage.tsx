@@ -12,6 +12,7 @@ export const ProvidersPage: React.FC = () => {
   const { t } = useI18n();
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -33,11 +34,12 @@ export const ProvidersPage: React.FC = () => {
 
   const loadProviders = async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const data = await apiRequest<Provider[]>("/api/admin/providers");
       setProviders(data);
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      setLoadError(err.message || "Failed to load providers");
     } finally {
       setLoading(false);
     }
@@ -143,7 +145,7 @@ export const ProvidersPage: React.FC = () => {
         chat_endpoint: formChatEndpoint,
         auth_type: formAuthType,
         auth_header: formAuthHeader,
-        notes: formNotes.trim() || undefined,
+        notes: editingProvider ? formNotes.trim() : formNotes.trim() || undefined,
       };
 
       if (editingProvider) {
@@ -208,6 +210,11 @@ export const ProvidersPage: React.FC = () => {
         </div>
       </div>
 
+      {loadError && (
+        <div role="alert" className="text-sm text-rose-300">
+          {loadError} <button onClick={loadProviders} disabled={loading} className="underline">Retry</button>
+        </div>
+      )}
       <div className="glass-card card-specular rounded-2xl border border-white/[0.07] overflow-hidden shadow-xl">
         <table className="w-full text-left border-collapse text-xs">
           <thead>

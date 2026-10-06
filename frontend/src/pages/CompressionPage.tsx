@@ -213,8 +213,8 @@ export const CompressionPage: React.FC = () => {
         body: JSON.stringify({ ordered_ids: orderedIds }),
       });
     } catch (err: any) {
+      await fetchAll();
       setError(err?.message || "Ошибка сохранения порядка");
-      fetchAll();
     }
   };
 

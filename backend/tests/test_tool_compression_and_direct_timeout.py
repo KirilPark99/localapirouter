@@ -139,9 +139,9 @@ async def test_pipeline_does_not_advance_noop_or_bailed_stage(monkeypatch, bailo
 @pytest.mark.parametrize("stream", [False, True])
 async def test_direct_routing_uses_configured_timeout(monkeypatch, timeout, stream):
     monkeypatch.setattr(settings, "DEFAULT_TIMEOUT_SECONDS", timeout)
-    provider = SimpleNamespace(adapter_type="synthetic", base_url="https://invalid.test", extra_headers={}, adapter_configuration={}, name="synthetic")
-    credential = SimpleNamespace(provider=provider, encrypted_api_key="synthetic", proxy=None, id="synthetic", name="synthetic", metadata_json={})
-    model = SimpleNamespace(provider_model_id="synthetic", display_name="synthetic")
+    provider = SimpleNamespace(id=1, enabled=True, adapter_type="synthetic", base_url="https://invalid.test", extra_headers={}, adapter_configuration={}, name="synthetic")
+    credential = SimpleNamespace(provider_id=1, enabled=True, rpm_limit=None, tpm_limit=None, max_concurrency=None, provider=provider, encrypted_api_key="synthetic", proxy=None, id="synthetic", name="synthetic", metadata_json={})
+    model = SimpleNamespace(provider_id=1, enabled=True, available=True, provider_model_id="synthetic", display_name="synthetic")
     monkeypatch.setattr(engine.RoutingEngine, "_get_candidate_credentials_for_model", AsyncMock(return_value=[(credential, model)]))
     monkeypatch.setattr(engine, "decrypt_secret", Mock(return_value="synthetic"))
     monkeypatch.setattr(engine.circuit_breaker, "record_success", Mock())

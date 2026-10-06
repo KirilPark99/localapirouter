@@ -1,7 +1,15 @@
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field, field_validator
+from ipaddress import ip_network
+from typing import Any, Dict, List, Literal, Optional, Annotated
+from pydantic import BaseModel, Field, field_validator, AfterValidator
+
+def _validate_log_date(value: str) -> str:
+    datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return value
+
+LogDateFilter = Annotated[str, AfterValidator(_validate_log_date)]
+IPAddressRange = Annotated[str, AfterValidator(lambda value: str(ip_network(value, strict=False)))]
 
 # Auth
 class TokenResponse(BaseModel):
@@ -135,9 +143,9 @@ class CredentialCreate(BaseModel):
     proxy_id: Optional[int] = None
     priority: int = 1
     weight: int = 1
-    rpm_limit: Optional[int] = None
-    tpm_limit: Optional[int] = None
-    max_concurrency: Optional[int] = None
+    rpm_limit: Optional[int] = Field(default=None, ge=1)
+    tpm_limit: Optional[int] = Field(default=None, ge=1)
+    max_concurrency: Optional[int] = Field(default=None, ge=1)
     notes: Optional[str] = None
 
 class CredentialUpdate(BaseModel):
@@ -148,9 +156,9 @@ class CredentialUpdate(BaseModel):
     enabled: Optional[bool] = None
     priority: Optional[int] = None
     weight: Optional[int] = None
-    rpm_limit: Optional[int] = None
-    tpm_limit: Optional[int] = None
-    max_concurrency: Optional[int] = None
+    rpm_limit: Optional[int] = Field(default=None, ge=1)
+    tpm_limit: Optional[int] = Field(default=None, ge=1)
+    max_concurrency: Optional[int] = Field(default=None, ge=1)
     notes: Optional[str] = None
 
 class CredentialBulkAssignProxy(BaseModel):
@@ -262,8 +270,8 @@ class DiscoveredModelUpdate(BaseModel):
     is_visible: Optional[bool] = None
     display_name: Optional[str] = None
     model_type: Optional[str] = None
-    input_price_per_1m: Optional[float] = None
-    output_price_per_1m: Optional[float] = None
+    input_price_per_1m: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    output_price_per_1m: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     context_length: Optional[int] = None
     reasoning_effort: Optional[str] = None
     temperature: Optional[float] = None
@@ -314,8 +322,8 @@ class RoutingCandidateInput(BaseModel):
     credential_group: Optional[str] = None
     model_id: Optional[int] = None
     thinking_effort: Optional[str] = None
-    temperature: Optional[float] = None
-    priority_order: int = 0
+    temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    priority_order: int = Field(default=0, ge=0)
     is_active: bool = True
 
     @field_validator("temperature")
@@ -329,7 +337,7 @@ class RoutingCandidateInput(BaseModel):
 
 class RoutingCandidateRead(BaseModel):
     id: int
-    candidate_type: str = "model"
+    candidate_type: Literal["model", "profile"] = "model"
     target_profile_id: Optional[int] = None
     target_profile_name: Optional[str] = None
     target_profile_slug: Optional[str] = None
@@ -342,7 +350,7 @@ class RoutingCandidateRead(BaseModel):
     model_name: Optional[str] = None
     canonical_slug: Optional[str] = None
     thinking_effort: Optional[str] = None
-    temperature: Optional[float] = None
+    temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
     priority_order: int
     is_active: bool
 
@@ -351,12 +359,12 @@ class RoutingProfileCreate(BaseModel):
     slug: str
     description: Optional[str] = None
     strategy: Literal["priority", "cache-optimized", "round_robin", "least_latency"] = "priority"
-    retry_count: int = 3
-    timeout_seconds: float = 60.0
+    retry_count: int = Field(default=3, ge=0, le=10)
+    timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
     fallback_conditions: List[str] = Field(default_factory=lambda: ["RATE_LIMIT", "TIMEOUT", "NETWORK_ERROR", "UPSTREAM_5XX", "MODEL_NOT_FOUND"])
     thinking_effort: Optional[str] = None
-    context_length: Optional[int] = None
-    temperature: Optional[float] = None
+    context_length: Optional[int] = Field(default=None, ge=0, allow_inf_nan=False)
+    temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
     randomize_candidates: bool = False
     randomize_keys: bool = True
     enabled: bool = True
@@ -376,12 +384,12 @@ class RoutingProfileUpdate(BaseModel):
     slug: Optional[str] = None
     description: Optional[str] = None
     strategy: Optional[Literal["priority", "cache-optimized", "round_robin", "least_latency"]] = None
-    retry_count: Optional[int] = None
-    timeout_seconds: Optional[float] = None
+    retry_count: Optional[int] = Field(default=None, ge=0, le=10)
+    timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     fallback_conditions: Optional[List[str]] = None
     thinking_effort: Optional[str] = None
-    context_length: Optional[int] = None
-    temperature: Optional[float] = None
+    context_length: Optional[int] = Field(default=None, ge=0, allow_inf_nan=False)
+    temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
     randomize_candidates: Optional[bool] = None
     randomize_keys: Optional[bool] = None
     enabled: Optional[bool] = None
@@ -406,8 +414,8 @@ class RoutingProfileRead(BaseModel):
     timeout_seconds: float
     fallback_conditions: List[str]
     thinking_effort: Optional[str] = None
-    context_length: Optional[int] = None
-    temperature: Optional[float] = None
+    context_length: Optional[int] = Field(default=None, ge=0, allow_inf_nan=False)
+    temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
     randomize_candidates: bool = False
     randomize_keys: bool = True
     enabled: bool
@@ -424,8 +432,8 @@ class FusionParticipantInput(BaseModel):
     credential_group: Optional[str] = None
     model_id: Optional[int] = None
     thinking_effort: Optional[str] = None
-    temperature: Optional[float] = None
-    priority_order: int = 0
+    temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    priority_order: int = Field(default=0, ge=0)
     label: str = "Candidate"
     is_active: bool = True
 
@@ -453,8 +461,8 @@ class FusionParticipantRead(BaseModel):
     model_name: Optional[str] = None
     canonical_slug: Optional[str] = None
     thinking_effort: Optional[str] = None
-    temperature: Optional[float] = None
-    priority_order: int = 0
+    temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    priority_order: int = Field(default=0, ge=0)
     label: str
     is_active: bool
 
@@ -470,12 +478,13 @@ class FusionProfileCreate(BaseModel):
     judge_credential_group: Optional[str] = None
     judge_model_id: Optional[int] = None
     judge_thinking_effort: Optional[str] = None
-    judge_temperature: Optional[float] = None
-    temperature: Optional[float] = None
+    judge_temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    context_length: Optional[int] = Field(default=None, ge=0, allow_inf_nan=False)
     system_prompt: Optional[str] = None
-    min_successful_candidates: int = 2
-    max_parallelism: int = 5
-    timeout_seconds: float = 120.0
+    min_successful_candidates: int = Field(default=2, gt=0, allow_inf_nan=False)
+    max_parallelism: int = Field(default=5, gt=0, allow_inf_nan=False)
+    timeout_seconds: float = Field(default=120.0, gt=0, allow_inf_nan=False)
     enabled: bool = True
     participants: List[FusionParticipantInput] = Field(default_factory=list)
 
@@ -500,12 +509,13 @@ class FusionProfileUpdate(BaseModel):
     judge_credential_group: Optional[str] = None
     judge_model_id: Optional[int] = None
     judge_thinking_effort: Optional[str] = None
-    judge_temperature: Optional[float] = None
-    temperature: Optional[float] = None
+    judge_temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    context_length: Optional[int] = Field(default=None, ge=0, allow_inf_nan=False)
     system_prompt: Optional[str] = None
-    min_successful_candidates: Optional[int] = None
-    max_parallelism: Optional[int] = None
-    timeout_seconds: Optional[float] = None
+    min_successful_candidates: Optional[int] = Field(default=None, gt=0, allow_inf_nan=False)
+    max_parallelism: Optional[int] = Field(default=None, gt=0, allow_inf_nan=False)
+    timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     enabled: Optional[bool] = None
     participants: Optional[List[FusionParticipantInput]] = None
 
@@ -536,8 +546,9 @@ class FusionProfileRead(BaseModel):
     judge_model_id: Optional[int] = None
     judge_model_name: Optional[str] = None
     judge_thinking_effort: Optional[str] = None
-    judge_temperature: Optional[float] = None
-    temperature: Optional[float] = None
+    judge_temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    context_length: Optional[int] = Field(default=None, ge=0, allow_inf_nan=False)
     system_prompt: Optional[str] = None
     min_successful_candidates: int
     max_parallelism: int
@@ -556,8 +567,8 @@ class JudgeCandidateInput(BaseModel):
     credential_group: Optional[str] = None
     model_id: Optional[int] = None
     thinking_effort: Optional[str] = None
-    temperature: Optional[float] = None
-    priority_order: int = 0
+    temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    priority_order: int = Field(default=0, ge=0)
     label: str = "Candidate"
     task_types: List[str] = Field(default_factory=list)
     complexity_level: str = "all"
@@ -588,8 +599,8 @@ class JudgeCandidateRead(BaseModel):
     model_name: Optional[str] = None
     canonical_slug: Optional[str] = None
     thinking_effort: Optional[str] = None
-    temperature: Optional[float] = None
-    priority_order: int = 0
+    temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    priority_order: int = Field(default=0, ge=0)
     label: str
     task_types: List[str] = Field(default_factory=list)
     complexity_level: str = "all"
@@ -608,12 +619,12 @@ class JudgeProfileCreate(BaseModel):
     judge_credential_group: Optional[str] = None
     judge_model_id: Optional[int] = None
     judge_thinking_effort: Optional[str] = None
-    judge_temperature: Optional[float] = 0.1
+    judge_temperature: Optional[float] = Field(default=0.1, ge=0, le=2, allow_inf_nan=False)
     system_prompt: Optional[str] = None
     fallback_candidate_id: Optional[int] = None
     fallback_strongest_on_overflow: bool = False
-    context_length: Optional[int] = None
-    timeout_seconds: float = 60.0
+    context_length: Optional[int] = Field(default=None, ge=0, allow_inf_nan=False)
+    timeout_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
     enabled: bool = True
     candidates: List[JudgeCandidateInput] = Field(default_factory=list)
 
@@ -638,12 +649,12 @@ class JudgeProfileUpdate(BaseModel):
     judge_credential_group: Optional[str] = None
     judge_model_id: Optional[int] = None
     judge_thinking_effort: Optional[str] = None
-    judge_temperature: Optional[float] = None
+    judge_temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
     system_prompt: Optional[str] = None
     fallback_candidate_id: Optional[int] = None
     fallback_strongest_on_overflow: Optional[bool] = None
-    context_length: Optional[int] = None
-    timeout_seconds: Optional[float] = None
+    context_length: Optional[int] = Field(default=None, ge=0, allow_inf_nan=False)
+    timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     enabled: Optional[bool] = None
     candidates: Optional[List[JudgeCandidateInput]] = None
 
@@ -676,11 +687,11 @@ class JudgeProfileRead(BaseModel):
     judge_canonical_slug: Optional[str] = None
     judge_model_type: Optional[str] = None
     judge_thinking_effort: Optional[str] = None
-    judge_temperature: Optional[float] = None
+    judge_temperature: Optional[float] = Field(default=None, ge=0, le=2, allow_inf_nan=False)
     system_prompt: Optional[str] = None
     fallback_candidate_id: Optional[int] = None
     fallback_strongest_on_overflow: bool = False
-    context_length: Optional[int] = None
+    context_length: Optional[int] = Field(default=None, ge=0, allow_inf_nan=False)
     timeout_seconds: float
     enabled: bool
     candidates: List[JudgeCandidateRead] = Field(default_factory=list)
@@ -711,11 +722,11 @@ class RouterApiKeyCreate(BaseModel):
     allowed_routes: List[str] = Field(default_factory=lambda: ["*"])
     allowed_fusions: List[str] = Field(default_factory=lambda: ["*"])
     allowed_judges: List[str] = Field(default_factory=lambda: ["*"])
-    rate_limit_rpm: Optional[int] = None
-    rate_limit_tpm: Optional[int] = None
-    request_limit: Optional[int] = None
+    rate_limit_rpm: Optional[int] = Field(default=None, ge=0)
+    rate_limit_tpm: Optional[int] = Field(default=None, ge=0)
+    request_limit: Optional[int] = Field(default=None, ge=0)
     expiration_date: Optional[datetime] = None
-    ip_restrictions: List[str] = Field(default_factory=list)
+    ip_restrictions: List[IPAddressRange] = Field(default_factory=list)
     notes: Optional[str] = None
 
 class RouterApiKeyUpdate(BaseModel):
@@ -726,11 +737,11 @@ class RouterApiKeyUpdate(BaseModel):
     allowed_routes: Optional[List[str]] = None
     allowed_fusions: Optional[List[str]] = None
     allowed_judges: Optional[List[str]] = None
-    rate_limit_rpm: Optional[int] = None
-    rate_limit_tpm: Optional[int] = None
-    request_limit: Optional[int] = None
+    rate_limit_rpm: Optional[int] = Field(default=None, ge=0)
+    rate_limit_tpm: Optional[int] = Field(default=None, ge=0)
+    request_limit: Optional[int] = Field(default=None, ge=0)
     expiration_date: Optional[datetime] = None
-    ip_restrictions: Optional[List[str]] = None
+    ip_restrictions: Optional[List[IPAddressRange]] = None
     notes: Optional[str] = None
 
 class RouterApiKeyRead(BaseModel):

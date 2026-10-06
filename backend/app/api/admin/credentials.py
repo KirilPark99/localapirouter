@@ -56,7 +56,10 @@ async def update_credential(
     username: str = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    updated = await CredentialService.update_credential(db, credential_id, data)
+    try:
+        updated = await CredentialService.update_credential(db, credential_id, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if not updated:
         raise HTTPException(status_code=404, detail="Credential not found")
     return updated

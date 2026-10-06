@@ -32,7 +32,7 @@ import {
   BarChart3,
   CheckSquare,
 } from "lucide-react";
-import { apiRequest } from "../api/client";
+import { apiRequest, expireSession } from "../api/client";
 import {
   DiscoveredModel,
   RoutingProfile,
@@ -550,6 +550,15 @@ export const PlaygroundPage: React.FC = () => {
     return { thought, mainContent };
   };
 
+  const requestHeaders = (): Record<string, string> => {
+    const token = localStorage.getItem("myairouter_token");
+    return {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(selectedKey ? { "X-Router-Key-Id": String(selectedKey) } : {}),
+    };
+  };
+
   // Execute request to a target
   const executeTargetRequest = async (
     targetId: string,
@@ -580,14 +589,7 @@ export const PlaygroundPage: React.FC = () => {
     setErr(null);
 
     const t0 = performance.now();
-    const token = localStorage.getItem("myairouter_token");
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
-    }
-    if (selectedKey) {
-      headers["X-Router-Key-Id"] = String(selectedKey);
-    }
+    const headers = requestHeaders();
 
     const payload: Record<string, any> = {
       model: targetId,
@@ -597,6 +599,8 @@ export const PlaygroundPage: React.FC = () => {
       top_p: topP,
       stream: isStream,
     };
+
+    if (isStream) payload.stream_options = { include_usage: true };
 
     // Apply Reasoning Effort parameter (reasoning_effort) if supported
     if (supportsThinking && effort !== "off") {
@@ -623,6 +627,7 @@ export const PlaygroundPage: React.FC = () => {
           signal: controller.signal,
         });
 
+        if (res.status === 401) expireSession();
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           throw new Error(errData.error?.message || `HTTP ${res.status}`);
@@ -632,7 +637,7 @@ export const PlaygroundPage: React.FC = () => {
         const decoder = new TextDecoder("utf-8");
         let accumulated = "";
         let accumulatedReasoning = "";
-        let tokenCount = 0;
+        let usage: any = null;
 
         if (reader) {
           let carry = "";
@@ -645,46 +650,52 @@ export const PlaygroundPage: React.FC = () => {
             if (!dataStr || dataStr === "[DONE]") return;
 
             const parsed = JSON.parse(dataStr);
+            if (parsed.error) throw new Error(parsed.error.message || "Stream failed");
+            if (parsed.usage) usage = parsed.usage;
             const delta = parsed.choices?.[0]?.delta?.content;
             const rDelta = parsed.choices?.[0]?.delta?.reasoning_content;
             if (rDelta) {
               accumulatedReasoning += rDelta;
               setReasoning(accumulatedReasoning);
-              tokenCount++;
             }
             if (delta) {
               accumulated += delta;
               setContent(accumulated);
-              tokenCount++;
             }
           };
 
-          while (true) {
-            const { done, value } = await reader.read();
-            carry += done ? decoder.decode() : decoder.decode(value, { stream: true });
-            const events = carry.split(/\r?\n\r?\n/);
-            carry = events.pop() ?? "";
-            for (const event of events) {
-              try {
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              carry += done ? decoder.decode() : decoder.decode(value, { stream: true });
+              const events = carry.split(/\r?\n\r?\n/);
+              carry = events.pop() ?? "";
+              for (const event of events) {
                 consumeEvent(event);
-              } catch {}
+              }
+              if (done) break;
             }
-            if (done) break;
-          }
-          if (carry.trim()) {
-            try {
+            if (carry.trim()) {
               consumeEvent(carry);
-            } catch {}
+            }
+          } finally {
+            await reader.cancel().catch(() => {});
+            reader.releaseLock();
           }
+        } else {
+          throw new Error("Streaming response body is unavailable");
         }
 
         const latency = Math.round(performance.now() - t0);
-        const tokensPerSec = latency > 0 ? ((tokenCount / latency) * 1000).toFixed(1) : "0";
+        const tokenCount = usage?.completion_tokens;
+        const tokensPerSec = typeof tokenCount === "number" && latency > 0
+          ? ((tokenCount / latency) * 1000).toFixed(1) : null;
 
         setMeta({
           latency_ms: latency,
           tokens_per_sec: tokensPerSec,
           token_count: tokenCount,
+          usage,
           mode: targetId.startsWith("route/")
             ? "PRIORITY"
             : targetId.startsWith("fusion/")
@@ -705,6 +716,7 @@ export const PlaygroundPage: React.FC = () => {
         const latency = Math.round(performance.now() - t0);
         const data = await res.json();
 
+        if (res.status === 401) expireSession();
         if (!res.ok) {
           throw new Error(data.error?.message || `HTTP ${res.status}`);
         }
@@ -1021,9 +1033,7 @@ export const PlaygroundPage: React.FC = () => {
         questions: questionsPayload,
       };
 
-      const token = selectedKey || localStorage.getItem("myairouter_token") || "";
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const headers = requestHeaders();
 
       const res = await apiRequest<JevResponse>("/v1/systemone", {
         method: "POST",
@@ -1045,7 +1055,7 @@ export const PlaygroundPage: React.FC = () => {
 
   // Generate Export Code
   const getExportCode = () => {
-    const token = selectedKey || "sk-router-YOUR-KEY";
+    const token = "sk-router-YOUR-KEY";
     const target = targetA || "google-ai/gemini-2.5-flash";
 
     if (mode === "jev") {
@@ -2286,7 +2296,7 @@ main();`;
                   {responseMetaA && (
                     <div className="pt-2 border-t border-slate-800 text-[10px] text-slate-400 flex justify-between">
                       <span>Mode: {responseMetaA.mode}</span>
-                      <span>Tokens: {responseMetaA.usage?.total_tokens || responseMetaA.token_count || "—"}</span>
+                      <span>Tokens: {responseMetaA.usage?.total_tokens ?? responseMetaA.token_count ?? "Unavailable"}</span>
                     </div>
                   )}
                 </div>
@@ -2364,7 +2374,7 @@ main();`;
                   {responseMetaB && (
                     <div className="pt-2 border-t border-slate-800 text-[10px] text-slate-400 flex justify-between">
                       <span>Mode: {responseMetaB.mode}</span>
-                      <span>Tokens: {responseMetaB.usage?.total_tokens || responseMetaB.token_count || "—"}</span>
+                      <span>Tokens: {responseMetaB.usage?.total_tokens ?? responseMetaB.token_count ?? "Unavailable"}</span>
                     </div>
                   )}
                 </div>

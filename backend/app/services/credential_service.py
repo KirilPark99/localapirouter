@@ -15,6 +15,58 @@ from app.core.errors import RouterException
 
 class CredentialService:
     @classmethod
+    def module_runtime_configuration(cls, provider, credential):
+        configuration = {**provider.adapter_configuration,
+            "credential_metadata": getattr(credential, "metadata_json", {}) or {}}
+        if configuration.get("module_id") not in ("codex_cli", "grok_builder_cli"):
+            return configuration
+        configuration["credential_id"] = credential.id
+
+        async def persist_credentials(fields):
+            import json
+            from app.core.database import AsyncSessionLocal
+            if (not isinstance(fields, dict) or not fields or
+                any(name not in ("access_token", "refresh_token", "id_token") or not isinstance(value, str) or not value for name, value in fields.items())):
+                raise ValueError("Invalid rotated CLI token fields")
+            async with AsyncSessionLocal() as db:
+                current = await cls.get_credential(db, credential.id)
+                if current is None:
+                    raise ValueError("CLI credential was deleted during refresh")
+                values = json.loads(decrypt_secret(current.encrypted_api_key))
+                if not isinstance(values, dict):
+                    raise ValueError("CLI credentials must use encrypted JSON storage")
+                values.update(fields)
+                if values.get("auth_json"):
+                    auth = json.loads(values["auth_json"])
+                    if not isinstance(auth, dict):
+                        raise ValueError("Invalid pasted CLI auth JSON")
+                    if configuration["module_id"] == "codex_cli":
+                        tokens = auth.get("tokens") if isinstance(auth.get("tokens"), dict) else auth
+                        tokens.update(fields)
+                    else:
+                        for entry in auth.values():
+                            if isinstance(entry, dict) and ("key" in entry or "access_token" in entry):
+                                entry.update(fields)
+                                if "key" in entry:
+                                    entry["key"] = fields["access_token"]
+                                break
+                        else:
+                            raise ValueError("Grok pasted auth JSON has no token entry")
+                    values["auth_json"] = json.dumps(auth)
+                await cls.update_credential(db, current.id, CredentialUpdate(api_key=json.dumps(values)))
+
+        configuration["persist_credentials"] = persist_credentials
+        return configuration
+
+    @staticmethod
+    def _is_keyless(provider: Provider, raw_key: str) -> bool:
+        allowed = provider.auth_type == "none" or (provider.configuration or {}).get("external_auth") is True
+        sentinel = raw_key.lower() in ("no-key", "none", "empty", "keyless", "")
+        if sentinel and not allowed:
+            raise ValueError("API Key cannot be empty/keyless for authenticated providers; explicitly select No Auth or external_auth")
+        return provider.auth_type == "none" or sentinel
+
+    @classmethod
     async def list_credentials(cls, db: AsyncSession, provider_id: Optional[int] = None) -> List[CredentialRead]:
         query = select(ProviderCredential).options(
             selectinload(ProviderCredential.provider),
@@ -86,11 +138,7 @@ class CredentialService:
             raise ValueError(f"Provider {data.provider_id} not found")
 
         raw_key = (data.api_key or "").strip()
-        is_keyless = (
-            prov.auth_type == "none"
-            or raw_key.lower() in ("no-key", "none", "empty", "keyless", "")
-            or raw_key == ""
-        )
+        is_keyless = cls._is_keyless(prov, raw_key)
 
         if not is_keyless:
             if not raw_key:
@@ -161,7 +209,7 @@ class CredentialService:
             cred.notes = raw_notes.strip() if (raw_notes and isinstance(raw_notes, str) and raw_notes.strip()) else None
         if data.api_key is not None:
             clean_key = data.api_key.strip()
-            if clean_key.lower() in ("no-key", "none", "empty", "keyless", ""):
+            if cls._is_keyless(cred.provider, clean_key):
                 cred.encrypted_api_key = encrypt_secret("no-key")
                 if not cred.key_fingerprint.startswith("keyless_"):
                     cred.key_fingerprint = f"keyless_{cred.provider_id}_{uuid.uuid4().hex[:12]}"
@@ -181,11 +229,11 @@ class CredentialService:
             cred.priority = data.priority
         if data.weight is not None:
             cred.weight = data.weight
-        if data.rpm_limit is not None:
+        if "rpm_limit" in data.model_fields_set:
             cred.rpm_limit = data.rpm_limit
-        if data.tpm_limit is not None:
+        if "tpm_limit" in data.model_fields_set:
             cred.tpm_limit = data.tpm_limit
-        if data.max_concurrency is not None:
+        if "max_concurrency" in data.model_fields_set:
             cred.max_concurrency = data.max_concurrency
 
         await db.commit()
@@ -309,7 +357,7 @@ class CredentialService:
                 base_url=provider.base_url,
                 api_key=api_key,
                 extra_headers=provider.extra_headers,
-                configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
+                configuration=CredentialService.module_runtime_configuration(provider, cred),
                 proxy_url=proxy_url,
                 timeout=15.0,
             )

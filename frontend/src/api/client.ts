@@ -1,5 +1,10 @@
 const BASE_URL = ""; // Relative proxy through Vite or served directly
 
+export function expireSession() {
+  localStorage.removeItem("myairouter_token");
+  window.dispatchEvent(new Event("myairouter:session-expired"));
+}
+
 function getAuthHeader(): Record<string, string> {
   const token = localStorage.getItem("myairouter_token");
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -21,8 +26,7 @@ export async function apiRequestWithMeta<T = any>(
   });
 
   if (response.status === 401 && !path.includes("/auth/login")) {
-    localStorage.removeItem("myairouter_token");
-    window.location.href = "#/login";
+    expireSession();
     throw new Error("Session expired. Please log in again.");
   }
 

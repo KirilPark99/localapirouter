@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import aclosing
 import hashlib
 import json
 import random
@@ -30,11 +31,134 @@ from app.core.circuit_breaker import circuit_breaker, CredentialStatus
 from app.core.crypto import decrypt_secret
 from app.adapters.factory import get_adapter
 from app.services.proxy_service import ProxyService
+from app.services.credential_service import CredentialService
 from app.services.routing_service import RoutingService
 from app.services.log_service import LogService
 
 class RoutingEngine:
     _round_robin_indices: Dict[str, int] = {}
+
+    @staticmethod
+    def _eligible(provider, model_obj, cred):
+        return bool(provider and provider.enabled and model_obj and model_obj.enabled
+                    and model_obj.available and model_obj.provider_id == provider.id
+                    and cred and cred.enabled and cred.provider_id == provider.id
+                    and circuit_breaker.is_available(cred.id, model_obj.provider_model_id)[0])
+
+    @classmethod
+    async def _candidate_credentials(cls, db, provider, model_obj, *, credential_id=None, credential_group=None):
+        if not provider or not model_obj or not provider.enabled or not model_obj.enabled or not model_obj.available:
+            return []
+        query = select(ProviderCredential).options(selectinload(ProviderCredential.proxy)).where(
+            ProviderCredential.provider_id == provider.id, ProviderCredential.enabled == True)
+        if credential_id is not None:
+            query = query.where(ProviderCredential.id == credential_id)
+        if credential_group:
+            query = query.where(ProviderCredential.group_name == credential_group)
+        query = query.order_by(ProviderCredential.priority.asc(), ProviderCredential.weight.desc(), ProviderCredential.id.asc())
+        return [c for c in (await db.execute(query)).scalars().all() if cls._eligible(provider, model_obj, c)]
+
+    @staticmethod
+    def _reserve_credential(cred, request, model_obj):
+        from app.core.admission import admission
+        from app.compression.tokenizer import count_messages_tokens
+        prompt_tokens = count_messages_tokens(request.messages)
+        output_tokens = request.get_effective_max_tokens()
+        if cred.tpm_limit is not None and output_tokens is None:
+            output_tokens = model_obj.max_output_tokens
+            if output_tokens is None:
+                # Bound unknown provider output instead of reserving only the prompt.
+                output_tokens = cred.tpm_limit - prompt_tokens
+            if output_tokens <= 0:
+                raise RouterException('Local TPM budget cannot cover an output token', ErrorCategory.RATE_LIMIT,
+                    status_code=429, retry_after=60, raw_error={'local_admission': True})
+            request = request.model_copy(update={'max_tokens': output_tokens})
+        reservation = admission.reserve('credential', cred.id, rpm=cred.rpm_limit, tpm=cred.tpm_limit,
+            concurrency=cred.max_concurrency, tokens=prompt_tokens + (output_tokens or 0))
+        return reservation, request
+
+    @classmethod
+    async def _dispatch_chat(cls, adapter, cred, provider, model_obj, *, retry_count=0, **kwargs):
+        if not isinstance(retry_count, int) or not 0 <= retry_count <= 10:
+            raise RouterException('retry_count must be between 0 and 10', ErrorCategory.INVALID_REQUEST)
+        for attempt in range(retry_count + 1):
+            if not cls._eligible(provider, model_obj, cred):
+                raise RouterException('Credential/provider/model unavailable', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
+            reservation, kwargs['request'] = cls._reserve_credential(cred, kwargs['request'], model_obj)
+            try:
+                response = await adapter.chat_completions(**kwargs)
+                reservation.finish(response.usage.total_tokens if response.usage else None)
+                circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
+                return response
+            except Exception as e:
+                error = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
+                if attempt >= retry_count or not error.category.is_retryable or error.category == ErrorCategory.RATE_LIMIT:
+                    circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
+                    raise error
+            finally:
+                reservation.finish()
+
+    @classmethod
+    async def _dispatch_stream(cls, adapter, cred, provider, model_obj, *, retry_count=0, **kwargs):
+        if not isinstance(retry_count, int) or not 0 <= retry_count <= 10:
+            raise RouterException('retry_count must be between 0 and 10', ErrorCategory.INVALID_REQUEST)
+        for attempt in range(retry_count + 1):
+            if not cls._eligible(provider, model_obj, cred):
+                raise RouterException('Credential/provider/model unavailable', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
+            reservation, kwargs['request'] = cls._reserve_credential(cred, kwargs['request'], model_obj)
+            started = terminal = False
+            actual_tokens = None
+            try:
+                async with aclosing(adapter.stream_chat(**kwargs)) as source:
+                    async for chunk in source:
+                        for line in chunk.splitlines():
+                            if not line.startswith('data:'):
+                                continue
+                            payload = line[5:].strip()
+                            if payload == '[DONE]':
+                                terminal = True
+                                continue
+                            try:
+                                data = json.loads(payload)
+                            except ValueError:
+                                raise RouterException('Invalid upstream SSE JSON', ErrorCategory.UPSTREAM_5XX)
+                            if data.get('error'):
+                                from app.core.errors import normalize_upstream_error
+                                err = data['error']
+                                code = err.get('code') if isinstance(err, dict) else None
+                                raise normalize_upstream_error(status_code=code if isinstance(code, int) else 502, response_body=data)
+                            if data.get('usage'):
+                                usage = data['usage']
+                                actual_tokens = usage.get('total_tokens', usage.get('prompt_tokens', 0) + usage.get('completion_tokens', 0))
+                            terminal = terminal or any(c.get('finish_reason') for c in data.get('choices', []))
+                        started = True
+                        yield chunk
+                if not terminal:
+                    raise RouterException('Upstream stream ended without a terminal event', ErrorCategory.UPSTREAM_5XX)
+                circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
+                return
+            except Exception as e:
+                error = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
+                if started or attempt >= retry_count or not error.category.is_retryable or error.category == ErrorCategory.RATE_LIMIT:
+                    circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
+                    raise error
+            finally:
+                reservation.finish(actual_tokens)
+
+    @classmethod
+    def _order_candidates(cls, profile, candidates, request):
+        candidates = sorted(candidates, key=lambda c: c.priority_order)
+        if getattr(profile, 'randomize_candidates', False):
+            random.shuffle(candidates)
+        elif profile.strategy == 'round_robin' and candidates:
+            key = str(profile.id)
+            idx = cls._round_robin_indices.get(key, 0) % len(candidates)
+            cls._round_robin_indices[key] = (idx + 1) % len(candidates)
+            candidates = candidates[idx:] + candidates[:idx]
+        elif profile.strategy == 'cache-optimized' and len(candidates) > 1:
+            from app.routing.cache_affinity import apply_prompt_cache_affinity
+            candidates, _ = apply_prompt_cache_affinity(candidates, request)
+        return candidates
 
     @classmethod
     async def route_chat_completions(
@@ -84,11 +208,13 @@ class RoutingEngine:
         async def _stream_runner(session: AsyncSession):
             try:
                 if model_str.startswith("route/"):
-                    async for chunk in cls._handle_priority_stream(session, request, model_str, router_key, req_id, t0, record_log=record_log):
-                        yield chunk
+                    async with aclosing(cls._handle_priority_stream(session, request, model_str, router_key, req_id, t0, record_log=record_log)) as source:
+                        async for chunk in source:
+                            yield chunk
                 else:
-                    async for chunk in cls._handle_direct_stream(session, request, model_str, router_key, req_id, t0, record_log=record_log):
-                        yield chunk
+                    async with aclosing(cls._handle_direct_stream(session, request, model_str, router_key, req_id, t0, record_log=record_log)) as source:
+                        async for chunk in source:
+                            yield chunk
             except asyncio.CancelledError:
                 # Client disconnected or cancelled request gracefully
                 return
@@ -108,13 +234,15 @@ class RoutingEngine:
                 yield "data: [DONE]\n\n"
 
         if db is not None:
-            async for chunk in _stream_runner(db):
-                yield chunk
+            async with aclosing(_stream_runner(db)) as source:
+                async for chunk in source:
+                    yield chunk
         else:
             fresh_db = AsyncSessionLocal()
             try:
-                async for chunk in _stream_runner(fresh_db):
-                    yield chunk
+                async with aclosing(_stream_runner(fresh_db)) as source:
+                    async for chunk in source:
+                        yield chunk
             finally:
                 await _safe_close_session(fresh_db)
 
@@ -125,25 +253,30 @@ class RoutingEngine:
             if not has_all and "routes" not in router_key.permissions:
                 raise RouterException("This API key lacks permission to access routing profiles", ErrorCategory.AUTH_ERROR, status_code=403)
             slug = model_str.removeprefix("route/")
-            if "*" not in router_key.allowed_routes and slug not in router_key.allowed_routes:
+            allowed = router_key.allowed_routes if router_key.allowed_routes is not None else ["*"]
+            if "*" not in allowed and slug not in allowed:
                 raise RouterException(f"Route '{slug}' is not in allowed routes for this API key", ErrorCategory.AUTH_ERROR, status_code=403)
         elif model_str.startswith("fusion/"):
             if not has_all and "fusion" not in router_key.permissions:
                 raise RouterException("This API key lacks permission to access fusion profiles", ErrorCategory.AUTH_ERROR, status_code=403)
             slug = model_str.removeprefix("fusion/")
-            if "*" not in router_key.allowed_fusions and slug not in router_key.allowed_fusions:
+            allowed = router_key.allowed_fusions if router_key.allowed_fusions is not None else ["*"]
+            if "*" not in allowed and slug not in allowed:
                 raise RouterException(f"Fusion profile '{slug}' is not in allowed fusions for this key", ErrorCategory.AUTH_ERROR, status_code=403)
         elif model_str.startswith("judge/") or model_str.startswith("smart/"):
-            if not has_all and "judges" not in router_key.permissions and "routes" not in router_key.permissions:
+            if not has_all and "judge" not in router_key.permissions and "judges" not in router_key.permissions and "routes" not in router_key.permissions:
                 raise RouterException("This API key lacks permission to access judge profiles", ErrorCategory.AUTH_ERROR, status_code=403)
             slug = model_str.split("/", 1)[1]
-            allowed_judges = getattr(router_key, "allowed_judges", ["*"]) or ["*"]
+            allowed_judges = getattr(router_key, "allowed_judges", None)
+            if allowed_judges is None:
+                allowed_judges = ["*"]
             if "*" not in allowed_judges and slug not in allowed_judges:
                 raise RouterException(f"Judge profile '{slug}' is not in allowed judges for this key", ErrorCategory.AUTH_ERROR, status_code=403)
         else:
             if not has_all and "direct" not in router_key.permissions:
                 raise RouterException("This API key lacks permission for direct model access", ErrorCategory.AUTH_ERROR, status_code=403)
-            if "*" not in router_key.allowed_models and model_str not in router_key.allowed_models:
+            allowed = router_key.allowed_models if router_key.allowed_models is not None else ["*"]
+            if "*" not in allowed and model_str not in allowed:
                 raise RouterException(f"Model '{model_str}' is not in allowed models for this API key", ErrorCategory.AUTH_ERROR, status_code=403)
 
     @staticmethod
@@ -331,18 +464,17 @@ class RoutingEngine:
 
             cand_t0 = time.perf_counter()
             try:
-                response = await adapter.chat_completions(
+                response = await cls._dispatch_chat(adapter, cred, provider, model_obj,
                     base_url=provider.base_url,
                     api_key=api_key,
                     model_id=model_obj.provider_model_id,
                     request=cand_request,
                     extra_headers=provider.extra_headers,
-                    configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
+                    configuration=CredentialService.module_runtime_configuration(provider, cred),
                     proxy_url=proxy_url,
                     timeout=settings.DEFAULT_TIMEOUT_SECONDS,
                 )
                 cand_latency = round((time.perf_counter() - cand_t0) * 1000, 2)
-                circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
 
                 attempts_trace.append({
                     "attempt_number": attempt_idx,
@@ -382,7 +514,6 @@ class RoutingEngine:
                 cand_latency = round((time.perf_counter() - cand_t0) * 1000, 2)
                 re = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
                 last_exception = re
-                circuit_breaker.record_failure(cred.id, re.category, re.retry_after, re.message, model_obj.provider_model_id)
 
                 attempts_trace.append({
                     "attempt_number": attempt_idx,
@@ -484,50 +615,51 @@ class RoutingEngine:
             cand_request = cls._apply_model_defaults(request, model_obj, eff_thinking)
 
             try:
-                async for chunk in adapter.stream_chat(
+                async with aclosing(cls._dispatch_stream(adapter, cred, provider, model_obj,
                     base_url=provider.base_url,
                     api_key=api_key,
                     model_id=model_obj.provider_model_id,
                     request=cand_request,
                     extra_headers=provider.extra_headers,
-                    configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
+                    configuration=CredentialService.module_runtime_configuration(provider, cred),
                     proxy_url=proxy_url,
                     timeout=settings.DEFAULT_TIMEOUT_SECONDS,
-                ):
-                    stream_started = True
-                    if '"usage"' in chunk:
-                        has_seen_usage = True
-                        try:
-                            for line in chunk.split("\n"):
-                                if line.startswith("data: ") and not line.startswith("data: [DONE]"):
-                                    c_data = json.loads(line[6:])
-                                    if "usage" in c_data and c_data["usage"]:
-                                        approx_input_tokens = c_data["usage"].get("prompt_tokens", approx_input_tokens)
-                                        approx_output_tokens = c_data["usage"].get("completion_tokens", approx_output_tokens)
-                        except Exception:
-                            pass
-                    else:
-                        approx_output_tokens += 1
+                )) as source:
+                    async for chunk in source:
+                        stream_started = True
+                        if '"usage"' in chunk:
+                            try:
+                                for line in chunk.split("\n"):
+                                    if line.startswith("data: ") and not line.startswith("data: [DONE]"):
+                                        c_data = json.loads(line[6:])
+                                        if "usage" in c_data and c_data["usage"]:
+                                            has_seen_usage = True
+                                            approx_input_tokens = c_data["usage"].get("prompt_tokens", approx_input_tokens)
+                                            approx_output_tokens = c_data["usage"].get("completion_tokens", approx_output_tokens)
+                            except Exception:
+                                pass
+                        else:
+                            approx_output_tokens += 1
 
-                    if "data: [DONE]" in chunk:
-                        if not has_seen_usage:
-                            has_seen_usage = True
-                            usage_data = {
-                                "id": req_id,
-                                "object": "chat.completion.chunk",
-                                "created": int(time.time()),
-                                "model": model_str,
-                                "choices": [],
-                                "usage": {
-                                    "prompt_tokens": approx_input_tokens,
-                                    "completion_tokens": max(1, approx_output_tokens),
-                                    "total_tokens": approx_input_tokens + max(1, approx_output_tokens),
-                                },
-                            }
-                            yield f"data: {json.dumps(usage_data)}\n\n"
-                        yield chunk
-                    else:
-                        yield chunk
+                        if "data: [DONE]" in chunk:
+                            if not has_seen_usage:
+                                has_seen_usage = True
+                                usage_data = {
+                                    "id": req_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": int(time.time()),
+                                    "model": model_str,
+                                    "choices": [],
+                                    "usage": {
+                                        "prompt_tokens": approx_input_tokens,
+                                        "completion_tokens": max(1, approx_output_tokens),
+                                        "total_tokens": approx_input_tokens + max(1, approx_output_tokens),
+                                    },
+                                }
+                                yield f"data: {json.dumps(usage_data)}\n\n"
+                            yield chunk
+                        else:
+                            yield chunk
 
                 if not has_seen_usage and stream_started:
                     has_seen_usage = True
@@ -547,7 +679,6 @@ class RoutingEngine:
                     yield "data: [DONE]\n\n"
 
                 cand_latency = round((time.perf_counter() - cand_t0) * 1000, 2)
-                circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
 
                 attempts_trace.append({
                     "attempt_number": attempt_idx,
@@ -576,7 +707,7 @@ class RoutingEngine:
                                 resolved_credential_id=cred.id,
                                 upstream_model=model_obj.provider_model_id,
                                 input_tokens=approx_input_tokens,
-                                output_tokens=max(1, approx_output_tokens),
+                                output_tokens=approx_output_tokens,
                                 input_price_per_1m=model_obj.input_price_per_1m or 0.0,
                                 output_price_per_1m=model_obj.output_price_per_1m or 0.0,
                                 metadata_json={"stream": True},
@@ -589,7 +720,6 @@ class RoutingEngine:
                 cand_latency = round((time.perf_counter() - cand_t0) * 1000, 2)
                 re = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
                 last_exception = re
-                circuit_breaker.record_failure(cred.id, re.category, re.retry_after, re.message, model_obj.provider_model_id)
 
                 attempts_trace.append({
                     "attempt_number": attempt_idx,
@@ -707,12 +837,7 @@ class RoutingEngine:
         if not candidates:
             raise RouterException(f"Routing profile '{model_str}' has no active candidates", ErrorCategory.MODEL_NOT_FOUND, request_id=req_id)
 
-        if getattr(profile, "randomize_candidates", False) and len(candidates) > 1:
-            candidates = list(candidates)
-            random.shuffle(candidates)
-        elif getattr(profile, "strategy", "priority") == "cache-optimized" and len(candidates) > 1:
-            from app.routing.cache_affinity import apply_prompt_cache_affinity
-            candidates, _affinity_info = apply_prompt_cache_affinity(candidates, request)
+        candidates = cls._order_candidates(profile, candidates, request)
 
         active_visited = set(visited_profile_ids or set())
         is_sub_route = bool(visited_profile_ids) or not record_log
@@ -795,17 +920,13 @@ class RoutingEngine:
                             "error_message": re.message,
                             "latency_ms": sub_lat,
                         })
-                    has_more_candidates = (cand_idx < len(candidates) - 1)
                     is_cat_fallback = (
                         re.category.is_fallback_eligible
                         or re.category == ErrorCategory.AUTH_ERROR
-                        or has_more_candidates
                     )
                     in_profile_conds = (
-                        not profile.fallback_conditions
+                        profile.fallback_conditions is None
                         or (re.category.value in profile.fallback_conditions)
-                        or (re.category == ErrorCategory.AUTH_ERROR)
-                        or has_more_candidates
                     )
                     if not (is_cat_fallback and in_profile_conds):
                         raise re
@@ -836,27 +957,8 @@ class RoutingEngine:
             # Get credentials to attempt for this candidate:
             # If candidate.credential_id is set -> try only that specific credential.
             # If candidate.credential_id is None -> Full Fallback across all active credentials of this provider!
-            if candidate.credential_id:
-                cand_cred = candidate.credential
-                if not cand_cred:
-                    cand_cred = (await db.execute(
-                        select(ProviderCredential).options(selectinload(ProviderCredential.proxy)).where(ProviderCredential.id == candidate.credential_id)
-                    )).scalar_one_or_none()
-                creds_to_try = [cand_cred] if (cand_cred and cand_cred.enabled) else []
-            else:
-                cred_query = (
-                    select(ProviderCredential)
-                    .options(selectinload(ProviderCredential.proxy))
-                    .where(
-                        ProviderCredential.provider_id == provider.id,
-                        ProviderCredential.enabled == True,
-                    )
-                )
-                if candidate.credential_group:
-                    cred_query = cred_query.where(ProviderCredential.group_name == candidate.credential_group)
-                cred_query = cred_query.order_by(ProviderCredential.priority.asc(), ProviderCredential.weight.desc())
-                cred_res = await db.execute(cred_query)
-                creds_to_try = list(cred_res.scalars().all())
+            creds_to_try = await cls._candidate_credentials(db, provider, model_obj,
+                credential_id=candidate.credential_id, credential_group=candidate.credential_group)
 
             # Random key selection is built-in by default across available credentials
             if len(creds_to_try) > 1:
@@ -865,7 +967,7 @@ class RoutingEngine:
                     from app.routing.cache_affinity import apply_prompt_cache_affinity
                     pairs, _ = apply_prompt_cache_affinity([(cred, model_obj) for cred in creds_to_try], request)
                     creds_to_try = [cred for cred, _ in pairs]
-                else:
+                elif profile.randomize_keys:
                     random.shuffle(creds_to_try)
 
             cand_model_name = f"[{profile.name}] {model_obj.display_name or model_obj.provider_model_id}" if is_sub_route else (model_obj.display_name or model_obj.provider_model_id)
@@ -887,7 +989,7 @@ class RoutingEngine:
             for cred_idx, cred in enumerate(creds_to_try):
                 # Circuit breaker check
                 is_avail, reason = circuit_breaker.is_available(cred.id, model_obj.provider_model_id)
-                if not is_avail and (len(creds_to_try) > 1 or len(candidates) > 1):
+                if not is_avail:
                     raw_status = circuit_breaker.get_status(cred.id, model_obj.provider_model_id).get("status")
                     cred_status = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
                     attempts_trace.append({
@@ -907,7 +1009,7 @@ class RoutingEngine:
                 api_key = decrypt_secret(cred.encrypted_api_key)
                 proxy_url = ProxyService.build_proxy_url(cred.proxy) if cred.proxy else None
                 adapter = get_adapter(provider.adapter_type)
-                candidate_timeout = max(float(profile.timeout_seconds or 60.0), 30.0)
+                candidate_timeout = float(profile.timeout_seconds)
 
                 # Apply candidate/profile thinking effort override
                 eff_thinking = (
@@ -925,18 +1027,17 @@ class RoutingEngine:
                 )
 
                 try:
-                    response = await adapter.chat_completions(
+                    response = await cls._dispatch_chat(adapter, cred, provider, model_obj, retry_count=profile.retry_count,
                         base_url=provider.base_url,
                         api_key=api_key,
                         model_id=model_obj.provider_model_id,
                         request=cand_request,
                         extra_headers=provider.extra_headers,
-                        configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
+                        configuration=CredentialService.module_runtime_configuration(provider, cred),
                         proxy_url=proxy_url,
                         timeout=candidate_timeout,
                     )
                     cand_latency = round((time.perf_counter() - cand_t0) * 1000, 2)
-                    circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
 
                     attempts_trace.append({
                         "attempt_number": len(attempts_trace) + 1,
@@ -952,30 +1053,30 @@ class RoutingEngine:
                     p_tokens = response.usage.prompt_tokens if response.usage else 0
                     c_tokens = response.usage.completion_tokens if response.usage else 0
 
-                    await LogService.record_request_log(
-                        db=db,
-                        request_id=req_id,
-                        requested_model=effective_root_model,
-                        mode="PRIORITY",
-                        status="FALLBACK_SUCCESS" if len(attempts_trace) > 1 else "SUCCESS",
-                        status_code=200,
-                        latency_ms=total_latency,
-                        router_key_id=router_key.id if router_key else None,
-                        resolved_provider_id=provider.id,
-                        resolved_credential_id=cred.id,
-                        upstream_model=model_obj.provider_model_id,
-                        input_tokens=p_tokens,
-                        output_tokens=c_tokens,
-                        input_price_per_1m=model_obj.input_price_per_1m or 0.0,
-                        output_price_per_1m=model_obj.output_price_per_1m or 0.0,
-                        attempts=attempts_trace,
+                    if record_log:
+                        await LogService.record_request_log(
+                            db=db,
+                            request_id=req_id,
+                            requested_model=effective_root_model,
+                            mode="PRIORITY",
+                            status="FALLBACK_SUCCESS" if len(attempts_trace) > 1 else "SUCCESS",
+                            status_code=200,
+                            latency_ms=total_latency,
+                            router_key_id=router_key.id if router_key else None,
+                            resolved_provider_id=provider.id,
+                            resolved_credential_id=cred.id,
+                            upstream_model=model_obj.provider_model_id,
+                            input_tokens=p_tokens,
+                            output_tokens=c_tokens,
+                            input_price_per_1m=model_obj.input_price_per_1m or 0.0,
+                            output_price_per_1m=model_obj.output_price_per_1m or 0.0,
+                            attempts=attempts_trace,
                     )
                     return response
                 except Exception as e:
                     cand_latency = round((time.perf_counter() - cand_t0) * 1000, 2)
                     re = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
                     last_exception = re
-                    circuit_breaker.record_failure(cred.id, re.category, re.retry_after, re.message, model_obj.provider_model_id)
 
                     attempts_trace.append({
                         "attempt_number": len(attempts_trace) + 1,
@@ -989,23 +1090,15 @@ class RoutingEngine:
                         "latency_ms": cand_latency,
                     })
 
-                    has_more_creds = (cred_idx < len(creds_to_try) - 1)
-                    has_more_candidates = (cand_idx < len(candidates) - 1)
-                    has_more_options = has_more_creds or has_more_candidates
 
-                    # Check if fallback is eligible:
-                    # Fallback occurs on standard eligible errors, credential auth failures,
-                    # or whenever further candidates/credentials exist in this priority route.
+                    # More candidates do not override the configured fallback policy.
                     is_cat_fallback = (
                         re.category.is_fallback_eligible
                         or re.category == ErrorCategory.AUTH_ERROR
-                        or has_more_options
                     )
                     in_profile_conds = (
-                        not profile.fallback_conditions
+                        profile.fallback_conditions is None
                         or (re.category.value in profile.fallback_conditions)
-                        or (re.category == ErrorCategory.AUTH_ERROR)
-                        or has_more_options
                     )
 
                     if not (is_cat_fallback and in_profile_conds):
@@ -1047,6 +1140,9 @@ class RoutingEngine:
                 attempts=attempts_trace,
             )
 
+        if last_exception:
+            last_exception.request_id = req_id
+            raise last_exception
         raise RouterException(
             f"All candidates in '{model_str}' failed. Last error: {last_exception.message if last_exception else 'Unknown'}",
             ErrorCategory.UPSTREAM_5XX,
@@ -1076,12 +1172,7 @@ class RoutingEngine:
         if not candidates:
             raise RouterException(f"Routing profile '{model_str}' has no active candidates", ErrorCategory.MODEL_NOT_FOUND, request_id=req_id)
 
-        if getattr(profile, "randomize_candidates", False) and len(candidates) > 1:
-            candidates = list(candidates)
-            random.shuffle(candidates)
-        elif getattr(profile, "strategy", "priority") == "cache-optimized" and len(candidates) > 1:
-            from app.routing.cache_affinity import apply_prompt_cache_affinity
-            candidates, _affinity_info = apply_prompt_cache_affinity(candidates, request)
+        candidates = cls._order_candidates(profile, candidates, request)
 
         is_sub_route = bool(visited_profile_ids) or not record_log
         effective_root_model = root_model_str or model_str
@@ -1134,7 +1225,7 @@ class RoutingEngine:
                         candidate_temperature=getattr(candidate, "temperature", None),
                         profile_temperature=getattr(profile, "temperature", None),
                     )
-                    async for chunk in cls._handle_priority_stream(
+                    async with aclosing(cls._handle_priority_stream(
                         db=db,
                         request=sub_req,
                         model_str=f"route/{target_p.slug}",
@@ -1145,9 +1236,10 @@ class RoutingEngine:
                         parent_attempts_trace=attempts_trace,
                         root_model_str=effective_root_model,
                         record_log=record_log,
-                    ):
-                        stream_started = True
-                        yield chunk
+                    )) as source:
+                        async for chunk in source:
+                            stream_started = True
+                            yield chunk
                     return
                 except Exception as e:
                     if stream_started:
@@ -1167,17 +1259,13 @@ class RoutingEngine:
                             "error_message": re.message,
                             "latency_ms": sub_lat,
                         })
-                    has_more_candidates = (cand_idx < len(candidates) - 1)
                     is_cat_fallback = (
                         re.category.is_fallback_eligible
                         or re.category == ErrorCategory.AUTH_ERROR
-                        or has_more_candidates
                     )
                     in_profile_conds = (
-                        not profile.fallback_conditions
+                        profile.fallback_conditions is None
                         or (re.category.value in profile.fallback_conditions)
-                        or (re.category == ErrorCategory.AUTH_ERROR)
-                        or has_more_candidates
                     )
                     if not (is_cat_fallback and in_profile_conds):
                         raise re
@@ -1206,27 +1294,8 @@ class RoutingEngine:
                 continue
 
             # Get credentials to attempt for this candidate:
-            if candidate.credential_id:
-                cand_cred = candidate.credential
-                if not cand_cred:
-                    cand_cred = (await db.execute(
-                        select(ProviderCredential).options(selectinload(ProviderCredential.proxy)).where(ProviderCredential.id == candidate.credential_id)
-                    )).scalar_one_or_none()
-                creds_to_try = [cand_cred] if (cand_cred and cand_cred.enabled) else []
-            else:
-                cred_query = (
-                    select(ProviderCredential)
-                    .options(selectinload(ProviderCredential.proxy))
-                    .where(
-                        ProviderCredential.provider_id == provider.id,
-                        ProviderCredential.enabled == True,
-                    )
-                )
-                if candidate.credential_group:
-                    cred_query = cred_query.where(ProviderCredential.group_name == candidate.credential_group)
-                cred_query = cred_query.order_by(ProviderCredential.priority.asc(), ProviderCredential.weight.desc())
-                cred_res = await db.execute(cred_query)
-                creds_to_try = list(cred_res.scalars().all())
+            creds_to_try = await cls._candidate_credentials(db, provider, model_obj,
+                credential_id=candidate.credential_id, credential_group=candidate.credential_group)
 
             # Random key selection is built-in by default across available credentials
             if len(creds_to_try) > 1:
@@ -1235,7 +1304,7 @@ class RoutingEngine:
                     from app.routing.cache_affinity import apply_prompt_cache_affinity
                     pairs, _ = apply_prompt_cache_affinity([(cred, model_obj) for cred in creds_to_try], request)
                     creds_to_try = [cred for cred, _ in pairs]
-                else:
+                elif profile.randomize_keys:
                     random.shuffle(creds_to_try)
 
             cand_model_name = f"[{profile.name}] {model_obj.display_name or model_obj.provider_model_id}" if is_sub_route else (model_obj.display_name or model_obj.provider_model_id)
@@ -1255,7 +1324,7 @@ class RoutingEngine:
 
             for cred_idx, cred in enumerate(creds_to_try):
                 is_avail, reason = circuit_breaker.is_available(cred.id, model_obj.provider_model_id)
-                if not is_avail and (len(creds_to_try) > 1 or len(candidates) > 1):
+                if not is_avail:
                     raw_status = circuit_breaker.get_status(cred.id, model_obj.provider_model_id).get("status")
                     cred_status = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
                     attempts_trace.append({
@@ -1273,7 +1342,7 @@ class RoutingEngine:
                 api_key = decrypt_secret(cred.encrypted_api_key)
                 proxy_url = ProxyService.build_proxy_url(cred.proxy) if cred.proxy else None
                 adapter = get_adapter(provider.adapter_type)
-                candidate_timeout = max(float(profile.timeout_seconds or 60.0), 30.0)
+                candidate_timeout = float(profile.timeout_seconds)
 
                 # Apply candidate/profile thinking effort override
                 eff_thinking = (
@@ -1298,50 +1367,51 @@ class RoutingEngine:
                 stream_started = False
 
                 try:
-                    async for chunk in adapter.stream_chat(
+                    async with aclosing(cls._dispatch_stream(adapter, cred, provider, model_obj, retry_count=profile.retry_count,
                         base_url=provider.base_url,
                         api_key=api_key,
                         model_id=model_obj.provider_model_id,
                         request=cand_request,
                         extra_headers=provider.extra_headers,
-                        configuration={**provider.adapter_configuration, "credential_metadata": getattr(cred, "metadata_json", {})},
+                        configuration=CredentialService.module_runtime_configuration(provider, cred),
                         proxy_url=proxy_url,
                         timeout=candidate_timeout,
-                    ):
-                        stream_started = True
-                        if '"usage"' in chunk:
-                            has_seen_usage = True
-                            try:
-                                for line in chunk.split("\n"):
-                                    if line.startswith("data: ") and not line.startswith("data: [DONE]"):
-                                        c_data = json.loads(line[6:])
-                                        if "usage" in c_data and c_data["usage"]:
-                                            approx_input_tokens = c_data["usage"].get("prompt_tokens", approx_input_tokens)
-                                            approx_output_tokens = c_data["usage"].get("completion_tokens", approx_output_tokens)
-                            except Exception:
-                                pass
-                        else:
-                            approx_output_tokens += 1
+                    )) as source:
+                        async for chunk in source:
+                            stream_started = True
+                            if '"usage"' in chunk:
+                                try:
+                                    for line in chunk.split("\n"):
+                                        if line.startswith("data: ") and not line.startswith("data: [DONE]"):
+                                            c_data = json.loads(line[6:])
+                                            if "usage" in c_data and c_data["usage"]:
+                                                has_seen_usage = True
+                                                approx_input_tokens = c_data["usage"].get("prompt_tokens", approx_input_tokens)
+                                                approx_output_tokens = c_data["usage"].get("completion_tokens", approx_output_tokens)
+                                except Exception:
+                                    pass
+                            else:
+                                approx_output_tokens += 1
 
-                        if "data: [DONE]" in chunk:
-                            if not has_seen_usage:
-                                has_seen_usage = True
-                                usage_data = {
-                                    "id": req_id,
-                                    "object": "chat.completion.chunk",
-                                    "created": int(time.time()),
-                                    "model": model_str,
-                                    "choices": [],
-                                    "usage": {
-                                        "prompt_tokens": approx_input_tokens,
-                                        "completion_tokens": max(1, approx_output_tokens),
-                                        "total_tokens": approx_input_tokens + max(1, approx_output_tokens),
-                                    },
-                                }
-                                yield f"data: {json.dumps(usage_data)}\n\n"
-                            yield chunk
-                        else:
-                            yield chunk
+                            if "data: [DONE]" in chunk:
+                                if not has_seen_usage:
+                                    has_seen_usage = True
+                                    usage_data = {
+                                        "id": req_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": int(time.time()),
+                                        "model": model_str,
+                                        "choices": [],
+                                        "usage": {
+                                            "prompt_tokens": approx_input_tokens,
+                                            "completion_tokens": max(1, approx_output_tokens),
+                                            "total_tokens": approx_input_tokens + max(1, approx_output_tokens),
+                                        },
+                                    }
+                                    yield f"data: {json.dumps(usage_data)}\n\n"
+                                yield chunk
+                            else:
+                                yield chunk
 
                     if not has_seen_usage and stream_started:
                         has_seen_usage = True
@@ -1361,7 +1431,6 @@ class RoutingEngine:
                         yield "data: [DONE]\n\n"
 
                     cand_latency = round((time.perf_counter() - cand_t0) * 1000, 2)
-                    circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
 
                     attempts_trace.append({
                         "attempt_number": len(attempts_trace) + 1,
@@ -1390,7 +1459,7 @@ class RoutingEngine:
                                     resolved_credential_id=cred.id,
                                     upstream_model=model_obj.provider_model_id,
                                     input_tokens=approx_input_tokens,
-                                    output_tokens=max(1, approx_output_tokens),
+                                    output_tokens=approx_output_tokens,
                                     input_price_per_1m=model_obj.input_price_per_1m or 0.0,
                                     output_price_per_1m=model_obj.output_price_per_1m or 0.0,
                                     metadata_json={"stream": True},
@@ -1403,7 +1472,6 @@ class RoutingEngine:
                     cand_latency = round((time.perf_counter() - cand_t0) * 1000, 2)
                     re = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
                     last_exception = re
-                    circuit_breaker.record_failure(cred.id, re.category, re.retry_after, re.message, model_obj.provider_model_id)
 
                     attempts_trace.append({
                         "attempt_number": len(attempts_trace) + 1,
@@ -1417,21 +1485,15 @@ class RoutingEngine:
                         "latency_ms": cand_latency,
                     })
 
-                    has_more_creds = (cred_idx < len(creds_to_try) - 1)
-                    has_more_candidates = (cand_idx < len(candidates) - 1)
-                    has_more_options = has_more_creds or has_more_candidates
 
                     # Check if fallback is eligible:
                     is_cat_fallback = (
                         re.category.is_fallback_eligible
                         or re.category == ErrorCategory.AUTH_ERROR
-                        or has_more_options
                     )
                     in_profile_conds = (
-                        not profile.fallback_conditions
+                        profile.fallback_conditions is None
                         or (re.category.value in profile.fallback_conditions)
-                        or (re.category == ErrorCategory.AUTH_ERROR)
-                        or has_more_options
                     )
 
                     if stream_started or not (is_cat_fallback and in_profile_conds):
@@ -1613,7 +1675,7 @@ class RoutingEngine:
 
         # Step 5: Separate into available (non-cooldown) and cooldown/unavailable pairs
         available_pairs = [pair for pair in valid_pairs if circuit_breaker.is_available(pair[0].id, pair[1].provider_model_id)[0]]
-        active_pool = available_pairs if available_pairs else valid_pairs
+        active_pool = available_pairs
 
         # Default random key selection across available credentials for this provider/model
         if len(active_pool) > 1:
@@ -1621,13 +1683,6 @@ class RoutingEngine:
             random.shuffle(active_pool)
 
         ordered_candidates = list(active_pool)
-
-        # If some credentials were in cooldown, append them at the very end as last resort fallback
-        if available_pairs and len(available_pairs) < len(valid_pairs):
-            cooldown_pairs = [p for p in valid_pairs if p not in available_pairs]
-            if len(cooldown_pairs) > 1:
-                random.shuffle(cooldown_pairs)
-            ordered_candidates.extend(cooldown_pairs)
 
         return ordered_candidates
 
@@ -1664,7 +1719,7 @@ class RoutingEngine:
         if any_model:
             raise RouterException(
                 f"No available healthy credentials found for model '{clean_model}' (credentials may be disabled or in circuit-breaker cooldown)",
-                ErrorCategory.UPSTREAM_TIMEOUT,
+                ErrorCategory.TIMEOUT,
                 request_id=req_id,
             )
 

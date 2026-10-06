@@ -33,7 +33,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { LogDetailDrawer } from "../components/LogDetailDrawer";
 import { useI18n } from "../i18n";
 
-export const LogsPage: React.FC = () => {
+export const LogsPage: React.FC<{ onReplay: () => void }> = ({ onReplay }) => {
   const { t } = useI18n();
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [summary, setSummary] = useState<LogsSummaryResponse | null>(null);
@@ -259,7 +259,7 @@ export const LogsPage: React.FC = () => {
         prompt: log.prompt_content || "",
       })
     );
-    window.location.href = `/playground?model=${encodeURIComponent(log.requested_model)}`;
+    onReplay();
   };
 
   const handleResetFilters = () => {

@@ -198,6 +198,13 @@ class JudgeService:
         if not profile:
             return None
 
+        effective = lambda field: getattr(data, field) if field in data.model_fields_set else getattr(profile, field)
+        await cls._validate_judge_refs(db, effective('judge_type'), effective('judge_routing_profile_id'),
+                                      effective('judge_provider_id'), effective('judge_credential_id'), effective('judge_model_id'))
+        if data.candidates is not None:
+            for candidate in data.candidates:
+                await cls._validate_candidate_ref(db, candidate)
+
         clean_slug = data.slug.removeprefix("judge/").removeprefix("smart/").strip() if data.slug else None
         if clean_slug and clean_slug != profile.slug:
             existing = await db.execute(
@@ -209,34 +216,34 @@ class JudgeService:
 
         if data.name is not None:
             profile.name = data.name
-        if data.description is not None:
+        if "description" in data.model_fields_set:
             profile.description = data.description
         if data.strategy is not None:
             profile.strategy = data.strategy
         if data.judge_type is not None:
             profile.judge_type = data.judge_type
-        if data.judge_routing_profile_id is not None:
+        if "judge_routing_profile_id" in data.model_fields_set:
             profile.judge_routing_profile_id = data.judge_routing_profile_id
-        if data.judge_provider_id is not None:
+        if "judge_provider_id" in data.model_fields_set:
             profile.judge_provider_id = data.judge_provider_id
-        if data.judge_credential_id is not None:
+        if "judge_credential_id" in data.model_fields_set:
             profile.judge_credential_id = data.judge_credential_id
-        if data.judge_credential_group is not None:
+        if "judge_credential_group" in data.model_fields_set:
             profile.judge_credential_group = data.judge_credential_group
-        if data.judge_model_id is not None:
+        if "judge_model_id" in data.model_fields_set:
             profile.judge_model_id = data.judge_model_id
-        if data.judge_thinking_effort is not None:
+        if "judge_thinking_effort" in data.model_fields_set:
             profile.judge_thinking_effort = data.judge_thinking_effort
-        if data.judge_temperature is not None:
+        if "judge_temperature" in data.model_fields_set:
             profile.judge_temperature = data.judge_temperature
-        if data.system_prompt is not None:
+        if "system_prompt" in data.model_fields_set:
             profile.system_prompt = data.system_prompt
-        if data.fallback_candidate_id is not None:
+        if "fallback_candidate_id" in data.model_fields_set:
             profile.fallback_candidate_id = data.fallback_candidate_id
         if data.fallback_strongest_on_overflow is not None:
             profile.fallback_strongest_on_overflow = data.fallback_strongest_on_overflow
-        if data.context_length is not None:
-            profile.context_length = data.context_length if data.context_length > 0 else None
+        if "context_length" in data.model_fields_set:
+            profile.context_length = data.context_length
         if data.timeout_seconds is not None:
             profile.timeout_seconds = data.timeout_seconds
         if data.enabled is not None:

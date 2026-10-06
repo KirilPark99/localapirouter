@@ -1,4 +1,5 @@
 import os
+from contextlib import aclosing
 import json
 import time
 from abc import ABC, abstractmethod
@@ -179,13 +180,20 @@ class ChatStreamAccumulator:
                 self.usage = UsageInfo.model_validate(data["usage"])
             for choice in data.get("choices", []):
                 state = self.choices.setdefault(choice.get("index", 0), {
-                    "content": [], "reasoning": [], "calls": {}, "finish": None,
+                    "content": [], "reasoning": [], "reasoning_details": {}, "calls": {}, "finish": None,
                 })
                 delta = choice.get("delta") or choice.get("message") or {}
                 if delta.get("content"):
                     state["content"].append(delta["content"])
                 if delta.get("reasoning_content"):
                     state["reasoning"].append(delta["reasoning_content"])
+                for detail in delta.get("reasoning_details") or []:
+                    target = state["reasoning_details"].setdefault(detail.get("index", 0), {})
+                    for key, value in detail.items():
+                        if key in ("thinking", "signature"):
+                            target[key] = target.get(key, "") + value
+                        else:
+                            target[key] = value
                 if choice.get("finish_reason"):
                     state["finish"] = choice["finish_reason"]
                 for position, call in enumerate(delta.get("tool_calls") or []):
@@ -214,7 +222,8 @@ class ChatStreamAccumulator:
             if calls and any(not c.id or not c.function.name for c in calls):
                 raise ValueError("Incomplete streamed tool call")
             message = ChatMessage(role="assistant", content="".join(state["content"]) or (None if calls else ""),
-                                  reasoning_content="".join(state["reasoning"]) or None, tool_calls=calls)
+                                  reasoning_content="".join(state["reasoning"]) or None,
+                                  reasoning_details=list(state["reasoning_details"].values()) or None, tool_calls=calls)
             choices.append(ChatCompletionChoice(index=index, message=message,
                            finish_reason=state["finish"] or ("tool_calls" if calls else "stop")))
         if not choices and not require_complete:
@@ -225,6 +234,11 @@ class ChatStreamAccumulator:
 
 async def collect_chat_completion(source: AsyncGenerator[str, None], model: str, require_complete: bool = False) -> ChatCompletionResponse:
     accumulator = ChatStreamAccumulator()
-    async for chunk in source:
-        accumulator.feed(chunk)
+    async with aclosing(source):
+        async for chunk in source:
+            accumulator.feed(chunk)
+            if accumulator.error:
+                accumulator.response(model)
+            if accumulator.done:
+                break
     return accumulator.response(model, require_complete=require_complete)
