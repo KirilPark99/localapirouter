@@ -29,6 +29,34 @@ import {
 import { RequestLog } from "../types";
 import { StatusBadge } from "./StatusBadge";
 import { LogWaterfallTrace } from "./LogWaterfallTrace";
+import { getRequestLogTelemetry, requestParameterNames, telemetryValue } from "../utils/requestLogTelemetry";
+
+const usageLabels = [
+  ["input_tokens", "Prompt (Input)"], ["output_tokens", "Completion (Output)"],
+  ["new_tokens", "NEW · Noncached input"], ["cached_tokens", "CACHE · Upstream input"],
+  ["reasoning_tokens", "Thinking / Reasoning"],
+] as const;
+
+const ParameterComparison = ({ requested, effective }: {
+  requested: Record<string, unknown>; effective: Record<string, unknown>;
+}) => (
+  <div className="overflow-x-auto">
+    <table className="w-full text-xs text-left">
+      <thead className="text-[10px] uppercase text-slate-400">
+        <tr><th className="py-1 pr-3">Parameter</th><th className="py-1 pr-3">Requested</th><th className="py-1">Routed · pre-adapter</th></tr>
+      </thead>
+      <tbody className="font-mono text-slate-300">
+        {requestParameterNames.map((name) => (
+          <tr key={name} className="border-t border-slate-800/60">
+            <td className="py-1 pr-3">{name}</td>
+            <td className="py-1 pr-3">{telemetryValue(requested[name])}</td>
+            <td className="py-1 text-indigo-300">{telemetryValue(effective[name])}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+);
 
 interface LogDetailDrawerProps {
   log: RequestLog | null;
@@ -61,6 +89,9 @@ export const LogDetailDrawer: React.FC<LogDetailDrawerProps> = ({
   }, [onClose]);
 
   if (!log) return null;
+  const telemetry = getRequestLogTelemetry(log);
+  const compression = telemetry.compression;
+  const lastDispatch = telemetry.dispatches.at(-1);
 
   const handleCopyId = () => {
     navigator.clipboard.writeText(log.request_id);
@@ -216,7 +247,8 @@ export const LogDetailDrawer: React.FC<LogDetailDrawerProps> = ({
                 <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-1">
                   <div className="text-[10px] uppercase text-slate-400 font-semibold">Total Tokens</div>
                   <div className="text-base font-bold font-mono text-amber-300">
-                    {(log.input_tokens + log.output_tokens).toLocaleString()}
+                    {telemetryValue(telemetry.usage.input_tokens != null && telemetry.usage.output_tokens != null
+                      ? telemetry.usage.input_tokens + telemetry.usage.output_tokens : null)}
                   </div>
                 </div>
                 <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-1">
@@ -228,7 +260,7 @@ export const LogDetailDrawer: React.FC<LogDetailDrawerProps> = ({
                 <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-1">
                   <div className="text-[10px] uppercase text-slate-400 font-semibold">Rotation Attempts</div>
                   <div className="text-base font-bold font-mono text-purple-300">
-                    {log.attempts?.length || 1}
+                    {telemetry.localCacheHit ? 0 : log.attempts?.length || 1}
                   </div>
                 </div>
               </div>
@@ -278,28 +310,111 @@ export const LogDetailDrawer: React.FC<LogDetailDrawerProps> = ({
                   <Zap size={14} className="text-amber-400" />
                   <span>Token & Cache Breakdown</span>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                  {usageLabels.map(([name, label]) => (
+                    <div key={name} className="p-2 bg-slate-900/80 rounded-lg border border-slate-800">
+                      <span className="text-[10px] text-slate-400 block">{label}</span>
+                      <span className="font-mono font-bold text-slate-200">{telemetryValue(telemetry.usage[name])}</span>
+                    </div>
+                  ))}
                   <div className="p-2 bg-slate-900/80 rounded-lg border border-slate-800">
-                    <span className="text-[10px] text-slate-400 block">Prompt (Input)</span>
-                    <span className="font-mono font-bold text-slate-200">{log.input_tokens.toLocaleString()}</span>
-                  </div>
-                  <div className="p-2 bg-slate-900/80 rounded-lg border border-slate-800">
-                    <span className="text-[10px] text-slate-400 block">Completion (Output)</span>
-                    <span className="font-mono font-bold text-slate-200">{log.output_tokens.toLocaleString()}</span>
-                  </div>
-                  <div className="p-2 bg-slate-900/80 rounded-lg border border-slate-800">
-                    <span className="text-[10px] text-slate-400 block">Cached</span>
-                    <span className="font-mono font-bold text-emerald-400">
-                      {log.cached_tokens > 0 ? log.cached_tokens.toLocaleString() : "0"}
-                    </span>
-                  </div>
-                  <div className="p-2 bg-slate-900/80 rounded-lg border border-slate-800">
-                    <span className="text-[10px] text-slate-400 block">Reasoning (CoT)</span>
-                    <span className="font-mono font-bold text-purple-300">
-                      {log.reasoning_tokens > 0 ? log.reasoning_tokens.toLocaleString() : "0"}
-                    </span>
+                    <span className="text-[10px] text-slate-400 block">Local response cache</span>
+                    <span className="font-mono font-bold text-emerald-400">{telemetry.responseCache}</span>
                   </div>
                 </div>
+                <p className="text-[11px] text-slate-400">
+                  Usage source: {telemetryValue(telemetry.usage.source)}. NEW/CACHE split is unknown when upstream cache counts are unavailable.
+                  Thinking tokens are a subset of output, not additional tokens.
+                </p>
+                {telemetry.usage.source === "upstream_partial" ? <p className="text-[11px] text-amber-300">Partial upstream totals: includes known usage from failed/cancelled calls; some dispatches did not report usage.</p> : null}
+                {(log.mode === "JUDGE" || log.mode === "FUSION" || log.requested_model.startsWith("judge/")) && (
+                  <p className="text-[11px] text-amber-300">Totals include judge/routing and participant calls, not just the final response. See individual dispatches below.</p>
+                )}
+                {telemetry.localCacheHit && (
+                  <p className="text-[11px] text-emerald-300">Local response-cache HIT: no billed upstream call. Input/output are zero; this is not an upstream token-cache HIT.</p>
+                )}
+                {telemetry.localCacheHit && telemetry.savedResponseUsage != null && (
+                  <details className="text-[11px] text-slate-400">
+                    <summary className="cursor-pointer">Original cached response usage (not billed for this request)</summary>
+                    <pre className="mt-2 font-mono whitespace-pre-wrap break-words">{JSON.stringify(telemetry.savedResponseUsage, null, 2)}</pre>
+                  </details>
+                )}
+              </div>
+
+              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-3.5 space-y-3">
+                <div className="text-xs font-semibold text-slate-300 flex items-center gap-1.5 border-b border-slate-800/80 pb-2">
+                  <Layers size={14} className="text-sky-400" /><span>Context Compression · Local Estimate</span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                  <div><span className="text-[10px] text-slate-400 block">Original → After</span><span className="font-mono text-sky-300">{telemetryValue(compression?.tokens_before)} → {telemetryValue(compression?.tokens_after)}</span></div>
+                  <div><span className="text-[10px] text-slate-400 block">Saved tokens</span><span className="font-mono text-sky-300">{telemetryValue(compression?.tokens_saved)}</span></div>
+                  <div><span className="text-[10px] text-slate-400 block">Saved %</span><span className="font-mono text-sky-300">{telemetryValue(compression?.savings_percent)}{compression?.savings_percent != null ? "%" : ""}</span></div>
+                  <div><span className="text-[10px] text-slate-400 block">Duration (ms)</span><span className="font-mono text-sky-300">{telemetryValue(compression?.duration_ms)}</span></div>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  Compressed: {telemetryValue(compression?.compressed)}.
+                  {compression?.disabled === true ? " Disabled." : ""}
+                  {compression?.bypass === true ? " Bypassed." : ""}
+                  {compression?.below_threshold === true ? " Below threshold." : ""}
+                  {compression?.no_active_stages === true ? " No active stages." : ""}
+                  {compression?.telemetry_disabled === true ? " Compression telemetry disabled." : ""}
+                  {compression?.error ? ` Error: ${telemetryValue(compression.error)}.` : ""}
+                  {" "}Counts are local estimates, separate from upstream usage and cache tokens.
+                </p>
+                {telemetry.stages.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-[11px]">
+                      <thead className="text-slate-400"><tr><th className="py-1 pr-2">Stage</th><th className="py-1 pr-2">Before → After</th><th className="py-1 pr-2">ms</th><th className="py-1">Advanced</th></tr></thead>
+                      <tbody>
+                        {telemetry.stages.map((stage, index) => (
+                          <React.Fragment key={`${stage.stage_id ?? "stage"}-${index}`}>
+                            <tr className="border-t border-slate-800/60 font-mono">
+                              <td className="py-1 pr-2">{telemetryValue(stage.stage_name ?? stage.stage_id)}</td>
+                              <td className="py-1 pr-2">{telemetryValue(stage.tokens_before)} → {telemetryValue(stage.tokens_after)}</td>
+                              <td className="py-1 pr-2">{telemetryValue(stage.duration_ms)}</td>
+                              <td className="py-1">{telemetryValue(stage.advanced)}</td>
+                            </tr>
+                            {stage.note || stage.warning ? <tr><td colSpan={4} className="pb-2 text-slate-400 break-words">{stage.note ? telemetryValue(stage.note) : ""}{stage.warning ? ` Warning: ${telemetryValue(stage.warning)}` : ""}</td></tr> : null}
+                          </React.Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : <p className="text-[11px] text-slate-500">Stage breakdown: —</p>}
+              </div>
+
+              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-3.5 space-y-3">
+                <div className="text-xs font-semibold text-slate-300 flex items-center gap-1.5 border-b border-slate-800/80 pb-2">
+                  <Brain size={14} className="text-purple-400" /><span>Requested vs Routed Parameters</span>
+                </div>
+                <p className="text-[11px] text-slate-400">Routing parameters for the last dispatch, before provider-specific translation. Adapters may omit sampling values or adjust thinking/output budgets. These are not confirmation of the upstream's internal reasoning level. Missing values are unknown or unspecified.</p>
+                <ParameterComparison requested={telemetry.requested} effective={lastDispatch ? { ...lastDispatch.parameters, stream: lastDispatch.stream } : {}} />
+                <p className="text-[11px] text-slate-400">Reasoning source: {telemetryValue(lastDispatch?.parameters.reasoning_source)} · {telemetryValue(lastDispatch?.provider)} / {telemetryValue(lastDispatch?.model)}</p>
+              </div>
+
+              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-3.5 space-y-3">
+                <div className="text-xs font-semibold text-slate-300 flex items-center gap-1.5 border-b border-slate-800/80 pb-2">
+                  <GitFork size={14} className="text-purple-400" /><span>Per-provider Dispatches ({telemetry.localCacheHit || telemetry.dispatchesKnown ? telemetry.dispatches.length : "—"})</span>
+                </div>
+                {telemetry.dispatches.length > 0 ? telemetry.dispatches.map((dispatch, index) => (
+                  <div key={index} className="p-3 bg-slate-900/80 rounded-lg border border-slate-800 space-y-2">
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className="font-mono text-purple-300">#{index + 1} {telemetryValue(dispatch.provider)} / {telemetryValue(dispatch.model)}</span>
+                      <StatusBadge status={dispatch.status || "UNKNOWN"} size="sm" />
+                      <span className="font-mono text-sky-300">{telemetryValue(dispatch.latency_ms)} ms</span>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                      {usageLabels.map(([name, label]) => (
+                        <div key={name}><span className="text-[10px] text-slate-400 block">{label}</span><span className="font-mono">{telemetryValue(dispatch.usage?.[name])}</span></div>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-slate-400">Reasoning source: {telemetryValue(dispatch.parameters.reasoning_source)}</p>
+                    <details className="text-xs">
+                      <summary className="cursor-pointer text-indigo-300">Requested vs routed parameters · pre-adapter</summary>
+                      <div className="mt-2"><ParameterComparison requested={telemetry.requested} effective={{ ...dispatch.parameters, stream: dispatch.stream }} /></div>
+                    </details>
+                  </div>
+                )) : <p className="text-[11px] text-slate-400">{telemetry.localCacheHit ? "No upstream dispatch: served from local response cache." : "Dispatch telemetry: — (not recorded for this request)."}</p>}
               </div>
 
               {/* Metadata & Client info */}
@@ -311,8 +426,8 @@ export const LogDetailDrawer: React.FC<LogDetailDrawerProps> = ({
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs font-mono">
                   <div>
                     <span className="text-[10px] uppercase text-slate-400 block font-sans">Streaming Mode</span>
-                    <span className={log.metadata_json?.stream ? "text-amber-400 font-bold" : "text-slate-400"}>
-                      {log.metadata_json?.stream ? "⚡ stream: true" : "stream: false"}
+                    <span className="text-slate-300">
+                      stream: {telemetryValue(telemetry.requested.stream ?? log.metadata_json?.stream)}
                     </span>
                   </div>
                   <div>

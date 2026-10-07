@@ -2,7 +2,7 @@ import pytest
 import httpx
 import json
 import uuid
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
@@ -186,3 +186,91 @@ async def test_routing_credential_group_filtering():
             assert prod_called is True
             assert dev_called is False
             assert "Hello from Production Key" in resp.json()["choices"][0]["message"]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("outcome", ["recover", "exhaust", "policy_stop", "invalid_request"])
+async def test_randomized_profile_payment_fallback(monkeypatch, stream, outcome):
+    from app.core.circuit_breaker import circuit_breaker
+    from app.core.errors import RouterException, ErrorCategory
+    from app.routing.engine import RoutingEngine
+    from app.schemas.chat import ChatCompletionRequest, ChatMessage
+    from app.core.crypto import encrypt_secret
+    import time
+
+    run_id = uuid.uuid4().hex[:8]
+    async with AsyncSessionLocal() as db:
+        provider = await get_or_create_provider(db, f"payment-{run_id}")
+        profile = RoutingProfile(
+            name="Payment fallback", slug=f"payment-{run_id}", enabled=True,
+            strategy="round_robin", randomize_candidates=True, randomize_keys=True,
+            retry_count=0, fallback_conditions=["RATE_LIMIT"] if outcome == "policy_stop" else ["UPSTREAM_5XX"],
+        )
+        db.add(profile)
+        await db.flush()
+        credentials = []
+        for index in range(6):
+            cred = ProviderCredential(provider_id=provider.id, name=f"synthetic-{index}",
+                encrypted_api_key=encrypt_secret(f"synthetic-payment-{index}"),
+                key_fingerprint=f"payment-{run_id}-{index}", masked_key="synthetic", enabled=True)
+            model = DiscoveredModel(provider_id=provider.id, provider_model_id=f"payment-{index}",
+                display_name=f"Payment {index}", canonical_slug=f"{provider.slug}/payment-{index}", enabled=True, available=True)
+            db.add_all([cred, model])
+            await db.flush()
+            credentials.append(cred.id)
+            circuit_breaker.reset(cred.id)
+            db.add(RoutingCandidate(profile_id=profile.id, provider_id=provider.id,
+                credential_id=cred.id, model_id=model.id, priority_order=index, is_active=True))
+        await db.commit()
+
+        calls, shuffled = [], []
+        def shuffle(candidates):
+            shuffled.append([c.priority_order for c in candidates])
+            candidates.reverse()
+        monkeypatch.setattr("app.routing.engine.random.shuffle", shuffle)
+
+        def upstream(request):
+            model_id = json.loads(request.content)["model"]
+            calls.append(model_id)
+            if outcome != "recover" or model_id != "payment-0":
+                return httpx.Response(400 if outcome == "invalid_request" else 402,
+                    json={"detail": "Invalid prompt formatting" if outcome == "invalid_request"
+                          else "Insufficient balance. Top up your account to continue."})
+            if stream:
+                return httpx.Response(200, headers={"Content-Type": "text/event-stream"},
+                    text='data: {"choices":[{"index":0,"delta":{"content":"Recovered"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+            return httpx.Response(200, json={"id": "payment-ok", "object": "chat.completion",
+                "created": 1, "model": model_id,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "Recovered"}, "finish_reason": "stop"}]})
+
+        req = ChatCompletionRequest(model=f"route/{profile.slug}",
+            messages=[ChatMessage(role="user", content="Synthetic fallback check")], stream=stream)
+        async def invoke():
+            if stream:
+                return "".join([chunk async for chunk in RoutingEngine._handle_priority_stream(
+                    db, req, req.model, None, "req_payment_test", time.perf_counter(), record_log=False)])
+            result = await RoutingEngine._handle_priority_route(
+                db, req, req.model, None, "req_payment_test", time.perf_counter(), record_log=False)
+            content = result.choices[0].message.content
+            assert isinstance(content, str)
+            return content
+
+        try:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+                monkeypatch.setattr("app.core.http_client.http_client_manager.get_client",
+                    AsyncMock(return_value=client))
+                if outcome == "recover":
+                    assert "Recovered" in await invoke()
+                else:
+                    with pytest.raises(RouterException) as caught:
+                        await invoke()
+                    assert caught.value.category == (ErrorCategory.INVALID_REQUEST if outcome == "invalid_request" else ErrorCategory.UPSTREAM_5XX)
+                    if outcome != "invalid_request":
+                        assert caught.value.upstream_status == 402
+            assert shuffled == [list(range(6))]
+            assert calls == ([f"payment-{i}" for i in reversed(range(6))]
+                             if outcome in ("recover", "exhaust") else ["payment-5"])
+        finally:
+            for cred_id in credentials:
+                circuit_breaker.reset(cred_id)

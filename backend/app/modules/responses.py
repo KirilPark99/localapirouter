@@ -53,7 +53,11 @@ def tool_options(request: ChatCompletionRequest) -> dict[str, Any]:
         fields.append("n")
     if request.reasoning and set(request.reasoning) - {"effort"}:
         fields.append("reasoning")
-    if request.thinking and request.thinking != {"type": "disabled"}:
+    # Routing defaults include a thinking budget for other providers; CLI uses effort only.
+    if request.thinking and request.thinking != {"type": "disabled"} and (
+        "thinking" in getattr(request, "_routing_client_fields", {"thinking"})
+        or request.reasoning_effort is None
+    ):
         fields.append("thinking")
     if fields:
         raise RouterException("Unsupported CLI options: " + ", ".join(fields),

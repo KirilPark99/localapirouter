@@ -36,8 +36,89 @@ from app.schemas.entities import (
     TimeBucketStatsItem,
 )
 from app.core.config import settings
+from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
+
+
+request_telemetry = ContextVar("request_telemetry", default=None)
+
+
+@contextmanager
+def request_log_context(details=None):
+    details = details if details is not None else {"version": 1, "dispatches": []}
+    token = request_telemetry.set(details)
+    try:
+        yield details
+    finally:
+        request_telemetry.reset(token)
 
 class LogService:
+    @staticmethod
+    def request_parameters(request):
+        # No prompt, tool schemas/arguments, headers, arbitrary metadata or secrets.
+        fields = ("temperature", "top_p", "seed", "parallel_tool_calls")
+        try:
+            effort = request.get_effective_reasoning_effort()
+        except (TypeError, ValueError, OverflowError):
+            effort = None
+        known_efforts = {"none", "off", "disabled", "auto", "minimal", "low", "medium", "high", "xhigh", "max", "maximum", "thorough"}
+        if not isinstance(effort, str) or not (effort.lower() in known_efforts or
+                effort.isascii() and effort.isdigit() and len(effort) <= 10 and int(effort) <= 2147483647):
+            effort = None
+        try:
+            budget = request.get_effective_thinking_budget()
+        except (TypeError, ValueError, OverflowError):
+            budget = None
+        if not isinstance(budget, int) or isinstance(budget, bool) or not 0 <= budget <= 2147483647:
+            budget = None
+        return {**{field: getattr(request, field, None) for field in fields},
+                "stream": bool(request.stream),
+                "reasoning_effort": effort,
+                "thinking_budget_tokens": budget,
+                "max_tokens": request.get_effective_max_tokens(),
+                "tools_count": len(request.tools or []), "messages_count": len(request.messages)}
+
+    @classmethod
+    def start_dispatch(cls, provider, model, request, *, stream):
+        details = request_telemetry.get()
+        if details is None:
+            return None
+        parameters = cls.request_parameters(request)
+        client_fields = getattr(request, "_routing_client_fields", None)
+        requested = details.get("requested_parameters", {})
+        client_reasoning = bool(client_fields.intersection(("reasoning_effort", "reasoning", "thinking"))) if client_fields is not None else any(
+            requested.get(field) is not None and requested[field] == parameters[field]
+            for field in ("reasoning_effort", "thinking_budget_tokens"))
+        parameters["reasoning_source"] = ("client" if client_reasoning else
+            "defaults" if parameters["reasoning_effort"] is not None or parameters["thinking_budget_tokens"] is not None else "unspecified")
+        # Responses CLI sends effort, not the generated companion budget.
+        if (getattr(provider, "configuration", None) or {}).get("module_id") in ("codex_cli", "grok_builder_cli"):
+            parameters["thinking_budget_tokens"] = None
+        dispatch = {"provider": provider.name, "model": model.provider_model_id,
+                    "stream": stream, "parameters": parameters, "status": "RUNNING", "usage": None}
+        details["dispatches"].append(dispatch)
+        return dispatch
+
+    @staticmethod
+    def dispatch_usage(dispatch, usage):
+        if dispatch is None or not isinstance(usage, dict):
+            return
+        def count(value):
+            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+        incoming, outgoing = count(usage.get("prompt_tokens")), count(usage.get("completion_tokens"))
+        input_details, output_details = usage.get("prompt_tokens_details"), usage.get("completion_tokens_details")
+        cached = count(input_details.get("cached_tokens")) if isinstance(input_details, dict) else None
+        reasoning = count(output_details.get("reasoning_tokens")) if isinstance(output_details, dict) else None
+        dispatch["usage"] = {"input_tokens": incoming, "output_tokens": outgoing,
+                             "cached_tokens": cached, "reasoning_tokens": reasoning,
+                             "new_tokens": incoming - cached if incoming is not None and cached is not None and cached <= incoming else None}
+
+    @staticmethod
+    def finish_dispatch(dispatch, status, latency_ms):
+        if dispatch is not None:
+            dispatch.update(status=status, latency_ms=round(latency_ms, 2))
+
     @classmethod
     async def record_request_log(
         cls,
@@ -65,6 +146,33 @@ class LogService:
         input_price_per_1m: float = 0.0,
         output_price_per_1m: float = 0.0,
     ) -> RequestLog:
+        details = request_telemetry.get()
+        if details is not None:
+            telemetry = deepcopy(details)
+            calls = telemetry["dispatches"]
+            usages = [call["usage"] for call in calls if call["usage"] is not None]
+            measured = bool(calls) and len(usages) == len(calls) and all(
+                u["input_tokens"] is not None and u["output_tokens"] is not None for u in usages)
+            # Include reported usage even on failed/cancelled calls; unknown attempts make totals partial.
+            reported_input = [u["input_tokens"] for u in usages if u["input_tokens"] is not None]
+            reported_output = [u["output_tokens"] for u in usages if u["output_tokens"] is not None]
+            if reported_input:
+                input_tokens = sum(reported_input)
+            if reported_output:
+                output_tokens = sum(reported_output)
+            cache_known = measured and all(u["new_tokens"] is not None for u in usages)
+            reasoning_known = measured and all(u["reasoning_tokens"] is not None for u in usages)
+            cached_tokens = sum(u["cached_tokens"] or 0 for u in usages)
+            reasoning_tokens = sum(u["reasoning_tokens"] or 0 for u in usages)
+            local_hit = telemetry.get("response_cache") == "HIT"
+            telemetry["usage"] = {"input_tokens": input_tokens if reported_input or local_hit or input_tokens > 0 else None,
+                "output_tokens": output_tokens if reported_output or local_hit or output_tokens > 0 else None,
+                "cached_tokens": cached_tokens if cache_known else None,
+                "new_tokens": input_tokens - cached_tokens if cache_known else None,
+                "reasoning_tokens": reasoning_tokens if reasoning_known else None,
+                "source": "local_response_cache" if local_hit else "upstream" if measured else "upstream_partial" if usages else "estimate_or_partial"}
+            metadata_json = {**(metadata_json or {}), "stream": telemetry.get("requested_parameters", {}).get("stream", False),
+                             "telemetry": telemetry}
         # Calculate cost estimate
         est_cost = ((input_tokens / 1_000_000.0) * input_price_per_1m) + ((output_tokens / 1_000_000.0) * output_price_per_1m)
 

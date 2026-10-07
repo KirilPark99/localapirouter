@@ -146,6 +146,11 @@ def normalize_upstream_error(
             category = ErrorCategory.AUTH_ERROR
             if not err_msg:
                 err_msg = "Upstream authentication failed (invalid API key or unauthorized)"
+        elif status_code == 402:
+            # Provider billing failure; another candidate can still serve the request.
+            category = ErrorCategory.UPSTREAM_5XX
+            if not err_msg:
+                err_msg = "Upstream payment required (402)"
         elif status_code == 403:
             lower_msg = err_msg.lower()
             if any(kw in lower_msg for kw in (

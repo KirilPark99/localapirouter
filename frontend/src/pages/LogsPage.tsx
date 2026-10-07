@@ -32,6 +32,7 @@ import { RequestLog, LogsSummaryResponse, Provider, RouterApiKey } from "../type
 import { StatusBadge } from "../components/StatusBadge";
 import { LogDetailDrawer } from "../components/LogDetailDrawer";
 import { useI18n } from "../i18n";
+import { getRequestLogTelemetry, telemetryValue } from "../utils/requestLogTelemetry";
 
 export const LogsPage: React.FC<{ onReplay: () => void }> = ({ onReplay }) => {
   const { t } = useI18n();
@@ -871,6 +872,10 @@ export const LogsPage: React.FC<{ onReplay: () => void }> = ({ onReplay }) => {
                     />
                   </div>
                 </th>
+                <th className="py-2.5 px-3 text-right" title="Noncached upstream input; unknown when cache usage was not reported">NEW</th>
+                <th className="py-2.5 px-3 text-right" title="Upstream cached input tokens, not the local response cache">CACHE</th>
+                <th className="py-2.5 px-3 text-right" title="Saved input tokens from compression (local estimate)">Compressed</th>
+                <th className="py-2.5 px-3" title="Effective reasoning effort per dispatch; see inspector for individual calls">Effort</th>
                 <th
                   onClick={() => handleSort("estimated_cost_usd")}
                   className="py-2.5 px-3 text-right cursor-pointer select-none group/th hover:text-slate-200 transition-colors w-20"
@@ -893,17 +898,17 @@ export const LogsPage: React.FC<{ onReplay: () => void }> = ({ onReplay }) => {
             <tbody className="divide-y divide-slate-800/60 text-slate-300">
               {logs.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="text-center py-12 text-slate-400">
+                  <td colSpan={12} className="text-center py-12 text-slate-400">
                     {loading ? "Loading request logs..." : t.logs.noLogsFound}
                   </td>
                 </tr>
               ) : (
                 logs.map((l) => {
-                  const totalTokens = (l.input_tokens || 0) + (l.output_tokens || 0);
+                  const telemetry = getRequestLogTelemetry(l);
                   const isSuccess = l.status_code >= 200 && l.status_code < 300;
                   const is429 = l.status_code === 429;
                   const is5xx = l.status_code >= 500;
-                  const isStream = !!l.metadata_json?.stream;
+                  const isStream = telemetry.requested.stream === true || !!l.metadata_json?.stream;
                   const attemptsCount = l.attempts?.length || 1;
 
                   return (
@@ -1014,6 +1019,9 @@ export const LogsPage: React.FC<{ onReplay: () => void }> = ({ onReplay }) => {
                             {l.status_code}
                           </span>
                           <StatusBadge status={l.status} size="sm" />
+                          {telemetry.localCacheHit && (
+                            <span className="text-[9px] font-mono text-emerald-400" title="Local response-cache HIT: no billed upstream call">Response HIT</span>
+                          )}
                           {attemptsCount > 1 && (
                             <span
                               className="px-1 py-0.2 rounded text-[9px] font-mono bg-purple-950 text-purple-300 border border-purple-800"
@@ -1033,18 +1041,19 @@ export const LogsPage: React.FC<{ onReplay: () => void }> = ({ onReplay }) => {
                       {/* Tokens */}
                       <td
                         className="py-2 px-3 text-right font-mono text-amber-300 text-[11px] whitespace-nowrap"
-                        title={`Prompt: ${l.input_tokens.toLocaleString()} | Output: ${l.output_tokens.toLocaleString()} | Cache: ${l.cached_tokens.toLocaleString()}`}
+                        title="Input / output tokens; Judge/Fusion totals include routing and participant calls"
                       >
-                        {totalTokens > 0 ? (
-                          <div>
-                            <span>{totalTokens.toLocaleString()}</span>
-                            {l.cached_tokens > 0 && (
-                              <span className="text-[9px] text-emerald-400 ml-1">⚡cache</span>
-                            )}
-                          </div>
-                        ) : (
-                          "—"
-                        )}
+                        <div>IN {telemetryValue(telemetry.usage.input_tokens)}</div>
+                        <div className="text-slate-400">OUT {telemetryValue(telemetry.usage.output_tokens)}</div>
+                        {telemetry.usage.source === "upstream_partial" ? <div className="text-amber-400 text-[9px]">partial</div> : null}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono text-[11px] text-amber-300">{telemetryValue(telemetry.usage.new_tokens)}</td>
+                      <td className="py-2 px-3 text-right font-mono text-[11px] text-emerald-400">{telemetryValue(telemetry.usage.cached_tokens)}</td>
+                      <td className="py-2 px-3 text-right font-mono text-[11px] text-sky-300 whitespace-nowrap" title="Compression saved tokens: local estimate, not upstream token-cache usage">
+                        {telemetryValue(telemetry.compression?.tokens_saved)}{telemetry.compression?.tokens_saved != null ? " est." : ""}
+                      </td>
+                      <td className="py-2 px-3 font-mono text-[11px] text-purple-300" title="Reasoning efforts in routing requests before provider-specific adapter translation">
+                        {telemetry.effectiveEffort}
                       </td>
 
                       {/* Cost */}

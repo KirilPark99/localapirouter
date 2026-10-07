@@ -85,18 +85,25 @@ class RoutingEngine:
             if not cls._eligible(provider, model_obj, cred):
                 raise RouterException('Credential/provider/model unavailable', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
             reservation, kwargs['request'] = cls._reserve_credential(cred, kwargs['request'], model_obj)
+            dispatch = LogService.start_dispatch(provider, model_obj, kwargs['request'], stream=False)
+            dispatch_started = time.perf_counter()
             try:
                 response = await adapter.chat_completions(**kwargs)
+                LogService.dispatch_usage(dispatch, response.usage.model_dump(exclude_unset=True) if response.usage else None)
+                LogService.finish_dispatch(dispatch, 'SUCCESS', (time.perf_counter() - dispatch_started) * 1000)
                 reservation.finish(response.usage.total_tokens if response.usage else None)
                 circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
                 return response
             except Exception as e:
+                LogService.finish_dispatch(dispatch, 'FAILED', (time.perf_counter() - dispatch_started) * 1000)
                 error = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
                 if attempt >= retry_count or not error.category.is_retryable or error.category == ErrorCategory.RATE_LIMIT:
                     circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
                     raise error
             finally:
                 reservation.finish()
+                if dispatch is not None and dispatch['status'] == 'RUNNING':
+                    LogService.finish_dispatch(dispatch, 'CANCELLED', (time.perf_counter() - dispatch_started) * 1000)
 
     @classmethod
     async def _dispatch_stream(cls, adapter, cred, provider, model_obj, *, retry_count=0, **kwargs):
@@ -107,6 +114,8 @@ class RoutingEngine:
                 raise RouterException('Credential/provider/model unavailable', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
             reservation, kwargs['request'] = cls._reserve_credential(cred, kwargs['request'], model_obj)
             started = terminal = False
+            dispatch = LogService.start_dispatch(provider, model_obj, kwargs['request'], stream=True)
+            dispatch_started = time.perf_counter()
             actual_tokens = None
             try:
                 async with aclosing(adapter.stream_chat(**kwargs)) as source:
@@ -117,6 +126,7 @@ class RoutingEngine:
                             payload = line[5:].strip()
                             if payload == '[DONE]':
                                 terminal = True
+                                LogService.finish_dispatch(dispatch, 'SUCCESS', (time.perf_counter() - dispatch_started) * 1000)
                                 continue
                             try:
                                 data = json.loads(payload)
@@ -129,6 +139,7 @@ class RoutingEngine:
                                 raise normalize_upstream_error(status_code=code if isinstance(code, int) else 502, response_body=data)
                             if data.get('usage'):
                                 usage = data['usage']
+                                LogService.dispatch_usage(dispatch, usage)
                                 actual_tokens = usage.get('total_tokens', usage.get('prompt_tokens', 0) + usage.get('completion_tokens', 0))
                             terminal = terminal or any(c.get('finish_reason') for c in data.get('choices', []))
                         started = True
@@ -136,14 +147,18 @@ class RoutingEngine:
                 if not terminal:
                     raise RouterException('Upstream stream ended without a terminal event', ErrorCategory.UPSTREAM_5XX)
                 circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
+                LogService.finish_dispatch(dispatch, 'SUCCESS', (time.perf_counter() - dispatch_started) * 1000)
                 return
             except Exception as e:
+                LogService.finish_dispatch(dispatch, 'FAILED', (time.perf_counter() - dispatch_started) * 1000)
                 error = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
                 if started or attempt >= retry_count or not error.category.is_retryable or error.category == ErrorCategory.RATE_LIMIT:
                     circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
                     raise error
             finally:
                 reservation.finish(actual_tokens)
+                if dispatch is not None and dispatch['status'] == 'RUNNING':
+                    LogService.finish_dispatch(dispatch, 'CANCELLED', (time.perf_counter() - dispatch_started) * 1000)
 
     @classmethod
     def _order_candidates(cls, profile, candidates, request):

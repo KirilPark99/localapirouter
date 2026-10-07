@@ -459,6 +459,13 @@ export const PlaygroundPage: React.FC = () => {
     return allTargets.find((t) => t.id === targetId);
   };
 
+  const supportsSampling = (targetId: string) => {
+    const model = models.find((m) => m.canonical_slug === targetId || m.provider_model_id === targetId);
+    const provider = providers.find((p) => p.id === model?.provider_id);
+    return !targetId.startsWith("codex_cli/") && provider?.configuration?.module_id !== "codex_cli";
+  };
+  const samplingDisabled = !supportsSampling(targetA) && (mode !== "compare" || !supportsSampling(targetB));
+
   // Check if a model/route supports thinking / reasoning
   const isReasoningName = (name: string): boolean => {
     if (!name) return false;
@@ -594,9 +601,8 @@ export const PlaygroundPage: React.FC = () => {
     const payload: Record<string, any> = {
       model: targetId,
       messages,
-      temperature,
+      ...(supportsSampling(targetId) ? { temperature, top_p: topP } : {}),
       max_tokens: maxTokens,
-      top_p: topP,
       stream: isStream,
     };
 
@@ -1127,8 +1133,7 @@ client = OpenAI(
 
 response = client.chat.completions.create(
     model="${target}",
-    messages=${JSON.stringify(msgs, null, 4)},
-    temperature=${temperature},
+    messages=${JSON.stringify(msgs, null, 4)},${supportsSampling(target) ? `\n    temperature=${temperature},` : ""}
     max_tokens=${maxTokens},
     stream=${isStream ? "True" : "False"}${
       extraKwargs.reasoning_effort ? `,\n    extra_body={"reasoning_effort": "${extraKwargs.reasoning_effort}"}` : ""
@@ -1147,7 +1152,7 @@ ${
       const curlBody: any = {
         model: target,
         messages: msgs,
-        temperature,
+        ...(supportsSampling(target) ? { temperature } : {}),
         max_tokens: maxTokens,
         stream: isStream,
         ...extraKwargs,
@@ -1168,8 +1173,7 @@ const client = new OpenAI({
 async function main() {
   const response = await client.chat.completions.create({
     model: "${target}",
-    messages: ${JSON.stringify(msgs, null, 2)},
-    temperature: ${temperature},
+    messages: ${JSON.stringify(msgs, null, 2)},${supportsSampling(target) ? `\n    temperature: ${temperature},` : ""}
     max_tokens: ${maxTokens},
     stream: ${isStream},${
       extraKwargs.reasoning_effort ? `\n    extra_body: { reasoning_effort: "${extraKwargs.reasoning_effort}" },` : ""
@@ -1741,6 +1745,7 @@ main();`;
                     max={2}
                     step={0.05}
                     value={temperature}
+                    disabled={samplingDisabled}
                     onChange={(e) => setTemperature(parseFloat(e.target.value))}
                     className="w-full accent-indigo-500"
                   />
@@ -1770,6 +1775,7 @@ main();`;
                       max={1}
                       step={0.05}
                       value={topP}
+                      disabled={samplingDisabled}
                       onChange={(e) => setTopP(parseFloat(e.target.value))}
                       className="w-full accent-indigo-500 pt-1"
                     />
@@ -1777,6 +1783,9 @@ main();`;
                 </div>
 
                 {/* Stream Toggle */}
+                {(!supportsSampling(targetA) || (mode === "compare" && !supportsSampling(targetB))) && (
+                  <p className="text-[10px] text-slate-400">Codex CLI: temperature / top_p are not sent.</p>
+                )}
                 <div className="pt-1 border-t border-slate-800 flex items-center justify-between">
                   <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
                     <input

@@ -199,6 +199,31 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
             "model": model_id,
             "messages": [m.model_dump(exclude_none=True) for m in request.messages],
         }
+        # Use the resolved upstream ID, not a virtual judge/route request name.
+        gemini = model_id.lower().removeprefix("models/").removeprefix("google/").startswith("gemini-")
+        for message in payload["messages"]:
+            if message["role"] != "assistant":
+                continue
+            for index, call in enumerate(message.get("tool_calls", [])):
+                extra = call.get("extra_content", {})
+                if not gemini:
+                    extra.pop("google", None)
+                    extra.pop("thought_signature", None)
+                    if not extra:
+                        call.pop("extra_content", None)
+                elif index == 0:
+                    google = extra.get("google")
+                    if google is None:
+                        google = {}
+                    if not isinstance(google, dict):
+                        raise self.normalize_error(status_code=400, response_body="Tool-call extra_content.google must be an object")
+                    signature = google.get("thought_signature", extra.get("thought_signature"))
+                    if signature is not None and not isinstance(signature, str):
+                        raise self.normalize_error(status_code=400, response_body="Tool-call thought_signature must be a string")
+                    # ponytail: imported unsigned history; lost Gemini reasoning cannot be reconstructed.
+                    # Google documents this marker; parallel sibling calls remain untouched.
+                    call["extra_content"] = {**extra, "google": {**google,
+                        "thought_signature": signature or "skip_thought_signature_validator"}}
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         if request.top_p is not None:

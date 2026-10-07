@@ -527,6 +527,15 @@ def test_normalize_upstream_provider_restrictions():
     assert err_403_credit.category == ErrorCategory.UPSTREAM_5XX
     assert err_403_credit.category.is_fallback_eligible is True
 
+    # Payment Required is a provider/account failure, not a malformed prompt.
+    err_payment = normalize_upstream_error(
+        status_code=402,
+        response_body='{"detail":"Insufficient balance. Top up your account to continue."}',
+    )
+    assert err_payment.category == ErrorCategory.UPSTREAM_5XX
+    assert err_payment.category.is_fallback_eligible is True
+    assert err_payment.upstream_status == 402
+
     # True client syntax error remains INVALID_REQUEST
     err_client = normalize_upstream_error(
         status_code=400,

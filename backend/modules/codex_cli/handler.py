@@ -13,6 +13,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 import httpx
 from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_chat_completion
 from app.modules.responses import messages_to_input, tool_options, responses_to_chat
+from app.routing.cache_affinity import PrefixAnalyzer
 from app.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -265,6 +266,19 @@ class CodexCliAdapter(BaseModuleAdapter):
             for model in catalog
         ]
 
+    def _cache_session_id(
+        self, request: ChatCompletionRequest, ctx: ModuleExecutionContext, model: str, account_id: str,
+    ) -> str:
+        key: Any = request.prompt_cache_key
+        if key is None:
+            first_user = next((i for i, msg in enumerate(request.messages) if msg.role == "user"), len(request.messages) - 1)
+            # ponytail: identical starts share a cache bucket, never conversation/turn state.
+            key = [[(msg.role, PrefixAnalyzer.normalize_content(msg.content))
+                    for msg in request.messages[:first_user + 1]], request.tools]
+        scope = [ctx.extra_config.get("credential_id"), account_id, model, key]
+        return hashlib.sha256(json.dumps(scope, ensure_ascii=False, sort_keys=True,
+                                        separators=(",", ":")).encode("utf-8")).hexdigest()
+
     def _convert_messages_to_responses_input(self, messages: List[ChatMessage]) -> List[Dict[str, Any]]:
         return messages_to_input(messages)
 
@@ -282,13 +296,16 @@ class CodexCliAdapter(BaseModuleAdapter):
         request: ChatCompletionRequest,
         ctx: ModuleExecutionContext,
     ) -> AsyncGenerator[str, None]:
-        options = tool_options(request)
+        # Codex CLI does not use sampling options; keep the caller's request intact.
+        options = tool_options(request.model_copy(update={"temperature": None, "top_p": None}))
         access_token, account_id = await self._get_valid_access_token(ctx)
         model = request.model or ctx.model_id or "gpt-6.1-sol"
         if model.startswith("codex_cli/"):
             model = model[10:]
 
         headers = self._build_headers(access_token, account_id)
+        session_id = self._cache_session_id(request, ctx, model, account_id)
+        headers["session-id"] = session_id
         input_items = self._convert_messages_to_responses_input(request.messages)
 
         body = {
@@ -299,6 +316,7 @@ class CodexCliAdapter(BaseModuleAdapter):
         }
 
         body.update(options)
+        body.setdefault("prompt_cache_key", session_id)
 
         async with self.create_http_client(ctx) as client:
             async with client.stream(

@@ -257,6 +257,29 @@ class AnthropicAdapter(BaseProviderAdapter):
 
         return payload
 
+    def _convert_usage(self, usage: Dict[str, Any]) -> Optional[UsageInfo]:
+        if not usage:
+            return None
+        # Anthropic input_tokens excludes both cache reads and cache writes.
+        counters = {}
+        if usage.get("input_tokens") is not None:
+            counters["prompt_tokens"] = sum(usage.get(key) or 0 for key in
+                ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        if usage.get("output_tokens") is not None:
+            counters["completion_tokens"] = usage["output_tokens"]
+        if len(counters) == 2:
+            counters["total_tokens"] = counters["prompt_tokens"] + counters["completion_tokens"]
+        details = {target: usage[source] for source, target in (
+            ("cache_read_input_tokens", "cached_tokens"),
+            ("cache_creation_input_tokens", "cache_creation_input_tokens"),
+        ) if source in usage}
+        output_details = usage.get("output_tokens_details") or {}
+        if details:
+            counters["prompt_tokens_details"] = details
+        if "thinking_tokens" in output_details:
+            counters["completion_tokens_details"] = {"reasoning_tokens": output_details["thinking_tokens"]}
+        return UsageInfo(**counters)
+
     async def chat_completions(
         self,
         base_url: str,
@@ -306,10 +329,6 @@ class AnthropicAdapter(BaseProviderAdapter):
                     )
                 )
 
-        usage_raw = data.get("usage", {})
-        prompt_tokens = usage_raw.get("input_tokens", 0)
-        completion_tokens = usage_raw.get("output_tokens", 0)
-
         finish_reason = "stop"
         if data.get("stop_reason") == "tool_use":
             finish_reason = "tool_calls"
@@ -330,11 +349,7 @@ class AnthropicAdapter(BaseProviderAdapter):
                     finish_reason=finish_reason,
                 )
             ],
-            usage=UsageInfo(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            ),
+            usage=self._convert_usage(data.get("usage") or {}),
         )
 
     async def stream_chat(self, base_url: str, api_key: str, model_id: str, request: ChatCompletionRequest,
@@ -407,12 +422,9 @@ class AnthropicAdapter(BaseProviderAdapter):
                     elif kind == "message_stop":
                         if not finish:
                             raise self.normalize_error(exception=httpx.RemoteProtocolError("Anthropic message stopped without finish reason"))
-                        prompt = usage.get("input_tokens", 0) + usage.get("cache_creation_input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
-                        completion = usage.get("output_tokens", 0)
-                        info = {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
-                        if usage.get("cache_read_input_tokens"):
-                            info["prompt_tokens_details"] = {"cached_tokens": usage["cache_read_input_tokens"]}
-                        yield chunk({}, final_usage=info)
+                        info = self._convert_usage(usage)
+                        if info is not None:
+                            yield chunk({}, final_usage=info.model_dump(exclude_unset=True, exclude_none=True))
                         yield "data: [DONE]\n\n"
                         return
                 raise self.normalize_error(exception=httpx.RemoteProtocolError("Anthropic stream ended before message_stop"))

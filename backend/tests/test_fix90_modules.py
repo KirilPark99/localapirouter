@@ -260,6 +260,10 @@ async def test_point(point, monkeypatch):
             assert records[0]['max_output_tokens'] == 7 and records[0]['reasoning']['effort'] == 'none' and records[0]['prompt_cache_key'] == 'fixture-cache'
             for field, value in [('temperature', .2), ('top_p', .8), ('stop', ['END']), ('seed', 1), ('response_format', {'type': 'json_object'}), ('n', 2), ('presence_penalty', .3), ('logit_bias', {'1': 1})]:
                 count = len(records)
+                if mid == 'codex_cli' and field in ('temperature', 'top_p'):
+                    await consume(a, req(**{field: value}))
+                    assert len(records) == count + 1 and field not in records[-1]
+                    continue
                 with pytest.raises(RouterException) as caught: await consume(a, req(**{field: value}))
                 assert caught.value.status_code == 422 and len(records) == count
     elif point == 62:

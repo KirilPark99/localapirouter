@@ -193,8 +193,8 @@ class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
-    prompt_tokens_details: Optional[Dict[str, int]] = None
-    completion_tokens_details: Optional[Dict[str, int]] = None
+    prompt_tokens_details: Optional[Dict[str, Optional[int]]] = None
+    completion_tokens_details: Optional[Dict[str, Optional[int]]] = None
 
 class ChatCompletionChoice(BaseModel):
     index: int = 0
