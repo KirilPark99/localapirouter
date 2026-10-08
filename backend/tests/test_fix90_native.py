@@ -10,10 +10,11 @@ from app.schemas.chat import ChatCompletionChoice, ChatCompletionResponse, ChatM
 from app.modules.base import ChatStreamAccumulator
 
 
-def completion(finish='stop', tools=False):
+def completion(finish='stop', tools=False, responses=False):
     return ChatCompletionResponse(model='demo', choices=[ChatCompletionChoice(
         message=ChatMessage(role='assistant', content='hé', reasoning_details=[
-            {'type': 'thinking', 'thinking': 'consider', 'signature': 'opaque'}],
+            {'type': 'reasoning', 'id': 'rs_fixture', 'summary': [{'type': 'summary_text', 'text': 'consider'}]}
+            if responses else {'type': 'thinking', 'thinking': 'consider', 'signature': 'opaque'}],
             tool_calls=[{'id': 'call_a', 'function': {'name': 'clock', 'arguments': '{}'}}] if tools else None),
         finish_reason=finish)], usage=UsageInfo(prompt_tokens=5, completion_tokens=7, total_tokens=12))
 
@@ -25,10 +26,11 @@ def request(body=None, raw=None):
     return Request({'type': 'http', 'headers': []}, receive)
 
 
-async def source(finish='stop', error=False, done=True, closed=None):
+async def source(finish='stop', error=False, done=True, closed=None, responses=False):
     try:
         data = [ {'choices': [{'index': 0, 'delta': {'content': 'hé', 'reasoning_details': [
-            {'type': 'thinking', 'index': 0, 'thinking': 'consider', 'signature': 'opaque'}],
+            {'type': 'reasoning', 'index': 0, 'id': 'rs_fixture', 'summary': [{'type': 'summary_text', 'text': 'consider'}]}
+            if responses else {'type': 'thinking', 'index': 0, 'thinking': 'consider', 'signature': 'opaque'}],
             'tool_calls': [{'index': 0, 'id': 'call_a', 'function': {'name': 'clock', 'arguments': '{}'}}]}, 'finish_reason': None}], 'usage': None}]
         if error:
             data.append({'error': {'type': 'upstream_error', 'message': 'fixture error'}})
@@ -52,7 +54,7 @@ async def events(generator):
 
 @pytest.mark.parametrize('finish,status,reason', [('stop','completed',None), ('length','incomplete','max_output_tokens')])
 def test_p06_responses_json(finish, status, reason):
-    result = api._responses_payload(completion(finish), 'resp_fixture')
+    result = api._responses_payload(completion(finish, responses=True), 'resp_fixture')
     assert result['status'] == status
     assert result['incomplete_details'] == ({'reason': reason} if reason else None)
 
@@ -61,7 +63,7 @@ def test_p06_responses_json(finish, status, reason):
 @pytest.mark.parametrize('finish', ['stop','length','tool_calls'])
 async def test_p06_p07_responses_fragmented_stream(finish):
     closed=[]
-    result=await events(api._responses_event_stream(source(finish, closed=closed), 'demo','resp_fixture'))
+    result=await events(api._responses_event_stream(source(finish, closed=closed, responses=True), 'demo','resp_fixture'))
     assert result[-1]['type'] == ('response.incomplete' if finish=='length' else 'response.completed')
     assert result[-1]['response']['usage']['output_tokens']==7
     assert result[-1]['response']['output_text']=='hé'

@@ -35,6 +35,14 @@ async def update_key(
         raise HTTPException(status_code=404, detail="Key not found")
     return updated
 
+@router.get("/{key_id}/usage")
+async def key_quota_usage(key_id: int, username: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
+    from app.services.quota_service import QuotaService
+    key = await ApiKeyService.get_key(db, key_id)
+    if key is None:
+        raise HTTPException(status_code=404, detail="Key not found")
+    return await QuotaService.usage(db, key)
+
 @router.put("/{key_id}/notes")
 async def update_key_notes(
     key_id: int,

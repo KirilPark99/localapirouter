@@ -29,7 +29,7 @@ import {
 import { RequestLog } from "../types";
 import { StatusBadge } from "./StatusBadge";
 import { LogWaterfallTrace } from "./LogWaterfallTrace";
-import { getRequestLogTelemetry, requestParameterNames, telemetryValue } from "../utils/requestLogTelemetry";
+import { formatLogCost, getRequestLogTelemetry, requestParameterNames, telemetryValue } from "../utils/requestLogTelemetry";
 
 const usageLabels = [
   ["input_tokens", "Prompt (Input)"], ["output_tokens", "Completion (Output)"],
@@ -254,7 +254,7 @@ export const LogDetailDrawer: React.FC<LogDetailDrawerProps> = ({
                 <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-1">
                   <div className="text-[10px] uppercase text-slate-400 font-semibold">Cost ($)</div>
                   <div className="text-base font-bold font-mono text-yellow-300">
-                    ${log.estimated_cost_usd.toFixed(6)}
+                    {formatLogCost(log)}
                   </div>
                 </div>
                 <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-1">

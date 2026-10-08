@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Plus, Copy, Check, Trash2, Key, ShieldCheck, AlertCircle, StickyNote } from "lucide-react";
 import { apiRequest } from "../api/client";
-import { RouterApiKey, RouterApiKeyCreate, RouterApiKeyCreated } from "../types";
+import { RouterApiKey, RouterApiKeyCreated, PeriodQuotaRule, PeriodQuotaUsage } from "../types";
 import { Modal } from "../components/Modal";
 import { NotesModal } from "../components/NotesModal";
 import { useI18n } from "../i18n/context";
@@ -12,6 +12,12 @@ export const ApiKeysPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
 
+  const [editingKey, setEditingKey] = useState<RouterApiKey | null>(null);
+  const [formQuotas, setFormQuotas] = useState<PeriodQuotaRule[]>([]);
+  const [quotaUsage, setQuotaUsage] = useState<PeriodQuotaUsage[]>([]);
+  const [usageError, setUsageError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [formJudge, setFormJudge] = useState(true);
   const [formName, setFormName] = useState("");
   const [formDirect, setFormDirect] = useState(true);
   const [formRoutes, setFormRoutes] = useState(true);
@@ -43,6 +49,11 @@ export const ApiKeysPage: React.FC = () => {
   }, []);
 
   const openCreateModal = () => {
+    setEditingKey(null);
+    setFormQuotas([]);
+    setQuotaUsage([]);
+    setUsageError("");
+    setFormJudge(true);
     setFormName("");
     setFormDirect(true);
     setFormRoutes(true);
@@ -50,6 +61,34 @@ export const ApiKeysPage: React.FC = () => {
     setFormRpm("");
     setFormNotes("");
     setIsModalOpen(true);
+  };
+
+  const loadQuotaUsage = async (id: number) => {
+    setUsageError("");
+    try {
+      setQuotaUsage(await apiRequest<PeriodQuotaUsage[]>(`/api/admin/keys/${id}/usage`));
+    } catch (err: any) {
+      setUsageError(err.message);
+    }
+  };
+
+  const openEditModal = (key: RouterApiKey) => {
+    setEditingKey(key);
+    setFormName(key.name);
+    setFormDirect(key.permissions.includes("direct"));
+    setFormRoutes(key.permissions.includes("routes"));
+    setFormFusion(key.permissions.includes("fusion"));
+    setFormJudge(key.permissions.includes("judge"));
+    setFormRpm(key.rate_limit_rpm == null ? "" : String(key.rate_limit_rpm));
+    setFormNotes(key.notes || "");
+    setFormQuotas((key.quota_rules || []).map(rule => ({ ...rule })));
+    setQuotaUsage([]);
+    setIsModalOpen(true);
+    loadQuotaUsage(key.id);
+  };
+
+  const changeQuota = (index: number, patch: Partial<PeriodQuotaRule>) => {
+    setFormQuotas(previous => previous.map((rule, i) => i === index ? { ...rule, ...patch } : rule));
   };
 
   const openNotesModal = (k: RouterApiKey) => {
@@ -88,29 +127,32 @@ export const ApiKeysPage: React.FC = () => {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    const permissions: string[] = [];
+    const permissions: string[] = editingKey ? editingKey.permissions.filter(permission => !["direct", "routes", "fusion", "judge"].includes(permission)) : [];
     if (formDirect) permissions.push("direct");
     if (formRoutes) permissions.push("routes");
     if (formFusion) permissions.push("fusion");
+    if (formJudge) permissions.push("judge");
 
+    setSaving(true);
     try {
-      const res = await apiRequest<RouterApiKeyCreated>("/api/admin/keys", {
-        method: "POST",
-        body: JSON.stringify({
-          name: formName,
-          permissions,
-          allowed_models: ["*"],
-          allowed_routes: ["*"],
-          allowed_fusions: ["*"],
-          rate_limit_rpm: formRpm ? parseInt(formRpm) : null,
-          notes: formNotes.trim() || null,
-        }),
-      });
+      const body = {
+        name: formName, permissions,
+        ...(editingKey ? {} : { allowed_models: ["*"], allowed_routes: ["*"], allowed_fusions: ["*"], allowed_judges: ["*"] }),
+        rate_limit_rpm: formRpm ? Number(formRpm) : null,
+        notes: formNotes.trim() || null,
+        quota_rules: formQuotas,
+      };
+      if (editingKey) {
+        await apiRequest<RouterApiKey>(`/api/admin/keys/${editingKey.id}`, { method: "PUT", body: JSON.stringify(body) });
+      } else {
+        setCreatedKeyData(await apiRequest<RouterApiKeyCreated>("/api/admin/keys", { method: "POST", body: JSON.stringify(body) }));
+      }
       setIsModalOpen(false);
-      setCreatedKeyData(res);
       loadKeys();
     } catch (err: any) {
       alert(err.message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -253,6 +295,7 @@ export const ApiKeysPage: React.FC = () => {
                   </td>
                   <td className="py-3.5 px-4 font-mono text-[11px] text-slate-300">
                     {k.total_requests} reqs
+                    <div className="text-slate-400">{(k.quota_rules || []).filter(r => r.enabled).length} period rules</div>
                   </td>
                   <td className="py-3.5 px-4">
                     <button
@@ -267,6 +310,7 @@ export const ApiKeysPage: React.FC = () => {
                     </button>
                   </td>
                   <td className="py-3.5 px-4 text-right space-x-1 whitespace-nowrap">
+                    <button type="button" onClick={() => openEditModal(k)} className="btn-press px-2 py-1 text-indigo-300 hover:bg-white/[0.06] rounded-lg">Edit / quotas</button>
                     <button
                       type="button"
                       onClick={() => openNotesModal(k)}
@@ -298,7 +342,7 @@ export const ApiKeysPage: React.FC = () => {
       <Modal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        title={t.keys.createKey}
+        title={editingKey ? `Edit key: ${editingKey.name}` : t.keys.createKey}
       >
         <form onSubmit={handleCreate} className="space-y-4">
           <div>
@@ -343,6 +387,9 @@ export const ApiKeysPage: React.FC = () => {
                 />
                 Fusion Ensembles (e.g. fusion/powerful-coding)
               </label>
+              <label className="flex items-center gap-2 text-xs text-slate-300">
+                <input type="checkbox" checked={formJudge} onChange={e => setFormJudge(e.target.checked)} /> Judge Profiles
+              </label>
             </div>
           </div>
 
@@ -372,6 +419,59 @@ export const ApiKeysPage: React.FC = () => {
             />
           </div>
 
+          <section className="space-y-3 border-t border-white/10 pt-3" aria-label="Period quotas">
+            <h3 className="text-sm font-semibold text-slate-100">Period quotas</h3>
+            <p className="text-xs text-slate-400">Key-wide requests count admitted client calls, including local cache hits. Direct canonical-model rules also count admission (including cache hits); their first upstream dispatch is not counted twice, but extra retries consume requests. Behind route/fusion/judge profiles, model rules count every actual canonical upstream dispatch, including retries and fallback. Requested profile rules count one client request and all its upstream calls. Tokens and USD count upstream calls only.</p>
+            <p className="text-xs text-slate-400">All windows use UTC; weeks start Monday, months are calendar months. Custom periods repeat from their anchor. Outside an explicit interval access is denied, not unlimited. Unknown usage retains a conservative reservation; actual measured usage can exceed the estimate. USD rules require known prices (zero is valid).</p>
+            {formQuotas.map((rule, index) => {
+              const current = quotaUsage.find(item => item.rule_id === rule.id);
+              const locked = Boolean(rule.id);
+              return <fieldset key={rule.id || index} className="space-y-2 p-3 rounded-xl border border-white/10 bg-slate-950/50">
+                <legend className="text-xs text-slate-300">Rule {index + 1}</legend>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-xs text-slate-300"><input type="checkbox" checked={rule.enabled} onChange={e => changeQuota(index, { enabled: e.target.checked })} /> Enabled</label>
+                  <button type="button" onClick={() => setFormQuotas(previous => previous.filter((_, i) => i !== index))} className="text-xs text-rose-300">Remove</button>
+                </div>
+                <label className="block text-xs text-slate-300">Scope
+                  <select aria-label={`Quota ${index + 1} scope`} value={rule.scope} disabled={locked} onChange={e => changeQuota(index, {scope: e.target.value as PeriodQuotaRule["scope"], model: null})} className="w-full p-2 rounded bg-slate-900">
+                    <option value="key">Entire API key</option><option value="model">Actual canonical upstream model</option><option value="profile">Requested virtual profile</option>
+                  </select>
+                </label>
+                {rule.scope !== "key" && <label className="block text-xs text-slate-300">{rule.scope === "model" ? "Canonical model (provider/model)" : "Requested profile (route/, fusion/, judge/)"}
+                  <input required disabled={locked} pattern="[^\s*\/]+/[^\s*]+" value={rule.model || ""} onChange={e => changeQuota(index, {model: e.target.value})} className="w-full p-2 rounded bg-slate-900" />
+                </label>}
+                <label className="block text-xs text-slate-300">UTC window
+                  <select value={rule.period} disabled={locked} onChange={e => changeQuota(index, {period: e.target.value as PeriodQuotaRule["period"], duration_seconds: null, anchor: null, start: null, end: null})} className="w-full p-2 rounded bg-slate-900">
+                    {["minute", "hour", "day", "week", "month", "custom", "interval"].map(period => <option key={period}>{period}</option>)}
+                  </select>
+                </label>
+                {rule.period === "custom" && <>
+                  <label className="block text-xs text-slate-300">Duration in seconds<input required type="number" min="1" max="315360000" step="1" disabled={locked} value={rule.duration_seconds ?? ""} onChange={e => changeQuota(index, {duration_seconds: e.target.value ? Number(e.target.value) : null})} className="w-full p-2 rounded bg-slate-900" /></label>
+                  <label className="block text-xs text-slate-300">Stable anchor (UTC)<input required type="datetime-local" step="1" disabled={locked} value={rule.anchor ? rule.anchor.slice(0,19) : ""} onChange={e => changeQuota(index, {anchor: e.target.value ? new Date(e.target.value + "Z").toISOString() : null})} className="w-full p-2 rounded bg-slate-900" /></label>
+                </>}
+                {rule.period === "interval" && (["start", "end"] as const).map(field => <label key={field} className="block text-xs text-slate-300">{field} (UTC)<input required type="datetime-local" step="1" disabled={locked} value={rule[field] ? rule[field]!.slice(0,19) : ""} onChange={e => changeQuota(index, {[field]: e.target.value ? new Date(e.target.value + "Z").toISOString() : null})} className="w-full p-2 rounded bg-slate-900" /></label>)}
+                <div className="grid grid-cols-3 gap-2">
+                  {(["requests", "tokens", "usd"] as const).map(field => <label key={field} className="text-xs text-slate-300">{field === "usd" ? "USD" : field === "tokens" ? "Total tokens" : "Requests"}
+                    <input aria-label={`Quota ${index + 1} ${field}`} type="number" min={field === "usd" ? "5e-324" : "1"} max={field === "usd" ? "1000000000000" : field === "requests" ? "2147483647" : "9007199254740991"} step={field === "usd" ? "any" : "1"} value={rule[field] ?? ""} onChange={e => changeQuota(index, {[field]: e.target.value ? Number(e.target.value) : null})} placeholder="Unlimited" className="w-full p-2 rounded bg-slate-900" />
+                  </label>)}
+                </div>
+                {locked && <p className="text-xs text-slate-500">Scope/window identity is fixed; limits and enabled status are editable without resetting usage. Remove and add to change scope/window. Re-adding the same window keeps its spending.</p>}
+                {current && <div className="text-xs text-slate-400 space-y-1">
+                  <div>{current.active ? "Current window" : "Inactive"}: {current.start} → {current.end}</div>
+                  <div>Used: {current.used.requests} requests · {current.used.tokens} tokens · ${current.used.usd.toFixed(8)}</div>
+                  <div>Remaining: {current.remaining.requests ?? "∞"} requests · {current.remaining.tokens ?? "∞"} tokens · {current.remaining.usd == null ? "∞ USD" : `$${current.remaining.usd.toFixed(8)}`}</div>
+                </div>}
+              </fieldset>;
+            })}
+            <div className="flex gap-3 text-xs">
+              <button type="button" disabled={formQuotas.length >= 64} onClick={() => setFormQuotas(previous => [...previous, { enabled: true, scope: "key", period: "day", requests: null, tokens: null, usd: null }])} className="text-indigo-300 disabled:opacity-40">Add quota rule</button>
+              <button type="button" onClick={() => setFormQuotas([])} className="text-rose-300">Clear all rules</button>
+              {editingKey && <button type="button" onClick={() => loadQuotaUsage(editingKey.id)} className="text-indigo-300">Refresh usage</button>}
+            </div>
+            {usageError && <p role="alert" className="text-xs text-rose-300">{usageError}</p>}
+            {!formQuotas.length && <p className="text-xs text-slate-400">No period quotas: unlimited (existing lifetime/RPM/TPM limits still apply).</p>}
+          </section>
+
           <div className="flex justify-end gap-2.5 pt-4 border-t border-white/[0.08]">
             <button
               type="button"
@@ -382,9 +482,10 @@ export const ApiKeysPage: React.FC = () => {
             </button>
             <button
               type="submit"
+              disabled={saving}
               className="btn-press px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-indigo-600/25 transition-all cursor-pointer"
             >
-              {t.common.create}
+              {saving ? "Saving…" : editingKey ? "Save changes" : t.common.create}
             </button>
           </div>
         </form>

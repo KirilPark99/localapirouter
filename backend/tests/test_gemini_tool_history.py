@@ -94,7 +94,7 @@ def test_resolved_model_gating_and_cross_provider_history():
         payload = adapter._prepare_payload(model, unsigned)
         assert payload["messages"][1]["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == MARKER
     assert request.model_dump() == before and messages_to_input(request.messages) == cli_before
-    assert "extra_content" not in json.dumps(cli_before)
+    assert cli_before[1]["extra_content"] == request.messages[1].tool_calls[0].extra_content
     plain = history()
     plain.messages[4].tool_calls[0].extra_content = None
     assert adapter._prepare_payload("gpt-6.1-sol", plain)["messages"] == [m.model_dump(exclude_none=True) for m in plain.messages]

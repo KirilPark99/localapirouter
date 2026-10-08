@@ -61,6 +61,14 @@ export const requestParameterNames = [
   "seed", "parallel_tool_calls",
 ] as const;
 
+export function formatLogCost(log: RequestLog, digits = 6): string {
+  const cost = record(record(record(log.metadata_json).telemetry).cost);
+  if (cost.complete === false) {
+    return log.estimated_cost_usd > 0 ? `≥ $${log.estimated_cost_usd.toFixed(digits)} (partial)` : "Unknown";
+  }
+  return `$${log.estimated_cost_usd.toFixed(digits)}`;
+}
+
 export function getRequestLogTelemetry(log: RequestLog) {
   const telemetry = record(record(log.metadata_json).telemetry);
   const dispatches: Dispatch[] = Array.isArray(telemetry.dispatches)

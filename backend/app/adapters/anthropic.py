@@ -132,7 +132,7 @@ class AnthropicAdapter(BaseProviderAdapter):
         except Exception as e:
             return False, str(e), 0
 
-    def _convert_messages_to_anthropic(self, messages: List[ChatMessage]) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    def _convert_messages_to_anthropic(self, messages: List[ChatMessage]) -> Tuple[Optional[str | List[Dict[str, Any]]], List[Dict[str, Any]]]:
         def blocks(content):
             if content is None or content == "":
                 return []
@@ -153,7 +153,8 @@ class AnthropicAdapter(BaseProviderAdapter):
                         source = {"type": "base64", "media_type": meta[:-7], "data": data}
                     else:
                         source = {"type": "url", "url": url}
-                    converted.append({"type": "image", "source": source})
+                    converted.append({"type": "image", "source": source,
+                        **({"cache_control": part["cache_control"]} if "cache_control" in part else {})})
                 elif kind in ("text", "image", "thinking", "redacted_thinking", "tool_use", "tool_result"):
                     converted.append(dict(part))
                 else:
@@ -163,15 +164,22 @@ class AnthropicAdapter(BaseProviderAdapter):
         system_prompts = []
         anthropic_msgs = []
         for message in messages:
+            if any(d.get("type") not in ("thinking", "redacted_thinking") for d in message.reasoning_details or []):
+                raise self.normalize_error(status_code=400, response_body="Unsupported Anthropic reasoning history type")
             if message.role in ("system", "developer"):
-                system_prompts.extend(p["text"] for p in blocks(message.content) if p.get("type") == "text")
+                system_blocks = blocks(message.content)
+                if any(p.get("type") != "text" for p in system_blocks):
+                    raise self.normalize_error(status_code=400, response_body="Anthropic system blocks must be text")
+                system_prompts.extend(system_blocks)
                 continue
             role = "assistant" if message.role == "assistant" else "user"
             if message.role in ("tool", "function"):
                 if not message.tool_call_id:
                     raise self.normalize_error(status_code=400, response_body="Anthropic tool results require tool_call_id")
                 content = [{"type": "tool_result", "tool_use_id": message.tool_call_id,
-                            "content": message.content if isinstance(message.content, str) else blocks(message.content)}]
+                            "content": message.content if isinstance(message.content, str) else blocks(message.content),
+                            **({"is_error": message.is_error} if message.is_error is not None else {}),
+                            **({"cache_control": message.cache_control} if message.cache_control is not None else {})}]
             else:
                 content = [{k: value for k, value in detail.items() if k != "index"}
                            for detail in (message.reasoning_details or [])
@@ -184,7 +192,9 @@ class AnthropicAdapter(BaseProviderAdapter):
                         raise self.normalize_error(status_code=400, response_body="Tool arguments must be a JSON object")
                     if not isinstance(arguments, dict):
                         raise self.normalize_error(status_code=400, response_body="Tool arguments must be a JSON object")
-                    content.append({"type": "tool_use", "id": call.id, "name": call.function.name, "input": arguments})
+                    content.append({"type": "tool_use", "id": call.id, "name": call.function.name, "input": arguments,
+                        **({"cache_control": call.extra_content["anthropic"]["cache_control"]}
+                           if (call.extra_content or {}).get("anthropic", {}).get("cache_control") is not None else {})})
             if anthropic_msgs and anthropic_msgs[-1]["role"] == role:
                 anthropic_msgs[-1]["content"].extend(content)
             else:
@@ -193,7 +203,9 @@ class AnthropicAdapter(BaseProviderAdapter):
             anthropic_msgs = [{"role": "user", "content": "Hello"}]
         elif anthropic_msgs[0]["role"] != "user":
             anthropic_msgs.insert(0, {"role": "user", "content": "Begin conversation."})
-        return "\n\n".join(system_prompts) if system_prompts else None, anthropic_msgs
+        system = system_prompts if any("cache_control" in p for p in system_prompts) else (
+            "\n\n".join(p["text"] for p in system_prompts) if system_prompts else None)
+        return system, anthropic_msgs
 
     def _prepare_payload(self, model_id: str, request: ChatCompletionRequest) -> Dict[str, Any]:
         system_str, messages = self._convert_messages_to_anthropic(request.messages)
@@ -221,6 +233,7 @@ class AnthropicAdapter(BaseProviderAdapter):
                     "name": fn.get("name", "tool"),
                     "description": fn.get("description", ""),
                     "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+                    **({"cache_control": t["cache_control"]} if "cache_control" in t else {}),
                 })
             payload["tools"] = tools_list
         if request.tool_choice is not None or (request.tools and request.parallel_tool_calls is not None):

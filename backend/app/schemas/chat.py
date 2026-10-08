@@ -22,6 +22,8 @@ class ChatMessage(BaseModel):
     name: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = None
     tool_call_id: Optional[str] = None
+    is_error: Optional[bool] = None
+    cache_control: Optional[Dict[str, Any]] = None
 
 class ResponsesRequest(BaseModel):
     model: str
@@ -81,7 +83,9 @@ class ResponsesRequest(BaseModel):
                         content = converted
                     messages.append(ChatMessage(role=role, content=content,
                         tool_calls=item.get("tool_calls"), tool_call_id=item.get("tool_call_id")))
-                elif kind != "reasoning":
+                elif kind == "reasoning":
+                    messages.append(ChatMessage(role="assistant", reasoning_details=[dict(item)]))
+                else:
                     raise ValueError(f"Unsupported Responses input item type: {kind}")
         tools = None if self.tools is None else [
             {"type": "function", "function": {k: tool[k] for k in

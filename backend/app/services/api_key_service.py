@@ -50,6 +50,7 @@ class ApiKeyService:
             ip_restrictions=getattr(data, "ip_restrictions", []),
             notes=getattr(data, "notes", None),
         )
+        key_obj.quota_rules = cls._prepare_rules(getattr(data, "quota_rules", []) or [], [])
         db.add(key_obj)
         await db.commit()
         await db.refresh(key_obj)
@@ -67,6 +68,10 @@ class ApiKeyService:
         if not k:
             return None
 
+        if "quota_rules" in data.model_fields_set:
+            from app.services.quota_service import lock_key
+            k = await lock_key(db, key_id)
+            k.quota_rules = cls._prepare_rules(data.quota_rules or [], k.quota_rules or [])
         if data.name is not None:
             k.name = data.name
         if data.enabled is not None:
@@ -138,8 +143,10 @@ class ApiKeyService:
         return True, key_obj, "OK"
 
     @classmethod
-    async def admit_inference(cls, db: AsyncSession, key: RouterApiKey):
+    async def admit_inference(cls, db: AsyncSession, key: RouterApiKey, requested_model=None):
         from app.core.errors import RouterException, ErrorCategory
+        from app.services.quota_service import QuotaService
+        from app.services.log_service import request_telemetry
         now = datetime.now(timezone.utc)
         result = await db.execute(update(RouterApiKey).where(
             RouterApiKey.id == key.id, RouterApiKey.enabled == True,
@@ -149,12 +156,47 @@ class ApiKeyService:
         if result.rowcount != 1:
             await db.rollback()
             raise RouterException("API key inference quota reached or key is no longer active", ErrorCategory.RATE_LIMIT, status_code=429)
-        await db.commit()
+        direct_rules = []
+        try:
+            current = await db.scalar(select(RouterApiKey).where(RouterApiKey.id == key.id).execution_options(populate_existing=True))
+            if current.quota_rules:
+                direct_rules = await QuotaService.admit(db, current, requested_model)
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+        details = request_telemetry.get()
+        if details is not None:
+            details['router_key_id'] = key.id
+            details['quota_direct_pending'] = direct_rules
+            if requested_model is not None:
+                details['requested_model'] = requested_model
+
+    @staticmethod
+    def _prepare_rules(rules, existing):
+        import uuid
+        from fastapi import HTTPException
+        known = {r['id']: r for r in existing}
+        result = []
+        identity_fields = ('scope', 'model', 'period', 'duration_seconds', 'anchor', 'start', 'end')
+        for rule in rules:
+            value = rule.model_dump(mode='json')
+            if value['id']:
+                old = known.get(value['id'])
+                if not old:
+                    raise HTTPException(422, 'Quota rule ID does not belong to this key')
+                if any(old.get(f) != value.get(f) for f in identity_fields):
+                    raise HTTPException(422, 'Existing quota scope/window is immutable; remove and add a rule to change it')
+            else:
+                value['id'] = uuid.uuid4().hex
+            result.append(value)
+        return result
 
     @staticmethod
     def _build_read(k: RouterApiKey) -> RouterApiKeyRead:
         return RouterApiKeyRead(
             id=k.id,
+            quota_rules=k.quota_rules or [],
             name=k.name,
             key_prefix=k.key_prefix,
             masked_key=k.masked_key,

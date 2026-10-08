@@ -14,6 +14,12 @@ def invalid(message: str):
 def messages_to_input(messages: list[ChatMessage]) -> list[dict[str, Any]]:
     items = []
     for msg in messages:
+        for detail in msg.reasoning_details or []:
+            if detail.get("type") != "reasoning":
+                invalid("Unsupported Responses reasoning history type: " + str(detail.get("type")))
+            items.append({key: value for key, value in detail.items() if key != "index"})
+        if msg.is_error is not None or msg.cache_control is not None:
+            invalid("Responses cannot represent Anthropic tool-result or cache metadata")
         if msg.role in ("tool", "function"):
             if not msg.tool_call_id:
                 invalid("Tool results require a non-empty tool_call_id")
@@ -40,7 +46,8 @@ def messages_to_input(messages: list[ChatMessage]) -> list[dict[str, Any]]:
             if not call.id:
                 invalid("Assistant tool calls require a non-empty id")
             items.append({"type": "function_call", "call_id": call.id,
-                          "name": call.function.name, "arguments": call.function.arguments})
+                          "name": call.function.name, "arguments": call.function.arguments,
+                          **({"extra_content": call.extra_content} if call.extra_content else {})})
     return items or [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}]
 
 
@@ -101,6 +108,8 @@ async def responses_to_chat(lines: AsyncIterator[str], model: str,
     calls: dict[int, dict] = {}
     text_seen = False
     finished = False
+    reasoning_seen = set()
+    reasoning_items = {}
 
     def chunk(delta: dict, finish_reason=None, usage=None):
         payload = {"id": chunk_id, "object": "chat.completion.chunk", "created": created,
@@ -151,14 +160,28 @@ async def responses_to_chat(lines: AsyncIterator[str], model: str,
                 text_seen = True
                 yield chunk({"content": event.get("delta", "")})
             elif kind in ("response.reasoning_summary_part.delta", "response.reasoning.delta", "response.reasoning_summary_text.delta"):
-                yield chunk({"reasoning_content": event.get("delta", "")})
+                index = event.get("output_index", 0)
+                item = reasoning_items.setdefault(index, {"type": "reasoning", "id": event.get("item_id"), "summary": []})
+                summary_index = event.get("summary_index", 0)
+                while len(item["summary"]) <= summary_index:
+                    item["summary"].append({"type": "summary_text", "text": ""})
+                item["summary"][summary_index]["text"] += event.get("delta", "")
+                yield chunk({"reasoning_content": event.get("delta", ""), "reasoning_details": [{**item, "index": index}]})
             elif kind == "response.content_part.delta":
                 delta = event.get("delta", {})
                 text_seen = True
                 yield chunk({"content": delta.get("text", "") if isinstance(delta, dict) else str(delta)})
             elif kind in ("response.output_item.added", "response.output_item.done"):
                 item = event.get("item") or {}
-                if item.get("type") == "function_call":
+                if item.get("type") not in ("reasoning", "function_call", "message"):
+                    invalid("Unsupported Responses output item type: " + str(item.get("type")))
+                if item.get("type") == "reasoning":
+                    index = event.get("output_index", 0)
+                    reasoning_items[index] = item
+                    if kind == "response.output_item.done":
+                        reasoning_seen.add(item.get("id") or index)
+                    yield chunk({"reasoning_details": [{**item, "index": index}]})
+                elif item.get("type") == "function_call":
                     delta = call_delta(event.get("output_index", 0), item)
                     if delta:
                         yield chunk(delta)
@@ -180,7 +203,13 @@ async def responses_to_chat(lines: AsyncIterator[str], model: str,
             elif kind in ("response.completed", "response.incomplete"):
                 response = event.get("response") or {}
                 for index, item in enumerate(response.get("output") or []):
-                    if item.get("type") == "function_call":
+                    if item.get("type") not in ("reasoning", "function_call", "message"):
+                        invalid("Unsupported Responses output item type: " + str(item.get("type")))
+                    if item.get("type") == "message" and any(part.get("type") != "output_text" for part in item.get("content", [])):
+                        invalid("Unsupported Responses output content type")
+                    if item.get("type") == "reasoning" and (item.get("id") or index) not in reasoning_seen:
+                        yield chunk({"reasoning_details": [{**item, "index": index}]})
+                    elif item.get("type") == "function_call":
                         delta = call_delta(index, item)
                         if delta:
                             yield chunk(delta)
@@ -191,11 +220,10 @@ async def responses_to_chat(lines: AsyncIterator[str], model: str,
                 raw_usage = response.get("usage")
                 usage = None
                 if raw_usage:
-                    usage = {"prompt_tokens": raw_usage.get("input_tokens", 0),
-                             "completion_tokens": raw_usage.get("output_tokens", 0),
-                             "total_tokens": raw_usage.get("total_tokens", 0),
-                             "prompt_tokens_details": raw_usage.get("input_tokens_details"),
-                             "completion_tokens_details": raw_usage.get("output_tokens_details")}
+                    usage = {target: raw_usage[source] for source, target in (
+                        ("input_tokens", "prompt_tokens"), ("output_tokens", "completion_tokens"),
+                        ("total_tokens", "total_tokens"), ("input_tokens_details", "prompt_tokens_details"),
+                        ("output_tokens_details", "completion_tokens_details")) if source in raw_usage}
                 reason = "length" if kind == "response.incomplete" else ("tool_calls" if calls else "stop")
                 yield chunk({}, reason, usage)
                 finished = True

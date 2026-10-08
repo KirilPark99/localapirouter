@@ -301,10 +301,28 @@ class RouterApiKey(Base, TimestampMixin):
     rate_limit_tpm: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     request_limit: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     total_requests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    quota_rules: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, server_default="[]", nullable=False)
     expiration_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     ip_restrictions: Mapped[List[str]] = mapped_column(JSON, default=list, nullable=False)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class PeriodQuotaCounter(Base):
+    __tablename__ = "period_quota_counters"
+    key_id: Mapped[int] = mapped_column(ForeignKey("router_api_keys.id", ondelete="CASCADE"), primary_key=True)
+    rule_identity: Mapped[str] = mapped_column(String(64), primary_key=True)
+    window_start: Mapped[str] = mapped_column(String(40), primary_key=True)
+    requests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    usd: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+
+class PeriodQuotaReservation(Base):
+    __tablename__ = "period_quota_reservations"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    key_id: Mapped[int] = mapped_column(ForeignKey("router_api_keys.id", ondelete="CASCADE"), nullable=False, index=True)
+    allocations: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    prices: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
+    settled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 class RequestLog(Base, TimestampMixin):
     __tablename__ = "request_logs"

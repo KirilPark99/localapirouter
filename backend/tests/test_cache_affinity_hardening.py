@@ -14,7 +14,7 @@ def request(**kwargs):
 
 
 def target():
-    provider = NS(id=1, enabled=True, adapter_type="generic_openai", base_url="https://synthetic.invalid", adapter_configuration={}, extra_headers={}, updated_at=None)
+    provider = NS(id=1, enabled=True, adapter_type="generic_openai", base_url="https://synthetic.invalid", configuration={}, adapter_configuration={}, extra_headers={}, updated_at=None)
     model = NS(id=2, provider_id=1, provider=provider, provider_model_id="synthetic", canonical_slug="synthetic/model", enabled=True, available=True, temperature=0.7, reasoning_effort="high", updated_at=None)
     cred = NS(id=3, enabled=True, provider=provider, metadata_json={}, updated_at=None)
     candidate = NS(id=4, priority_order=0, is_active=True, candidate_type="model", target_profile_id=None, provider=provider, model=model, credential_id=3, credential=cred, credential_group=None, temperature=0.5, thinking_effort="medium", updated_at=None)
@@ -61,6 +61,10 @@ async def test_effective_context_and_revision(monkeypatch):
     assert effective.temperature == 0.5
     assert effective.reasoning_effort == "medium"
     assert context["resolved_model_id"] == "synthetic"
+    assert context["provider_identity"] == "generic_openai"
+    candidate.provider.name = "Renamed display label"
+    _, renamed = await RoutingEngine.prepare_effective_request(None, request(), None)
+    assert renamed["provider_identity"] == context["provider_identity"]
     assert not context["skip_response_cache"]
     model.temperature = 0.9
     _, changed = await RoutingEngine.prepare_effective_request(None, request(), None)

@@ -27,6 +27,7 @@ from app.fusion.engine import FusionEngine
 from app.judge.engine import JudgeEngine
 from app.jev.engine import JevEngine
 from app.core.errors import RouterException
+from app.core.config import settings
 from app.services.log_service import LogService, request_log_context, request_telemetry
 from functools import wraps
 
@@ -212,8 +213,10 @@ async def _prepare_chat_payload(payload, request, response, db, router_key, *, c
             global_cfg = await CompressionPipelineService.get_global_settings(session)
             try:
                 payload.messages, summary = await CompressionPipelineService.optimize_messages(
-                    db=session, messages=payload.messages, model_id=payload.model,
-                    request_headers=headers, supports_vision=context.get("supports_vision"), provider_name=context.get("provider_name"),
+                    db=session, messages=payload.messages, model_id=context.get("resolved_model_id") or payload.model,
+                    request_headers=headers, supports_vision=context.get("supports_vision"),
+                    provider_name=context.get("provider_identity"), tools=payload.tools,
+                    prompt_cache_key=payload.prompt_cache_key, supports_prompt_cache=context.get("supports_prompt_cache"),
                 )
             except Exception as exc:
                 if not global_cfg.fail_open:
@@ -260,7 +263,9 @@ async def _prepare_chat_payload(payload, request, response, db, router_key, *, c
             reservation = admission.reserve("router-key", router_key.id, rpm=router_key.rate_limit_rpm,
                 tpm=router_key.rate_limit_tpm, tokens=prompt_tokens + (output_tokens or 0))
             try:
-                await ApiKeyService.admit_inference(session, router_key)
+                quota_model = (payload.model if payload.model.startswith(('route/', 'fusion/', 'judge/')) else
+                               context.get('resolved_model_slug') or payload.model)
+                await ApiKeyService.admit_inference(session, router_key, requested_model=quota_model)
             except BaseException:
                 reservation.finish(0)
                 raise
@@ -397,6 +402,7 @@ async def chat_completions(
             await ResponseCacheService.set_response(
                 cache_db, signature=cache_signature, model=model_str, response_json=resp_obj.model_dump(),
                 input_tokens=p_tok, output_tokens=c_tok, estimated_cost_usd=cost,
+                ttl_seconds=settings.RESPONSE_CACHE_TTL_SECONDS,
                 expected_generation=cache_generation,
             )
         except Exception as exc:
@@ -732,7 +738,7 @@ async def _native_chat_stream(source, model):
                     yield {"choices": [{"delta": delta, "finish_reason": state["finish"]}]}
                 previous = deepcopy(accumulator.choices)
             if accumulator.usage is not None:
-                yield {"choices": [], "usage": accumulator.usage.model_dump()}
+                yield {"choices": [], "usage": accumulator.usage.model_dump(exclude_unset=True, exclude_none=True)}
             if accumulator.done:
                 break
         accumulator.response(model, require_complete=True)
@@ -741,6 +747,21 @@ async def _native_chat_stream(source, model):
 def _anthropic_stop_reason(finish):
     return {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use",
             "function_call": "tool_use", "content_filter": "refusal"}.get(finish, "end_turn")
+
+
+def _anthropic_usage(usage):
+    if usage is None:
+        return None
+    values = usage.model_dump(exclude_unset=True, exclude_none=True)
+    details = values.get("prompt_tokens_details") or {}
+    result = {target: details[source] for source, target in (
+        ("cached_tokens", "cache_read_input_tokens"),
+        ("cache_creation_input_tokens", "cache_creation_input_tokens")) if source in details}
+    if "prompt_tokens" in values:
+        result["input_tokens"] = values["prompt_tokens"] - sum(value or 0 for value in result.values())
+    if "completion_tokens" in values:
+        result["output_tokens"] = values["completion_tokens"]
+    return result
 
 
 def _anthropic_payload(resp):
@@ -757,8 +778,7 @@ def _anthropic_payload(resp):
         content.append({"type": "tool_use", "id": call.id, "name": call.function.name, "input": arguments})
     return {"id": resp.id, "type": "message", "role": "assistant", "content": content,
             "model": resp.model, "stop_reason": _anthropic_stop_reason(resp.choices[0].finish_reason),
-            "stop_sequence": None, "usage": {"input_tokens": resp.usage.prompt_tokens,
-            "output_tokens": resp.usage.completion_tokens} if resp.usage is not None else None}
+            "stop_sequence": None, "usage": _anthropic_usage(resp.usage)}
 
 
 def _anthropic_chat_request(body):
@@ -799,12 +819,14 @@ def _anthropic_chat_request(body):
                     url = f"data:{media};base64,{data}"
                 else:
                     raise ValueError("Unsupported image source")
-                content.append({"type": "image_url", "image_url": {"url": url}})
+                content.append({"type": "image_url", "image_url": {"url": url},
+                    **({"cache_control": part["cache_control"]} if "cache_control" in part else {})})
             elif kind == "tool_use" and role == "assistant":
                 if not isinstance(part.get("input"), dict):
                     raise ValueError("Tool input must be an object")
                 calls.append(ToolCall(id=string(part.get("id"), "Tool ID"), function=FunctionCall(
-                    name=string(part.get("name"), "Tool name"), arguments=json.dumps(part["input"]))))
+                    name=string(part.get("name"), "Tool name"), arguments=json.dumps(part["input"])),
+                    extra_content={"anthropic": {"cache_control": part["cache_control"]}} if "cache_control" in part else None))
             elif kind == "tool_result" and role == "user":
                 result_content = part.get("content", "")
                 if isinstance(result_content, list):
@@ -813,11 +835,12 @@ def _anthropic_chat_request(body):
                         raise ValueError("Nested tool results are not supported")
                 elif not isinstance(result_content, str):
                     raise ValueError("Tool result content must be a string or blocks")
-                # Keep is_error as a native tool_result block for lossless adapter roundtrips.
+                # Keep explicit false distinct from absent tool-result metadata.
                 if "is_error" in part and not isinstance(part["is_error"], bool):
                     raise ValueError("is_error must be boolean")
                 results.append(ChatMessage(role="tool", tool_call_id=string(part.get("tool_use_id"), "Tool result ID"),
-                                           content=result_content))
+                                           content=result_content, is_error=part.get("is_error"),
+                                           cache_control=part.get("cache_control")))
             elif kind == "thinking" and role == "assistant":
                 if not isinstance(part.get("thinking"), str) or not isinstance(part.get("signature"), str):
                     raise ValueError("Thinking requires text and an opaque signature")
@@ -875,7 +898,8 @@ def _anthropic_chat_request(body):
                 raise ValueError("Duplicate tool name")
             names.add(name)
             converted.append({"type": "function", "function": {"name": name, "parameters": tool["input_schema"],
-                             **({"description": tool["description"]} if "description" in tool else {})}})
+                             **({"description": tool["description"]} if "description" in tool else {})},
+                             **({"cache_control": tool["cache_control"]} if "cache_control" in tool else {})})
     choice, parallel = None, None
     if "tool_choice" in body:
         raw = body["tool_choice"]
@@ -921,8 +945,14 @@ def _responses_payload(response: ChatCompletionResponse, response_id: str) -> di
     text = message.content if message else ""
     finish = response.choices[0].finish_reason if response.choices else None
     terminal = "incomplete" if finish == "length" else "completed"
-    output = []
-    if text or not (message and message.tool_calls):
+    if message and any(detail.get("type") != "reasoning" for detail in message.reasoning_details or []):
+        raise ValueError("Unsupported Responses reasoning detail type")
+    output = [{k: v for k, v in detail.items() if k != "index"}
+              for detail in (message.reasoning_details or []) if detail.get("type") == "reasoning"] if message else []
+    if message and message.reasoning_content and not output:
+        output.append({"id": f"rs_{uuid.uuid4().hex[:16]}", "type": "reasoning",
+                       "summary": [{"type": "summary_text", "text": message.reasoning_content}]})
+    if text or not (message and (message.tool_calls or output)):
         output.append({
             "id": f"msg_{uuid.uuid4().hex[:16]}", "type": "message",
             "status": terminal, "role": "assistant",
@@ -946,11 +976,11 @@ def _responses_payload(response: ChatCompletionResponse, response_id: str) -> di
         "model": response.model,
         "output": output,
         "output_text": text or "",
-        "usage": {
-            "input_tokens": usage.prompt_tokens if usage else 0,
-            "output_tokens": usage.completion_tokens if usage else 0,
-            "total_tokens": usage.total_tokens if usage else 0,
-        } if usage is not None else None,
+        "usage": {target: value for source, value in usage.model_dump(exclude_unset=True, exclude_none=True).items()
+                  for target in [{"prompt_tokens": "input_tokens", "completion_tokens": "output_tokens",
+                                  "prompt_tokens_details": "input_tokens_details",
+                                  "completion_tokens_details": "output_tokens_details"}.get(source, source)]}
+                  if usage is not None else None,
         "metadata": {},
     }
 
@@ -969,6 +999,8 @@ async def _responses_event_stream(source: AsyncGenerator[str, None], model: str,
     calls = {}
     text_item = None
     text_index = None
+    reasoning_items = {}
+    reasoning_item = None
     usage = None
     finish = None
     from contextlib import aclosing
@@ -982,6 +1014,36 @@ async def _responses_event_stream(source: AsyncGenerator[str, None], model: str,
                 if choices:
                     finish = choices[0].get("finish_reason") or finish
                 delta = choices[0].get("delta") or {} if choices else {}
+                details = delta.get("reasoning_details") or []
+                reasoning = delta.get("reasoning_content")
+                if reasoning and not details:
+                    if reasoning_item is None:
+                        reasoning_item = {"id": f"rs_{uuid.uuid4().hex[:16]}", "type": "reasoning", "index": -1,
+                                          "summary": [{"type": "summary_text", "text": ""}]}
+                    reasoning_item["summary"][0]["text"] += reasoning
+                    details = [reasoning_item]
+                for detail in details:
+                    if detail.get("type") != "reasoning":
+                        raise ValueError("Unsupported Responses reasoning detail type")
+                    key = detail.get("index", 0)
+                    if key not in reasoning_items:
+                        reasoning_items[key] = len(output)
+                        item = {"id": detail["id"], "type": "reasoning", "summary": []}
+                        output.append(item)
+                        yield event("response.output_item.added", output_index=reasoning_items[key], item=item)
+                    item = output[reasoning_items[key]]
+                    for summary_index, part in enumerate(detail.get("summary") or []):
+                        previous = item.get("summary") or []
+                        old_text = previous[summary_index]["text"] if summary_index < len(previous) else ""
+                        if summary_index >= len(previous):
+                            yield event("response.reasoning_summary_part.added", output_index=reasoning_items[key], item_id=item["id"], summary_index=summary_index, part={"type": "summary_text", "text": ""})
+                        if not part["text"].startswith(old_text):
+                            raise ValueError("Upstream reasoning summary changed after streaming")
+                        suffix = part["text"][len(old_text):]
+                        if suffix:
+                            yield event("response.reasoning_summary_text.delta", item_id=item["id"], output_index=reasoning_items[key], summary_index=summary_index, delta=suffix)
+                    item.update({k: v for k, v in detail.items() if k != "index"})
+                    item["summary"] = [dict(part) for part in item.get("summary") or []]
                 text = delta.get("content")
                 if text:
                     if text_item is None:
@@ -1025,8 +1087,13 @@ async def _responses_event_stream(source: AsyncGenerator[str, None], model: str,
         yield event("response.failed", response={"id": response_id, "status": "failed", "error": {"type": "upstream_error", "message": "Function call is missing call_id or name"}})
         return
     for index, item in enumerate(output):
-        item["status"] = "incomplete" if finish == "length" else "completed"
-        if item["type"] == "function_call":
+        if item["type"] != "reasoning":
+            item["status"] = "incomplete" if finish == "length" else "completed"
+        if item["type"] == "reasoning":
+            for summary_index, part in enumerate(item.get("summary") or []):
+                yield event("response.reasoning_summary_text.done", item_id=item["id"], output_index=index, summary_index=summary_index, text=part["text"])
+                yield event("response.reasoning_summary_part.done", item_id=item["id"], output_index=index, summary_index=summary_index, part=part)
+        elif item["type"] == "function_call":
             yield event("response.function_call_arguments.done", item_id=item["id"], output_index=index, name=item["name"], arguments=item["arguments"])
         else:
             part = item["content"][0]
@@ -1062,7 +1129,10 @@ async def responses_api(
         )
     if isinstance(result, Response):
         return result
-    return _responses_payload(result, req_id)
+    try:
+        return _responses_payload(result, req_id)
+    except ValueError as exc:
+        return JSONResponse(status_code=502, content={"error": {"message": str(exc), "type": "upstream_error", "request_id": req_id}})
 
 async def _anthropic_event_stream(source: AsyncGenerator[str, None], model: str, message_id: str):
     from contextlib import aclosing
@@ -1123,7 +1193,7 @@ async def _anthropic_event_stream(source: AsyncGenerator[str, None], model: str,
             for index in blocks.values():
                 yield event("content_block_stop", index=index)
             yield event("message_delta", delta={"stop_reason": _anthropic_stop_reason(finish), "stop_sequence": None},
-                        usage={"input_tokens": usage.prompt_tokens, "output_tokens": usage.completion_tokens} if usage is not None else {})
+                        usage=_anthropic_usage(usage) or {})
             yield event("message_stop")
         except (ValueError, TypeError, RouterException, HTTPException):
             yield event("error", error={"type": "api_error", "message": "Upstream stream failed or ended before completion"})

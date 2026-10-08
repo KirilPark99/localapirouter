@@ -158,6 +158,9 @@ class CompressionPipelineService:
         provider_name: Optional[str] = None,
         stage_ids_filter: Optional[List[str]] = None,
         config_overrides: Optional[Dict[str, Any]] = None,
+        tools: Optional[List[dict]] = None,
+        prompt_cache_key: Optional[str] = None,
+        supports_prompt_cache: Optional[bool] = None,
     ) -> Tuple[List[ChatMessage], Dict[str, Any]]:
         """
         Executes active compression stages on incoming messages.
@@ -188,6 +191,10 @@ class CompressionPipelineService:
             model_id=model_id,
             provider_name=provider_name,
             request_headers=headers,
+            messages=messages,
+            tools=tools,
+            prompt_cache_key=prompt_cache_key,
+            supports_prompt_cache=supports_prompt_cache,
         )
 
         ctx = CompressionContext(

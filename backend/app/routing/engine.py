@@ -2,6 +2,7 @@ import asyncio
 from contextlib import aclosing
 import hashlib
 import json
+import math
 import random
 import time
 import uuid
@@ -78,18 +79,70 @@ class RoutingEngine:
         return reservation, request
 
     @classmethod
+    async def _reserve_dispatch(cls, cred, provider, model_obj, request):
+        # Reject native history before charging quota or dispatching to a lossy adapter.
+        wire = getattr(provider, 'adapter_type', '')
+        module = (getattr(provider, 'configuration', None) or {}).get('module_id')
+        supported = ({'thinking', 'redacted_thinking'} if wire == 'anthropic' else
+                     {'reasoning'} if wire == 'custom_module' and module in ('codex_cli', 'grok_builder_cli') else set())
+        if any(detail.get('type') in {'reasoning', 'thinking', 'redacted_thinking'} - supported
+               for message in request.messages for detail in message.reasoning_details or []):
+            raise RouterException('Selected adapter cannot preserve native reasoning history',
+                                  ErrorCategory.INVALID_REQUEST, status_code=400)
+        if wire != 'anthropic' and (any(message.is_error is not None or message.cache_control is not None
+                or isinstance(message.content, list) and any(part.get('cache_control') is not None for part in message.content)
+                or any((call.extra_content or {}).get('anthropic') for call in message.tool_calls or [])
+                for message in request.messages) or any(tool.get('cache_control') is not None for tool in request.tools or [])):
+            raise RouterException('Selected adapter cannot preserve Anthropic history/cache metadata',
+                                  ErrorCategory.INVALID_REQUEST, status_code=400)
+        from app.services.quota_service import QuotaService
+        quota, request = await QuotaService.reserve_dispatch(provider, model_obj, request)
+        try:
+            reservation, request = cls._reserve_credential(cred, request, model_obj)
+            return reservation, request, quota
+        except BaseException:
+            if quota is not None:
+                await quota.finish(dispatched=False)
+            raise
+
+    @classmethod
+    def _dispatch_deadline(cls, timeout):
+        timeout = settings.DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout
+        if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+                or not math.isfinite(timeout) or timeout <= 0):
+            raise RouterException('Dispatch timeout must be positive and finite', ErrorCategory.INVALID_REQUEST)
+        return time.monotonic() + timeout
+
+    @staticmethod
+    async def _pause_retry(error, attempt, deadline):
+        delay = min(2.0, 0.25 * 2**attempt) * random.uniform(0.5, 1.0)
+        retry_after = error.retry_after
+        if (isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool)
+                and math.isfinite(retry_after) and retry_after > 0):
+            delay = max(delay, retry_after)
+        if delay >= deadline - time.monotonic():
+            return False
+        await asyncio.sleep(delay)
+        return time.monotonic() < deadline
+
+    @classmethod
     async def _dispatch_chat(cls, adapter, cred, provider, model_obj, *, retry_count=0, **kwargs):
-        if not isinstance(retry_count, int) or not 0 <= retry_count <= 10:
+        if not isinstance(retry_count, int) or isinstance(retry_count, bool) or not 0 <= retry_count <= 10:
             raise RouterException('retry_count must be between 0 and 10', ErrorCategory.INVALID_REQUEST)
+        deadline = cls._dispatch_deadline(kwargs.get('timeout'))
         for attempt in range(retry_count + 1):
             if not cls._eligible(provider, model_obj, cred):
                 raise RouterException('Credential/provider/model unavailable', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
-            reservation, kwargs['request'] = cls._reserve_credential(cred, kwargs['request'], model_obj)
+            reservation, kwargs['request'], quota = await cls._reserve_dispatch(cred, provider, model_obj, kwargs['request'])
             dispatch = LogService.start_dispatch(provider, model_obj, kwargs['request'], stream=False)
             dispatch_started = time.perf_counter()
+            actual_usage, dispatched = None, False
             try:
-                response = await adapter.chat_completions(**kwargs)
-                LogService.dispatch_usage(dispatch, response.usage.model_dump(exclude_unset=True) if response.usage else None)
+                async with asyncio.timeout(max(0, deadline - time.monotonic())):
+                    dispatched = True
+                    response = await adapter.chat_completions(**kwargs)
+                actual_usage = response.usage.model_dump(exclude_unset=True) if response.usage else None
+                LogService.dispatch_usage(dispatch, actual_usage)
                 LogService.finish_dispatch(dispatch, 'SUCCESS', (time.perf_counter() - dispatch_started) * 1000)
                 reservation.finish(response.usage.total_tokens if response.usage else None)
                 circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
@@ -102,28 +155,43 @@ class RoutingEngine:
                     raise error
             finally:
                 reservation.finish()
+                if quota is not None:
+                    await quota.finish(actual_usage, success=dispatch is not None and dispatch['status'] == 'SUCCESS', dispatched=dispatched)
                 if dispatch is not None and dispatch['status'] == 'RUNNING':
                     LogService.finish_dispatch(dispatch, 'CANCELLED', (time.perf_counter() - dispatch_started) * 1000)
+            # Release capacity before backoff; all attempts share the caller's timeout.
+            if not await cls._pause_retry(error, attempt, deadline):
+                circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
+                raise error
 
     @classmethod
     async def _dispatch_stream(cls, adapter, cred, provider, model_obj, *, retry_count=0, **kwargs):
-        if not isinstance(retry_count, int) or not 0 <= retry_count <= 10:
+        if not isinstance(retry_count, int) or isinstance(retry_count, bool) or not 0 <= retry_count <= 10:
             raise RouterException('retry_count must be between 0 and 10', ErrorCategory.INVALID_REQUEST)
+        deadline = cls._dispatch_deadline(kwargs.get('timeout'))
         for attempt in range(retry_count + 1):
             if not cls._eligible(provider, model_obj, cred):
                 raise RouterException('Credential/provider/model unavailable', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
-            reservation, kwargs['request'] = cls._reserve_credential(cred, kwargs['request'], model_obj)
+            reservation, kwargs['request'], quota = await cls._reserve_dispatch(cred, provider, model_obj, kwargs['request'])
             started = terminal = False
             dispatch = LogService.start_dispatch(provider, model_obj, kwargs['request'], stream=True)
             dispatch_started = time.perf_counter()
             actual_tokens = None
+            actual_usage, dispatched = None, False
             try:
                 async with aclosing(adapter.stream_chat(**kwargs)) as source:
-                    async for chunk in source:
-                        for line in chunk.splitlines():
-                            if not line.startswith('data:'):
+                    while True:
+                        try:
+                            async with asyncio.timeout(max(0, deadline - time.monotonic())):
+                                dispatched = True
+                                chunk = await anext(source)
+                        except StopAsyncIteration:
+                            break
+                        for frame in chunk.replace('\r\n', '\n').split('\n\n'):
+                            data_lines = [line[5:].lstrip(' ') for line in frame.split('\n') if line.startswith('data:')]
+                            if not data_lines:
                                 continue
-                            payload = line[5:].strip()
+                            payload = '\n'.join(data_lines).strip()
                             if payload == '[DONE]':
                                 terminal = True
                                 LogService.finish_dispatch(dispatch, 'SUCCESS', (time.perf_counter() - dispatch_started) * 1000)
@@ -139,6 +207,7 @@ class RoutingEngine:
                                 raise normalize_upstream_error(status_code=code if isinstance(code, int) else 502, response_body=data)
                             if data.get('usage'):
                                 usage = data['usage']
+                                actual_usage = usage
                                 LogService.dispatch_usage(dispatch, usage)
                                 actual_tokens = usage.get('total_tokens', usage.get('prompt_tokens', 0) + usage.get('completion_tokens', 0))
                             terminal = terminal or any(c.get('finish_reason') for c in data.get('choices', []))
@@ -157,8 +226,13 @@ class RoutingEngine:
                     raise error
             finally:
                 reservation.finish(actual_tokens)
+                if quota is not None:
+                    await quota.finish(actual_usage, success=terminal, dispatched=dispatched)
                 if dispatch is not None and dispatch['status'] == 'RUNNING':
                     LogService.finish_dispatch(dispatch, 'CANCELLED', (time.perf_counter() - dispatch_started) * 1000)
+            if not await cls._pause_retry(error, attempt, deadline):
+                circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
+                raise error
 
     @classmethod
     def _order_candidates(cls, profile, candidates, request):
@@ -404,6 +478,13 @@ class RoutingEngine:
         else:
             pairs = await cls._get_candidate_credentials_for_model(db, model_str)
             if len(pairs) != 1:
+                # Multiple credentials may share one resolved upstream identity.
+                if pairs and len({(m.provider_id, m.id) for _, m in pairs}) == 1:
+                    identity_cred, identity_model = pairs[0]
+                    context.update(resolved_model_id=identity_model.provider_model_id,
+                        resolved_model_slug=identity_model.canonical_slug,
+                        provider_identity=(identity_cred.provider.configuration or {}).get('module_id') or identity_cred.provider.adapter_type,
+                        supports_prompt_cache=(identity_model.capabilities or {}).get('prompt_caching'))
                 return request, context
             cred, model_obj = pairs[0]
             provider = cred.provider
@@ -439,6 +520,9 @@ class RoutingEngine:
         context.update(skip_response_cache=False, supports_vision=vision if isinstance(vision, bool) else None,
                        config_fingerprint=fingerprint,
                        resolved_model_id=model_obj.provider_model_id,
+                       resolved_model_slug=model_obj.canonical_slug,
+                       provider_identity=(provider.configuration or {}).get('module_id') or provider.adapter_type,
+                       supports_prompt_cache=capabilities.get('prompt_caching'),
                        provider_name=getattr(provider, "name", None),
                        input_price_per_1m=getattr(model_obj, "input_price_per_1m", None),
                        output_price_per_1m=getattr(model_obj, "output_price_per_1m", None))

@@ -195,6 +195,10 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
             return False, str(e), 0
 
     def _prepare_payload(self, model_id: str, request: ChatCompletionRequest, base_url: str = "") -> Dict[str, Any]:
+        if any(d.get("type") == "reasoning" for m in request.messages for d in m.reasoning_details or []):
+            raise self.normalize_error(status_code=400, response_body="Responses reasoning history requires a Responses adapter")
+        if any(m.is_error is not None or m.cache_control is not None for m in request.messages):
+            raise self.normalize_error(status_code=400, response_body="Chat cannot represent Anthropic tool-result or cache metadata")
         payload: Dict[str, Any] = {
             "model": model_id,
             "messages": [m.model_dump(exclude_none=True) for m in request.messages],
@@ -264,6 +268,8 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
             payload["parallel_tool_calls"] = request.parallel_tool_calls
         if request.user is not None:
             payload["user"] = request.user
+        if request.prompt_cache_key is not None:
+            payload["prompt_cache_key"] = request.prompt_cache_key
 
         # Reasoning effort handling
         eff_effort = request.get_effective_reasoning_effort() if hasattr(request, "get_effective_reasoning_effort") else request.reasoning_effort
@@ -396,19 +402,26 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
                     err_body = await resp.aread()
                     raise self.normalize_error(status_code=resp.status_code, response_body=err_body.decode("utf-8", errors="ignore"))
 
-                async for line in resp.aiter_lines():
-                    clean_line = line.strip()
-                    if not clean_line:
-                        continue
-                    if clean_line.startswith("data: "):
-                        yield f"{clean_line}\n\n"
-                        if clean_line == "data: [DONE]":
-                            break
-                    elif clean_line.startswith(":"):
-                        # SSE keep-alive comment
-                        continue
-                    else:
-                        yield f"data: {clean_line}\n\n"
+                buffer, data = "", []
+                # Split protocol LF only: Unicode separators are valid JSON text.
+                async for text in resp.aiter_text():
+                    buffer += text
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.removesuffix("\r")
+                        if not line:
+                            if data:
+                                value = "\n".join(data)
+                                data = []
+                                if value != "[DONE]":
+                                    value = json.dumps(json.loads(value), ensure_ascii=False)
+                                yield f"data: {value}\n\n"
+                                if value == "[DONE]":
+                                    return
+                        elif line.startswith("data:"):
+                            value = line[5:]
+                            data.append(value[1:] if value.startswith(" ") else value)
+                        # Comments, event/id/retry and unknown fields are not data.
         except Exception as e:
             if isinstance(e, RouterException):
                 raise

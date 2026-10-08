@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator, field_validator
 import os
 from pathlib import Path
 
@@ -43,6 +43,17 @@ class Settings(BaseSettings):
     DEFAULT_TIMEOUT_SECONDS: float = 60.0
     FUSION_TIMEOUT_SECONDS: float = 120.0
     MAX_FALLBACK_ATTEMPTS: int = 5
+
+    # Response cache: finite lifetime and a conservative L1 byte budget.
+    RESPONSE_CACHE_TTL_SECONDS: float = Field(default=3600, gt=0, allow_inf_nan=False)
+    RESPONSE_CACHE_MAX_BYTES: int = Field(default=64 * 1024 * 1024, gt=0)
+
+    @field_validator("RESPONSE_CACHE_TTL_SECONDS", "RESPONSE_CACHE_MAX_BYTES", mode="before")
+    @classmethod
+    def validate_cache_limits(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("Cache limits must be positive numbers, not booleans")
+        return value
 
     # Fingerprint Salt. This must be unique per installation.
     FINGERPRINT_SALT: str

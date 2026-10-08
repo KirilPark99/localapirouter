@@ -421,33 +421,60 @@ class JevEngine:
     async def _dispatch_decision(cls, cred, provider, model_obj, request, proxy_url, timeout, *, retry_count=0):
         from app.core.admission import admission
         from app.compression.tokenizer import estimate_tokens
-        if not isinstance(retry_count, int) or not 0 <= retry_count <= 10:
+        from app.services.quota_service import QuotaService
+        if not isinstance(retry_count, int) or isinstance(retry_count, bool) or not 0 <= retry_count <= 10:
             raise RouterException('retry_count must be between 0 and 10', ErrorCategory.INVALID_REQUEST)
         if not cls._is_native_jev_provider(provider, model_obj):
             return await cls._emulate_jev_via_adapter(provider=provider, api_key=decrypt_secret(cred.encrypted_api_key),
                 model_obj=model_obj, request=request, proxy_url=proxy_url, timeout=timeout, credential=cred, retry_count=retry_count)
         prompt_tokens = estimate_tokens(json.dumps({'state': request.state, 'questions':request.questions}))
+        deadline = RoutingEngine._dispatch_deadline(timeout)
+        telemetry_request = ChatCompletionRequest(model=request.model, messages=[ChatMessage(role='user',
+            content=json.dumps({'state': request.state, 'questions': request.questions}))], max_tokens=model_obj.max_output_tokens)
         if cred.tpm_limit is not None and not model_obj.max_output_tokens:
             raise RouterException('Native JEV needs a known output ceiling for finite TPM', ErrorCategory.RATE_LIMIT,
                 status_code=429, retry_after=60, raw_error={'local_admission': True})
         for attempt in range(retry_count + 1):
             if not RoutingEngine._eligible(provider, model_obj, cred):
                 raise RouterException('JEV credential unavailable', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
-            reservation = admission.reserve('credential', cred.id, rpm=cred.rpm_limit, tpm=cred.tpm_limit,
-                concurrency=cred.max_concurrency, tokens=prompt_tokens + (model_obj.max_output_tokens or 0))
+            quota, _ = await QuotaService.reserve_dispatch(provider, model_obj, request)
             try:
-                answers, usage = await cls._call_native_jev_upstream(provider, decrypt_secret(cred.encrypted_api_key),
-                    model_obj.provider_model_id, request, proxy_url, timeout)
-                reservation.finish(usage.get('input_tokens', 0) + usage.get('output_tokens', 0))
+                reservation = admission.reserve('credential', cred.id, rpm=cred.rpm_limit, tpm=cred.tpm_limit,
+                    concurrency=cred.max_concurrency, tokens=prompt_tokens + (model_obj.max_output_tokens or 0))
+            except BaseException:
+                if quota is not None:
+                    await quota.finish(dispatched=False)
+                raise
+            dispatch = LogService.start_dispatch(provider, model_obj, telemetry_request, stream=False)
+            started = time.perf_counter()
+            actual_usage, dispatched = None, False
+            try:
+                async with asyncio.timeout(max(0, deadline - time.monotonic())):
+                    dispatched = True
+                    answers, usage = await cls._call_native_jev_upstream(provider, decrypt_secret(cred.encrypted_api_key),
+                        model_obj.provider_model_id, request, proxy_url, timeout)
+                actual_usage = usage
+                LogService.dispatch_usage(dispatch, usage)
+                LogService.finish_dispatch(dispatch, 'SUCCESS', (time.perf_counter() - started) * 1000)
+                actual = usage.get('input_tokens', 0) + usage.get('output_tokens', 0) if usage else None
+                reservation.finish(actual)
                 circuit_breaker.record_success(cred.id, model_obj.provider_model_id)
                 return answers, usage
             except Exception as exc:
+                LogService.finish_dispatch(dispatch, 'FAILED', (time.perf_counter() - started) * 1000)
                 error = exc if isinstance(exc, RouterException) else normalize_upstream_error(exception=exc)
-                circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
                 if attempt >= retry_count or not error.category.is_retryable or error.category == ErrorCategory.RATE_LIMIT:
+                    circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
                     raise error
             finally:
                 reservation.finish()
+                if quota is not None:
+                    await quota.finish(actual_usage, success=dispatch is not None and dispatch['status'] == 'SUCCESS', dispatched=dispatched)
+                if dispatch is not None and dispatch['status'] == 'RUNNING':
+                    LogService.finish_dispatch(dispatch, 'CANCELLED', (time.perf_counter() - started) * 1000)
+            if not await RoutingEngine._pause_retry(error, attempt, deadline):
+                circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
+                raise error
 
     @classmethod
     def _validate_answers(cls, answers, questions):
@@ -683,9 +710,12 @@ class JevEngine:
             raise RouterException('Invalid JEV response', ErrorCategory.UPSTREAM_5XX)
         answers = cls._validate_answers(data.get('answers'), request.questions)
         raw_usage = data.get("usage", {})
-        in_tok = raw_usage.get("input_tokens", raw_usage.get("prompt_tokens", 0)) if isinstance(raw_usage, dict) else 0
-        out_tok = raw_usage.get("output_tokens", raw_usage.get("completion_tokens", 0)) if isinstance(raw_usage, dict) else 0
-        usage = {"input_tokens": in_tok, "output_tokens": out_tok}
+        usage = {}
+        if isinstance(raw_usage, dict):
+            for native, chat in (("input_tokens", "prompt_tokens"), ("output_tokens", "completion_tokens")):
+                value = raw_usage.get(native, raw_usage.get(chat))
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    usage[native] = value
         return answers, usage
 
     @classmethod

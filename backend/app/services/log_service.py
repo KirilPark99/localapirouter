@@ -1,3 +1,4 @@
+import math
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from sqlalchemy import select, func, desc, or_, asc, case
@@ -55,6 +56,31 @@ def request_log_context(details=None):
 
 class LogService:
     @staticmethod
+    def price_snapshot(model):
+        def rate(value):
+            return float(value) if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value >= 0) else None
+        return {"input_per_1m": rate(getattr(model, "input_price_per_1m", None)),
+                "output_per_1m": rate(getattr(model, "output_price_per_1m", None))}
+
+    @staticmethod
+    def cost_for_usage(prices, usage):
+        if not isinstance(prices, dict) or not isinstance(usage, dict):
+            return None
+        incoming = usage.get("prompt_tokens", usage.get("input_tokens"))
+        outgoing = usage.get("completion_tokens", usage.get("output_tokens"))
+        if any(not isinstance(n, int) or isinstance(n, bool) or not 0 <= n <= 2**63 - 1
+               for n in (incoming, outgoing)):
+            return None
+        rates = (prices.get("input_per_1m"), prices.get("output_per_1m"))
+        if any(n and (not isinstance(p, (int, float)) or isinstance(p, bool)
+                      or not math.isfinite(p) or p < 0) for n, p in zip((incoming, outgoing), rates)):
+            return None
+        # Configured full-input rates are estimates, not an invented universal cache discount.
+        total = sum(n * (p or 0) / 1_000_000 for n, p in zip((incoming, outgoing), rates))
+        return total if math.isfinite(total) else None
+
+    @staticmethod
     def request_parameters(request):
         # No prompt, tool schemas/arguments, headers, arbitrary metadata or secrets.
         fields = ("temperature", "top_p", "seed", "parallel_tool_calls")
@@ -96,7 +122,8 @@ class LogService:
         if (getattr(provider, "configuration", None) or {}).get("module_id") in ("codex_cli", "grok_builder_cli"):
             parameters["thinking_budget_tokens"] = None
         dispatch = {"provider": provider.name, "model": model.provider_model_id,
-                    "stream": stream, "parameters": parameters, "status": "RUNNING", "usage": None}
+                    "stream": stream, "parameters": parameters, "status": "RUNNING", "usage": None,
+                    "prices": cls.price_snapshot(model), "cost_usd": None}
         details["dispatches"].append(dispatch)
         return dispatch
 
@@ -106,13 +133,15 @@ class LogService:
             return
         def count(value):
             return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
-        incoming, outgoing = count(usage.get("prompt_tokens")), count(usage.get("completion_tokens"))
+        incoming = count(usage.get("prompt_tokens", usage.get("input_tokens")))
+        outgoing = count(usage.get("completion_tokens", usage.get("output_tokens")))
         input_details, output_details = usage.get("prompt_tokens_details"), usage.get("completion_tokens_details")
         cached = count(input_details.get("cached_tokens")) if isinstance(input_details, dict) else None
         reasoning = count(output_details.get("reasoning_tokens")) if isinstance(output_details, dict) else None
         dispatch["usage"] = {"input_tokens": incoming, "output_tokens": outgoing,
                              "cached_tokens": cached, "reasoning_tokens": reasoning,
                              "new_tokens": incoming - cached if incoming is not None and cached is not None and cached <= incoming else None}
+        dispatch["cost_usd"] = LogService.cost_for_usage(dispatch.get("prices"), dispatch["usage"])
 
     @staticmethod
     def finish_dispatch(dispatch, status, latency_ms):
@@ -147,6 +176,7 @@ class LogService:
         output_price_per_1m: float = 0.0,
     ) -> RequestLog:
         details = request_telemetry.get()
+        cost_details = None
         if details is not None:
             telemetry = deepcopy(details)
             calls = telemetry["dispatches"]
@@ -171,10 +201,20 @@ class LogService:
                 "new_tokens": input_tokens - cached_tokens if cache_known else None,
                 "reasoning_tokens": reasoning_tokens if reasoning_known else None,
                 "source": "local_response_cache" if local_hit else "upstream" if measured else "upstream_partial" if usages else "estimate_or_partial"}
+            if calls or local_hit:
+                known_costs = [call["cost_usd"] for call in calls if call.get("cost_usd") is not None]
+                cost_details = {"known_usd": sum(known_costs),
+                    "complete": len(known_costs) == len(calls),
+                    "unknown_dispatches": len(calls) - len(known_costs),
+                    "basis": "per_dispatch_configured_rates"}
+                telemetry["cost"] = cost_details
             metadata_json = {**(metadata_json or {}), "stream": telemetry.get("requested_parameters", {}).get("stream", False),
                              "telemetry": telemetry}
-        # Calculate cost estimate
-        est_cost = ((input_tokens / 1_000_000.0) * input_price_per_1m) + ((output_tokens / 1_000_000.0) * output_price_per_1m)
+        # Legacy callers without dispatch telemetry retain their own model estimate.
+        est_cost = cost_details["known_usd"] if cost_details is not None else cls.cost_for_usage(
+            {"input_per_1m": input_price_per_1m, "output_per_1m": output_price_per_1m},
+            {"prompt_tokens": input_tokens, "completion_tokens": output_tokens})
+        est_cost = est_cost if est_cost is not None else 0.0
 
         # Privacy check: never store prompt/response unless LOG_REQUEST_CONTENT enabled
         stored_prompt = prompt_content if settings.LOG_REQUEST_CONTENT else None
@@ -650,12 +690,6 @@ class LogService:
         )
         fusions = {f.slug: f for f in (await db.execute(fusions_query)).scalars().all()}
 
-        disc_models = (await db.execute(select(DiscoveredModel))).scalars().all()
-        model_prices = {}
-        for dm in disc_models:
-            if dm.input_price_per_1m:
-                model_prices[dm.provider_model_id] = dm.input_price_per_1m
-                model_prices[dm.canonical_slug] = dm.input_price_per_1m
 
         # Helper to apply date and drilldown filters
         def apply_query_filters(q, s_dt, e_dt, f_type, f_val):
@@ -960,7 +994,7 @@ class LogService:
         tot_reasoning = 0
         tot_cost = 0.0
         latencies = []
-        cached_saved_usd = 0.0
+
 
         key_agg = {}
         cred_agg = {}
@@ -994,11 +1028,7 @@ class LogService:
             if l.latency_ms:
                 latencies.append(l.latency_ms)
 
-            # Caching savings
-            if c_t > 0:
-                m_ref = l.upstream_model or l.requested_model
-                p_price = model_prices.get(m_ref, 1.20)
-                cached_saved_usd += (c_t / 1_000_000.0) * (p_price * 0.75)
+            # Cache read tokens are known; savings in USD need provider-specific cache prices.
 
             # Status codes
             sc = l.status_code or (200 if is_success else 500)
@@ -1499,7 +1529,7 @@ class LogService:
             p90_latency_ms=p90_lat,
             p99_latency_ms=p99_lat,
             tokens_per_sec=global_tps,
-            cached_tokens_cost_saved_usd=round(cached_saved_usd, 4),
+            cached_tokens_cost_saved_usd=None,
             projected_daily_cost_usd=proj_daily,
             projected_monthly_cost_usd=proj_monthly,
         )

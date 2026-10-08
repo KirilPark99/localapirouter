@@ -2,7 +2,7 @@
 Ensures token compression doesn't destroy provider KV-caches (Prompt Caching)
 for providers like Anthropic, OpenAI, DeepSeek, Google Gemini, Qwen, etc.
 """
-from typing import Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 CACHING_PROVIDERS: Set[str] = {
     "anthropic",
@@ -61,6 +61,10 @@ def should_preserve_system_prompt(
     model_id: str,
     request_headers: Optional[Dict[str, str]] = None,
     provider_name: Optional[str] = None,
+    messages: Optional[List[Any]] = None,
+    tools: Optional[List[dict]] = None,
+    prompt_cache_key: Optional[str] = None,
+    supports_prompt_cache: Optional[bool] = None,
 ) -> bool:
     """
     Decides whether the system prompt should be preserved untouched during compression.
@@ -77,11 +81,25 @@ def should_preserve_system_prompt(
     if normalized_mode == "never":
         return False
 
+    if prompt_cache_key is not None or any(tool.get("cache_control") is not None for tool in (tools or [])):
+        return True
+    for message in messages or []:
+        if getattr(message, "cache_control", None) is not None:
+            return True
+        if any((call.extra_content or {}).get("anthropic", {}).get("cache_control") is not None
+               for call in getattr(message, "tool_calls", None) or []):
+            return True
+        content = getattr(message, "content", None)
+        if isinstance(content, list) and any(isinstance(part, dict) and part.get("cache_control") is not None for part in content):
+            return True
+    if isinstance(supports_prompt_cache, bool):
+        return supports_prompt_cache
+
     headers = request_headers or {}
     for k, v in headers.items():
         if "cache-control" in k.lower() and "no-cache" not in str(v).lower():
             return True
 
-    if not provider_name and (not model_id or model_id.lower().startswith("route/")):
+    if not provider_name and (not model_id or model_id.lower().startswith(("route/", "fusion/", "judge/", "smart/"))):
         return True  # Unknown resolved target must not destroy a potential cache prefix.
     return is_prompt_caching_supported(model_id, provider_name)

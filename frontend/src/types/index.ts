@@ -375,7 +375,34 @@ export interface JudgeTestResponse {
   error?: string | null;
 }
 
+export interface PeriodQuotaRule {
+  id?: string | null;
+  enabled: boolean;
+  scope: "key" | "model" | "profile";
+  model?: string | null;
+  period: "minute" | "hour" | "day" | "week" | "month" | "custom" | "interval";
+  duration_seconds?: number | null;
+  anchor?: string | null;
+  start?: string | null;
+  end?: string | null;
+  requests?: number | null;
+  tokens?: number | null;
+  usd?: number | null;
+}
+
+export interface PeriodQuotaUsage {
+  rule_id: string;
+  scope: PeriodQuotaRule["scope"];
+  model?: string | null;
+  active: boolean;
+  start: string;
+  end: string;
+  used: { requests: number; tokens: number; usd: number };
+  remaining: { requests: number | null; tokens: number | null; usd: number | null };
+}
+
 export interface RouterApiKey {
+  quota_rules?: PeriodQuotaRule[];
   id: number;
   name: string;
   key_prefix: string;
@@ -456,6 +483,7 @@ export interface LogsSummaryResponse {
 }
 
 export interface RouterApiKeyCreate {
+  quota_rules?: PeriodQuotaRule[];
   name: string;
   permissions?: string[];
   allowed_models?: string[];
@@ -630,7 +658,7 @@ export interface SummaryStats {
   p90_latency_ms?: number;
   p99_latency_ms?: number;
   tokens_per_sec?: number;
-  cached_tokens_cost_saved_usd?: number;
+  cached_tokens_cost_saved_usd?: number | null;
   projected_daily_cost_usd?: number;
   projected_monthly_cost_usd?: number;
 }

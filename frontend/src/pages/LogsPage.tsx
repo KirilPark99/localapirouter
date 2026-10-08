@@ -32,7 +32,7 @@ import { RequestLog, LogsSummaryResponse, Provider, RouterApiKey } from "../type
 import { StatusBadge } from "../components/StatusBadge";
 import { LogDetailDrawer } from "../components/LogDetailDrawer";
 import { useI18n } from "../i18n";
-import { getRequestLogTelemetry, telemetryValue } from "../utils/requestLogTelemetry";
+import { formatLogCost, getRequestLogTelemetry, telemetryValue } from "../utils/requestLogTelemetry";
 
 export const LogsPage: React.FC<{ onReplay: () => void }> = ({ onReplay }) => {
   const { t } = useI18n();
@@ -335,7 +335,7 @@ export const LogsPage: React.FC<{ onReplay: () => void }> = ({ onReplay }) => {
       l.cached_tokens.toString(),
       l.reasoning_tokens.toString(),
       (l.input_tokens + l.output_tokens).toString(),
-      l.estimated_cost_usd.toString(),
+      formatLogCost(l),
       (l.attempts?.length || 1).toString(),
       (l.error_message || "").replace(/"/g, '""'),
     ]);
@@ -1058,7 +1058,7 @@ export const LogsPage: React.FC<{ onReplay: () => void }> = ({ onReplay }) => {
 
                       {/* Cost */}
                       <td className="py-2 px-3 text-right font-mono text-yellow-300 text-[11px] whitespace-nowrap">
-                        ${l.estimated_cost_usd.toFixed(4)}
+                        {formatLogCost(l, 4)}
                       </td>
 
                       {/* Inspect Action */}

@@ -1488,7 +1488,7 @@ export const AnalyticsPage: React.FC = () => {
                 <span className="text-emerald-400 font-medium">Cache: {formatNum(summary.total_cached_tokens)}</span>
                 {summary.cached_tokens_cost_saved_usd ? (
                   <span className="text-emerald-300">~${summary.cached_tokens_cost_saved_usd.toFixed(4)} saved</span>
-                ) : null}
+                ) : summary.cached_tokens_cost_saved_usd === null ? <span title="Provider-specific cache prices are not configured">Savings USD: unknown</span> : null}
               </>
             ) : summary && summary.total_reasoning_tokens > 0 ? (
               <span className="text-purple-300">CoT: {formatNum(summary.total_reasoning_tokens)}</span>

@@ -7,12 +7,14 @@ import hashlib
 import json
 import logging
 import math
+import sys
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from sqlalchemy import select, update, delete, func
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.entities import ResponseCacheEntry
+from app.core.config import settings
 from app.schemas.chat import ChatMessage, ChatCompletionRequest
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,8 @@ class ResponseCacheService:
     _generation = 0
     _memory_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
     _max_memory_items = 500
+    _max_memory_bytes = settings.RESPONSE_CACHE_MAX_BYTES
+    _memory_bytes = 0
     _metrics_started_at = datetime.now(timezone.utc).isoformat()
     _mem_metrics = {"hits": 0, "misses": 0, "tokens_saved": 0, "cost_saved_usd": 0.0}
 
@@ -94,11 +98,41 @@ class ResponseCacheService:
         return cls._generation
 
     @classmethod
+    def _forget(cls, signature: str) -> None:
+        entry = cls._memory_cache.pop(signature, None)
+        if entry is not None:
+            cls._memory_bytes = max(0, cls._memory_bytes - entry.get("_size_bytes", 0))
+
+    @classmethod
     def _remember(cls, signature: str, entry: Dict[str, Any]) -> None:
+        # Count UTF-8 serialization plus nested Python objects, signature and LRU overhead.
+        # ponytail: conservative accounting, not allocator RSS; use external cache for hard RSS limits.
+        seen = set()
+        def size(value):
+            if id(value) in seen:
+                return 0
+            seen.add(id(value))
+            total = sys.getsizeof(value)
+            if isinstance(value, dict):
+                total += sum(size(k) + size(v) for k, v in value.items())
+            elif isinstance(value, (list, tuple)):
+                total += sum(size(v) for v in value)
+            return total
+        cls._forget(signature)
+        now = _now()
+        for key, cached in list(cls._memory_cache.items()):
+            if cached.get("expires_at") is None or _utc_naive(cached["expires_at"]) <= now:
+                cls._forget(key)
+        cls._memory_bytes = sum(item.get("_size_bytes", 0) for item in cls._memory_cache.values())
+        entry["_size_bytes"] = (len(json.dumps(entry["response_json"], ensure_ascii=False, allow_nan=False).encode("utf-8"))
+            + len(signature.encode("utf-8")) + size(entry) + size(signature) + 256)
+        if entry["_size_bytes"] > cls._max_memory_bytes:
+            return
         cls._memory_cache[signature] = entry
+        cls._memory_bytes += entry["_size_bytes"]
         cls._memory_cache.move_to_end(signature)
-        while len(cls._memory_cache) > cls._max_memory_items:
-            cls._memory_cache.popitem(last=False)
+        while len(cls._memory_cache) > cls._max_memory_items or cls._memory_bytes > cls._max_memory_bytes:
+            cls._forget(next(iter(cls._memory_cache)))
 
     @classmethod
     def _hit(cls, entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -118,17 +152,17 @@ class ResponseCacheService:
             entry = cls._memory_cache.get(signature)
             if entry is not None:
                 expires = entry.get("expires_at")
-                if expires is None or _utc_naive(expires) > _now():
+                if expires is not None and _utc_naive(expires) > _now():
                     cls._memory_cache.move_to_end(signature)
                     return cls._hit(entry)
-                del cls._memory_cache[signature]
+                cls._forget(signature)
             try:
                 result = await db.execute(select(ResponseCacheEntry).where(ResponseCacheEntry.signature == signature)
                     .execution_options(populate_existing=True))
                 stored = result.scalar_one_or_none()
                 if stored is not None:
                     expires = _utc_naive(stored.expires_at) if stored.expires_at is not None else None
-                    if expires is not None and expires <= _now():
+                    if expires is None or expires <= _now():
                         await db.execute(delete(ResponseCacheEntry).where(ResponseCacheEntry.signature == signature))
                         await db.commit()
                     else:
@@ -158,21 +192,21 @@ class ResponseCacheService:
         input_tokens: int = 0,
         output_tokens: int = 0,
         estimated_cost_usd: float = 0.0,
-        ttl_seconds: Optional[int] = None,
+        ttl_seconds: Optional[float] = None,
         *,
         expected_generation: Optional[int] = None,
     ) -> None:
         generation = cls._generation if expected_generation is None else expected_generation
         if not signature:
             return
-        expires_at = None
-        if ttl_seconds is not None:
-            try:
-                if isinstance(ttl_seconds, bool) or not math.isfinite(ttl_seconds) or ttl_seconds < 0:
-                    raise ValueError("TTL must be finite and nonnegative")
-                expires_at = _now() + timedelta(seconds=ttl_seconds)
-            except (OverflowError, TypeError) as exc:
-                raise ValueError("TTL exceeds supported datetime range") from exc
+        ttl_seconds = settings.RESPONSE_CACHE_TTL_SECONDS if ttl_seconds is None else ttl_seconds
+        try:
+            if isinstance(ttl_seconds, bool) or not math.isfinite(ttl_seconds) or ttl_seconds <= 0:
+                raise ValueError("TTL must be finite and positive")
+            expires_at = _now() + timedelta(seconds=ttl_seconds)
+        except (OverflowError, TypeError) as exc:
+            raise ValueError("TTL exceeds supported datetime range") from exc
+        json.dumps(response_json, ensure_ascii=False, allow_nan=False)
         entry = dict(response_json=deepcopy(response_json), input_tokens=input_tokens, output_tokens=output_tokens,
             estimated_cost_usd=estimated_cost_usd, expires_at=expires_at)
         async with cls._lock:
@@ -226,11 +260,11 @@ class ResponseCacheService:
             now = _now()
             for signature, entry in list(cls._memory_cache.items()):
                 if entry.get("expires_at") is not None and _utc_naive(entry["expires_at"]) <= now:
-                    del cls._memory_cache[signature]
+                    cls._forget(signature)
             try:
                 count = await db.scalar(select(func.count()).select_from(ResponseCacheEntry).where(
                     ResponseCacheEntry.signature.like("v2:%"),
-                    (ResponseCacheEntry.expires_at.is_(None)) | (ResponseCacheEntry.expires_at > now),
+                    ResponseCacheEntry.expires_at > now,
                 ))
             except BaseException as exc:
                 await db.rollback()
@@ -242,6 +276,8 @@ class ResponseCacheService:
             memory_count = len(cls._memory_cache)
             return dict(total_entries=count, l2_db_entries=count, memory_entries=memory_count,
                 l1_memory_entries=memory_count, l1_max_size=cls._max_memory_items,
+                l1_memory_bytes=cls._memory_bytes, l1_max_bytes=cls._max_memory_bytes,
+                ttl_seconds=settings.RESPONSE_CACHE_TTL_SECONDS,
                 hits=hits, total_hits=hits, misses=misses, total_misses=misses,
                 hit_rate_percent=rate, hit_rate_pct=rate, tokens_saved=cls._mem_metrics["tokens_saved"],
                 cost_saved_usd=round(cls._mem_metrics["cost_saved_usd"], 4),
@@ -260,4 +296,5 @@ class ResponseCacheService:
                 raise
             cls._generation += 1
             cls._memory_cache.clear()
+            cls._memory_bytes = 0
             return {"message": "Response cache cleared successfully", "generation": cls._generation}

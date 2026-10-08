@@ -172,7 +172,7 @@ class ChatStreamAccumulator:
         self.buffer = self.buffer.replace("\r\n", "\n")
         while "\n\n" in self.buffer:
             event, self.buffer = self.buffer.split("\n\n", 1)
-            raw = "\n".join(line[5:].lstrip() for line in event.splitlines() if line.startswith("data:"))
+            raw = "\n".join(line[5:].lstrip() for line in event.split("\n") if line.startswith("data:"))
             if not raw:
                 continue
             if raw == "[DONE]":

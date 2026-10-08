@@ -715,8 +715,75 @@ class JudgeTestResponse(BaseModel):
     error: Optional[str] = None
 
 # Router API Key
+from pydantic import model_validator
+
+class PeriodQuotaRule(BaseModel):
+    model_config = {"extra": "forbid"}
+    id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    enabled: bool = Field(default=True, strict=True)
+    scope: Literal["key", "model", "profile"] = "key"
+    model: Optional[str] = Field(default=None, min_length=3, max_length=200, pattern=r"^[^\s*/]+/[^\s*]+$")
+    period: Literal["minute", "hour", "day", "week", "month", "custom", "interval"] = "day"
+    duration_seconds: Optional[int] = Field(default=None, strict=True, ge=1, le=315360000)
+    anchor: Optional[datetime] = None
+    start: Optional[datetime] = None
+    end: Optional[datetime] = None
+    requests: Optional[int] = Field(default=None, strict=True, gt=0, le=2147483647)
+    tokens: Optional[int] = Field(default=None, strict=True, gt=0, le=9007199254740991)
+    usd: Optional[float] = Field(default=None, strict=True, gt=0, le=1e12, allow_inf_nan=False)
+
+    @field_validator("anchor", "start", "end", mode="before")
+    @classmethod
+    def aware_date(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value)
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Quota dates must be ISO timestamps with a timezone")
+        try:
+            return value.astimezone(timezone.utc)
+        except OverflowError as exc:
+            raise ValueError("Quota date is outside the supported UTC range") from exc
+
+    @model_validator(mode="after")
+    def valid_rule(self):
+        if not any(v is not None for v in (self.requests, self.tokens, self.usd)):
+            raise ValueError("Provide at least one quota limit")
+        if self.scope == "key" and self.model is not None or self.scope != "key" and self.model is None:
+            raise ValueError("Model/profile scope requires an exact name; key scope has no model")
+        virtual = self.model and self.model.startswith(("route/", "fusion/", "judge/", "smart/"))
+        if self.scope == "profile" and not virtual or self.scope == "model" and virtual:
+            raise ValueError("Use profile scope for requested virtual profiles, model scope for canonical upstream models")
+        if self.model and self.model.startswith("smart/"):
+            self.model = "judge/" + self.model[6:]
+        if self.period == "custom":
+            if self.duration_seconds is None or self.anchor is None:
+                raise ValueError("Custom period requires duration_seconds and a stable UTC anchor")
+        elif self.duration_seconds is not None or self.anchor is not None:
+            raise ValueError("Duration and anchor are only valid for custom periods")
+        if self.period == "interval":
+            if self.start is None or self.end is None or self.start >= self.end:
+                raise ValueError("Interval requires aware start < end")
+        elif self.start is not None or self.end is not None:
+            raise ValueError("Start/end are only valid for intervals")
+        return self
+
+
+def _quota_rules_unique(rules):
+    if rules is None:
+        return rules
+    ids = [r.id for r in rules if r.id]
+    identities = [(r.scope, r.model, r.period, r.duration_seconds, r.anchor, r.start, r.end) for r in rules]
+    if len(ids) != len(set(ids)) or len(identities) != len(set(identities)):
+        raise ValueError("Duplicate quota rule IDs or scope/window")
+    return rules
+
+QuotaRules = Annotated[List[PeriodQuotaRule], Field(max_length=64), AfterValidator(_quota_rules_unique)]
+
 class RouterApiKeyCreate(BaseModel):
     name: str
+    quota_rules: QuotaRules = Field(default_factory=list)
     permissions: List[str] = Field(default_factory=lambda: ["direct", "routes", "fusion", "judge"])
     allowed_models: List[str] = Field(default_factory=lambda: ["*"])
     allowed_routes: List[str] = Field(default_factory=lambda: ["*"])
@@ -730,6 +797,7 @@ class RouterApiKeyCreate(BaseModel):
     notes: Optional[str] = None
 
 class RouterApiKeyUpdate(BaseModel):
+    quota_rules: Optional[QuotaRules] = None
     name: Optional[str] = None
     enabled: Optional[bool] = None
     permissions: Optional[List[str]] = None
@@ -745,6 +813,7 @@ class RouterApiKeyUpdate(BaseModel):
     notes: Optional[str] = None
 
 class RouterApiKeyRead(BaseModel):
+    quota_rules: List[PeriodQuotaRule] = Field(default_factory=list)
     id: int
     name: str
     key_prefix: str
@@ -991,7 +1060,7 @@ class SummaryStats(BaseModel):
     p90_latency_ms: float = 0.0
     p99_latency_ms: float = 0.0
     tokens_per_sec: float = 0.0
-    cached_tokens_cost_saved_usd: float = 0.0
+    cached_tokens_cost_saved_usd: Optional[float] = None
     projected_daily_cost_usd: float = 0.0
     projected_monthly_cost_usd: float = 0.0
 

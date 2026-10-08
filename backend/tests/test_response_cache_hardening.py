@@ -83,7 +83,8 @@ def test_ttl_on_both_levels_and_invalid_ttl(tmp_path):
     async def check():
         async with isolated_cache(tmp_path) as sessions, sessions() as db:
             sig = signature()
-            await Cache.set_response(db, sig, "synthetic", RESPONSE, ttl_seconds=0)
+            with pytest.raises(ValueError):
+                await Cache.set_response(db, sig, "synthetic", RESPONSE, ttl_seconds=0)
             assert await Cache.get_response(db, sig) is None
             await Cache.set_response(db, sig, "synthetic", RESPONSE, ttl_seconds=60)
             Cache._memory_cache[sig]["expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
