@@ -3,7 +3,7 @@ from contextlib import aclosing
 import json
 import time
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Literal, Optional, Tuple
 from pydantic import BaseModel, Field, ConfigDict
 import httpx
 
@@ -70,6 +70,28 @@ class ModuleExecutionContext(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
+class SubscriptionLimit(BaseModel):
+    """Only provider-reported values; missing numbers are not zero/unlimited."""
+    name: str
+    model: Optional[str] = None
+    used_percent: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    remaining_percent: Optional[float] = Field(default=None, ge=0, le=100, allow_inf_nan=False)
+    limit: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    used: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    remaining: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    unit: Optional[str] = None
+    reset_at: Optional[str] = None
+    window_seconds: Optional[int] = Field(default=None, ge=0)
+
+
+class SubscriptionLimits(BaseModel):
+    status: Literal["ok", "unsupported", "unavailable"] = "ok"
+    plan: Optional[str] = None
+    limits: List[SubscriptionLimit] = Field(default_factory=list)
+    message: Optional[str] = None
+    checked_at: Optional[str] = None
+
+
 class BaseModuleAdapter(ABC):
     """
     Base class that all custom modules in `backend/modules/<name>/handler.py` must inherit from.
@@ -119,6 +141,10 @@ class BaseModuleAdapter(ABC):
         Followed by: data: [DONE]\n\n
         """
         pass
+
+    async def get_subscription_limits(self, ctx: ModuleExecutionContext) -> SubscriptionLimits:
+        """Read native subscription quotas for this credential, not router quotas."""
+        return SubscriptionLimits(status="unsupported")
 
     async def close(self) -> None:
         """Release owned subprocesses/resources on reload and application shutdown."""

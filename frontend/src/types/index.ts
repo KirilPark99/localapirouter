@@ -145,6 +145,27 @@ export interface CredentialCreate {
   notes?: string | null;
 }
 
+export interface SubscriptionLimit {
+  name: string;
+  model?: string | null;
+  used_percent?: number | null;
+  remaining_percent?: number | null;
+  limit?: number | null;
+  used?: number | null;
+  remaining?: number | null;
+  unit?: string | null;
+  reset_at?: string | null;
+  window_seconds?: number | null;
+}
+
+export interface SubscriptionLimits {
+  status: "ok" | "unsupported" | "unavailable";
+  plan?: string | null;
+  limits: SubscriptionLimit[];
+  message?: string | null;
+  checked_at?: string | null;
+}
+
 export interface CredentialTestResult {
   success: boolean;
   latency_ms: number;

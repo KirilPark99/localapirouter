@@ -2,12 +2,14 @@ import json
 import time
 import uuid
 import logging
+import math
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
 from app.core.config import settings
-from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_chat_completion
+from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, SubscriptionLimit, SubscriptionLimits, collect_chat_completion
 from app.core.errors import ErrorCategory, RouterException, normalize_upstream_error
 from app.schemas.chat import (
     ChatCompletionRequest,
@@ -58,8 +60,7 @@ class AgyCliAdapter(BaseModuleAdapter):
 
     def __init__(self):
         super().__init__()
-        # In-memory cache for refreshed access tokens: {cache_key: {"access_token": str, "expires_at": float}}
-        self._token_cache: Dict[str, Dict[str, Any]] = {}
+        self._token_cache: Dict[Tuple[Any, str, str], Dict[str, Any]] = {}
 
     def _find_local_token_file(self) -> Optional[Path]:
         for p in LOCAL_TOKEN_PATHS:
@@ -72,9 +73,11 @@ class AgyCliAdapter(BaseModuleAdapter):
         Extract token dictionary from credentials, pasted auth_json, or local file.
         """
         creds = ctx.credentials or {}
+        explicit = any(creds.get(key) for key in ("access_token", "refresh_token", "auth_json", "project_id"))
+        profile_id = ctx.extra_config.get("credential_id")
         auto_detect_raw = creds.get("auto_detect_local")
         if auto_detect_raw is None or auto_detect_raw == "":
-            auto_detect = True
+            auto_detect = not explicit and profile_id is None
         elif isinstance(auto_detect_raw, bool):
             auto_detect = auto_detect_raw
         else:
@@ -86,25 +89,22 @@ class AgyCliAdapter(BaseModuleAdapter):
         project_id = _get_str(creds, "project_id")
         auth_json_str = _get_str(creds, "auth_json")
 
+        if access_token or refresh_token:
+            return {"access_token": access_token, "refresh_token": refresh_token, "project_id": project_id,
+                    "expiry": creds.get("expiry", creds.get("expires_at"))}
+
         if auth_json_str:
             try:
                 parsed = json.loads(auth_json_str)
                 token_inner = parsed.get("token") if isinstance(parsed.get("token"), dict) else parsed
                 return {
-                    "access_token": _clean_str(token_inner.get("access_token")) or access_token,
-                    "refresh_token": _clean_str(token_inner.get("refresh_token")) or refresh_token,
+                    "access_token": _clean_str(token_inner.get("access_token")),
+                    "refresh_token": _clean_str(token_inner.get("refresh_token")),
                     "project_id": project_id or _clean_str(parsed.get("project_id")) or _clean_str(token_inner.get("project_id")),
-                    "expiry": _clean_str(token_inner.get("expiry") or token_inner.get("expires_at")),
+                    "expiry": token_inner.get("expiry", token_inner.get("expires_at")),
                 }
-            except Exception as e:
-                logger.warning(f"Failed to parse pasted auth_json: {e}")
-
-        if access_token or refresh_token:
-            return {
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "project_id": project_id,
-            }
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise ValueError("Invalid Antigravity auth_json") from exc
 
         # 2. Local token auto-detection
         if auto_detect:
@@ -118,7 +118,7 @@ class AgyCliAdapter(BaseModuleAdapter):
                         "access_token": _clean_str(token_inner.get("access_token")),
                         "refresh_token": _clean_str(token_inner.get("refresh_token")),
                         "project_id": project_id or _clean_str(data.get("project_id")) or _clean_str(token_inner.get("project_id")),
-                        "expiry": _clean_str(token_inner.get("expiry") or token_inner.get("expires_at")),
+                        "expiry": token_inner.get("expiry", token_inner.get("expires_at")),
                     }
                 except Exception as e:
                     logger.warning(f"Failed to read local agy token file at {local_path}: {e}")
@@ -132,48 +132,68 @@ class AgyCliAdapter(BaseModuleAdapter):
         raw = self._resolve_raw_tokens(ctx)
         refresh_token = _clean_str(raw.get("refresh_token"))
         access_token = _clean_str(raw.get("access_token"))
-        project_id = _clean_str(raw.get("project_id")) or "aicode-consumers"
-
-        cache_key = refresh_token or access_token
+        project_id = _clean_str(raw.get("project_id"))
+        cache_key = (ctx.extra_config.get("credential_id"), refresh_token, access_token)
         cached = self._token_cache.get(cache_key)
         now = time.time()
         if cached and cached.get("expires_at", 0) > now + 60:
             return cached["access_token"], project_id
 
-        # If we have refresh_token, attempt refresh
-        if refresh_token and AGY_CLIENT_ID and AGY_CLIENT_SECRET:
-            async with self.create_http_client(ctx) as client:
+        expiry = raw.get("expiry")
+        expires_at = None
+        if expiry is not None and expiry != "":
+            try:
+                expires_at = float(expiry)
+            except (ValueError, TypeError):
                 try:
-                    resp = await client.post(
-                        GOOGLE_OAUTH_TOKEN_URL,
-                        data={
-                            "client_id": AGY_CLIENT_ID,
-                            "client_secret": AGY_CLIENT_SECRET,
-                            "grant_type": "refresh_token",
-                            "refresh_token": refresh_token,
-                        },
-                        headers={"Content-Type": "application/x-www-form-urlencoded"},
-                        timeout=15.0,
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        new_access = data.get("access_token")
-                        expires_in = data.get("expires_in", 3600)
-                        if new_access:
-                            self._token_cache[cache_key] = {
-                                "access_token": new_access,
-                                "expires_at": now + expires_in,
-                            }
-                            return new_access, project_id
-                    else:
-                        logger.warning(f"Google OAuth refresh returned HTTP {resp.status_code}: {resp.text[:200]}")
-                except Exception as e:
-                    logger.warning(f"Google OAuth refresh failed: {e}")
-
-        if access_token:
+                    parsed = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        raise ValueError("Token expiry must include a timezone")
+                    expires_at = parsed.timestamp()
+                except (ValueError, TypeError, OverflowError) as exc:
+                    raise ValueError("Invalid Antigravity token expiry") from exc
+            if not math.isfinite(expires_at):
+                raise ValueError("Invalid Antigravity token expiry")
+        if access_token and (expires_at is not None and expires_at > now + 60 or expires_at is None and not refresh_token):
             return access_token, project_id
+        if not refresh_token or not AGY_CLIENT_ID or not AGY_CLIENT_SECRET:
+            if access_token and (expires_at is None or expires_at > now):
+                return access_token, project_id
+            raise ValueError("No usable Antigravity token or OAuth refresh credentials available")
 
-        raise ValueError("No Antigravity CLI token available. Please log in with `agy login` or configure credentials.")
+        async with self.create_http_client(ctx) as client:
+            try:
+                resp = await client.post(
+                    GOOGLE_OAUTH_TOKEN_URL,
+                    data={"client_id": AGY_CLIENT_ID, "client_secret": AGY_CLIENT_SECRET,
+                          "grant_type": "refresh_token", "refresh_token": refresh_token},
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=ctx.timeout,
+                )
+            except httpx.HTTPError as exc:
+                raise normalize_upstream_error(exception=exc) from exc
+        if resp.status_code != 200:
+            if resp.status_code in (400, 401, 403):
+                raise RouterException("Antigravity OAuth refresh rejected", ErrorCategory.AUTH_ERROR,
+                                      upstream_status=resp.status_code)
+            raise normalize_upstream_error(status_code=resp.status_code,
+                                           response_body="Antigravity OAuth refresh rejected")
+        try:
+            data = resp.json()
+            new_access = data.get("access_token")
+            if not isinstance(new_access, str) or not new_access or not new_access.isascii() or any(c.isspace() for c in new_access):
+                raise ValueError("Invalid refreshed access token")
+            expires_in = data.get("expires_in")
+            if expires_in is not None:
+                if isinstance(expires_in, bool):
+                    raise ValueError("Invalid refresh lifetime")
+                lifetime = float(expires_in)
+                if not math.isfinite(lifetime) or lifetime <= 0:
+                    raise ValueError("Invalid refresh lifetime")
+                self._token_cache[cache_key] = {"access_token": new_access, "expires_at": now + lifetime}
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise RouterException("Invalid Antigravity OAuth refresh response", ErrorCategory.UPSTREAM_5XX) from exc
+        return new_access, project_id
 
     def _build_cloudcode_headers(self, access_token: str) -> Dict[str, str]:
         return {
@@ -183,54 +203,91 @@ class AgyCliAdapter(BaseModuleAdapter):
             "Accept": "application/json, text/event-stream",
         }
 
+    async def _load_code_assist(self, ctx: ModuleExecutionContext, access_token: str, project_id: str) -> Tuple[str, Optional[str]]:
+        body: Dict[str, Any] = {"metadata": {"ideType": "ANTIGRAVITY"}}
+        if project_id:
+            body["cloudaicompanionProject"] = project_id
+        async with self.create_http_client(ctx) as client:
+            resp = await client.post(f"{CLOUDCODE_BASE_URLS[0]}/v1internal:loadCodeAssist",
+                                     headers=self._build_cloudcode_headers(access_token), json=body)
+        if resp.status_code != 200:
+            raise normalize_upstream_error(status_code=resp.status_code, response_body="Antigravity bootstrap rejected")
+        data = resp.json()
+        if not isinstance(data, dict) or data.get("error"):
+            raise ValueError("Invalid Antigravity bootstrap response")
+        discovered = data.get("cloudaicompanionProject")
+        if isinstance(discovered, dict):
+            discovered = discovered.get("id")
+        if not isinstance(discovered, str):
+            discovered = ""
+        tier = data.get("paidTier") or data.get("currentTier") or {}
+        plan = (tier.get("name") or tier.get("id")) if isinstance(tier, dict) else None
+        plan = plan if isinstance(plan, str) and plan.strip() else None
+        if not discovered.strip() and not plan:
+            raise ValueError("Antigravity bootstrap returned no project or tier")
+        resolved = project_id or discovered.strip()
+        if not resolved:
+            raise ValueError("Antigravity bootstrap returned no project; onboarding is required")
+        return resolved, plan
+
+    async def get_subscription_limits(self, ctx: ModuleExecutionContext) -> SubscriptionLimits:
+        checked_at = datetime.now(timezone.utc).isoformat()
+        plan = None
+        try:
+            access_token, project_id = await self._get_valid_access_token(ctx)
+            project_id, plan = await self._load_code_assist(ctx, access_token, project_id)
+            async with self.create_http_client(ctx) as client:
+                resp = await client.post(f"{CLOUDCODE_BASE_URLS[0]}/v1internal:fetchAvailableModels",
+                                         headers=self._build_cloudcode_headers(access_token), json={"project": project_id})
+            if resp.status_code != 200:
+                return SubscriptionLimits(status="unavailable", plan=plan, checked_at=checked_at,
+                                          message=f"Antigravity quota request failed (HTTP {resp.status_code})")
+            data = resp.json()
+            models = data.get("models") if isinstance(data, dict) and not data.get("error") else None
+            if not isinstance(models, dict):
+                raise ValueError("Invalid Antigravity models response")
+            limits = []
+            for model, info in models.items():
+                quota = info.get("quotaInfo") if isinstance(info, dict) else None
+                if not isinstance(quota, dict):
+                    continue
+                fraction = quota.get("remainingFraction")
+                remaining = None
+                if isinstance(fraction, (int, float)) and not isinstance(fraction, bool) and 0 <= fraction <= 1 and math.isfinite(fraction):
+                    remaining = fraction * 100
+                reset = quota.get("resetTime")
+                if isinstance(reset, str):
+                    try:
+                        if datetime.fromisoformat(reset.replace("Z", "+00:00")).tzinfo is None:
+                            reset = None
+                    except ValueError:
+                        reset = None
+                else:
+                    reset = None
+                if remaining is not None or reset is not None:
+                    limits.append(SubscriptionLimit(name=model, model=model, remaining_percent=remaining,
+                                                    used_percent=100 - remaining if remaining is not None else None,
+                                                    reset_at=reset))
+            return SubscriptionLimits(status="ok" if limits else "unavailable", plan=plan, limits=limits,
+                                      checked_at=checked_at, message=None if limits else "Antigravity returned no usable native quotas")
+        except Exception as exc:
+            # Provider bodies and token/proxy exception strings must not reach the admin UI.
+            return SubscriptionLimits(status="unavailable", plan=plan, checked_at=checked_at,
+                                      message=f"Antigravity quota lookup failed ({type(exc).__name__})")
+
     async def validate_credentials(
         self,
         ctx: ModuleExecutionContext,
     ) -> Tuple[bool, str, int]:
         try:
             access_token, project_id = await self._get_valid_access_token(ctx)
-            if not access_token:
-                return False, "Failed to resolve valid access token", 0
-
-            # Test identity via userinfo
-            email = None
-            async with self.create_http_client(ctx) as client:
-                resp = await client.get(
-                    GOOGLE_USERINFO_URL,
-                    headers={"Authorization": f"Bearer {access_token}"},
-                    timeout=10.0,
-                )
-                if resp.status_code == 200:
-                    email = resp.json().get("email")
-
-                # Test Code Assist bootstrap / project discovery
-                headers = self._build_cloudcode_headers(access_token)
-                res = await client.post(
-                    f"{CLOUDCODE_BASE_URLS[0]}/v1internal:loadCodeAssist",
-                    headers=headers,
-                    json={"metadata": {"ideType": "ANTIGRAVITY"}},
-                    timeout=10.0,
-                )
-                if res.status_code == 200:
-                    ca_data = res.json()
-                    discovered_proj = ca_data.get("cloudaicompanionProject")
-                    tier = ca_data.get("currentTier", {}).get("name", "Antigravity")
-                    if discovered_proj and not ctx.credentials.get("project_id"):
-                        project_id = discovered_proj
-                    models = await self.list_models(ctx)
-                    return (
-                        True,
-                        f"Antigravity CLI authenticated: {email or 'Google Account'} ({tier}, project: {project_id})",
-                        len(models),
-                    )
-                elif resp.status_code == 200:
-                    models = await self.list_models(ctx)
-                    return True, f"Google OAuth valid for {email}, Cloud Code project: {project_id}", len(models)
-                else:
-                    return False, f"Cloud Code responded with HTTP {res.status_code}: {res.text[:200]}", 0
-
-        except Exception as e:
-            return False, f"Antigravity validation error: {str(e)}", 0
+            project_id, tier = await self._load_code_assist(ctx, access_token, project_id)
+            models = await self.list_models(ctx)
+            return True, f"Antigravity CLI authenticated ({tier or 'unknown tier'}, project: {project_id})", len(models)
+        except RouterException as exc:
+            return False, f"Antigravity validation failed (HTTP {exc.upstream_status or exc.status_code})", 0
+        except Exception as exc:
+            return False, f"Antigravity validation failed ({type(exc).__name__})", 0
 
     async def list_models(
         self,
@@ -258,7 +315,7 @@ class AgyCliAdapter(BaseModuleAdapter):
             role = (m.role or "user").lower()
             text = ("".join(p.get("text", "") for p in m.content if p.get("type") in ("text", "input_text", "output_text"))
                     if isinstance(m.content, list) else str(m.content or ""))
-            if role == "system":
+            if role in ("system", "developer"):
                 if text:
                     system_texts.append(text)
                 continue
@@ -383,6 +440,8 @@ class AgyCliAdapter(BaseModuleAdapter):
     ) -> AsyncGenerator[str, None]:
         try:
             access_token, project_id = await self._get_valid_access_token(ctx)
+            if not project_id:
+                project_id, _ = await self._load_code_assist(ctx, access_token, project_id)
         except RouterException:
             raise
         except ValueError as exc:
@@ -408,6 +467,18 @@ class AgyCliAdapter(BaseModuleAdapter):
                 result["usage"] = usage
             return f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
 
+        async def sse_data(resp):
+            lines = []
+            async for line in resp.aiter_lines():
+                if line.startswith("data:"):
+                    value = line[5:]
+                    lines.append(value[1:] if value.startswith(" ") else value)
+                elif not line and lines:
+                    yield "\n".join(lines)
+                    lines.clear()
+            if lines:
+                yield "\n".join(lines)
+
         async with self.create_http_client(ctx) as client:
             last_err = RouterException("No Cloud Code endpoint available", ErrorCategory.UPSTREAM_5XX)
             for base_url in CLOUDCODE_BASE_URLS:
@@ -425,10 +496,7 @@ class AgyCliAdapter(BaseModuleAdapter):
                                 retry_after = None
                             raise normalize_upstream_error(status_code=resp.status_code, response_body=body, retry_after=retry_after)
 
-                        async for line in resp.aiter_lines():
-                            if not line.startswith("data:"):
-                                continue
-                            raw_data = line[5:].strip()
+                        async for raw_data in sse_data(resp):
                             if raw_data == "[DONE]":
                                 break
                             if not raw_data:

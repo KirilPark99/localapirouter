@@ -32,6 +32,7 @@ import {
 import { apiRequest } from "../api/client";
 import { Credential, Provider, Proxy, CredentialTestResult, PeriodQuotaRule, PeriodQuotaUsage, DiscoveredModel } from "../types";
 import { StatusBadge } from "../components/StatusBadge";
+import { SubscriptionLimitsBadge } from "../components/SubscriptionLimitsBadge";
 import { Modal } from "../components/Modal";
 import { NotesModal } from "../components/NotesModal";
 import { getCountryFlag } from "../utils/country";
@@ -1909,6 +1910,7 @@ export const CredentialsPage: React.FC = () => {
                                                   )}
                                                 </div>
                                               )}
+                                              <SubscriptionLimitsBadge credentialId={c.id} moduleId={provider.configuration?.module_id} name={c.name} />
                                               <div className="text-[10px] text-slate-400">
                                                 Priority {c.priority} • Weight {c.weight}
                                                 {c.rpm_limit ? ` • ${c.rpm_limit} RPM` : ""}
@@ -2051,6 +2053,7 @@ export const CredentialsPage: React.FC = () => {
                                        >
                                          <StickyNote size={13} />
                                        </button>
+
                                        <button
                                          onClick={() => openEditModal(c)}
                                          className="btn-press p-1.5 text-slate-400 hover:text-indigo-300 hover:bg-white/[0.06] rounded-lg transition-colors cursor-pointer"
@@ -2083,6 +2086,7 @@ export const CredentialsPage: React.FC = () => {
           })
         )}
       </div>
+
 
       {/* Modal: Add / Edit Credential */}
       <Modal

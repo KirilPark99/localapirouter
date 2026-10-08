@@ -24,6 +24,7 @@ import { Proxy } from "../types";
 import { Modal } from "../components/Modal";
 import { NotesModal } from "../components/NotesModal";
 import { StatusBadge } from "../components/StatusBadge";
+import { SubscriptionLimitsBadge } from "../components/SubscriptionLimitsBadge";
 import { getCountryFlag } from "../utils/country";
 import { useI18n } from "../i18n";
 
@@ -897,6 +898,8 @@ export const ModulesPage: React.FC = () => {
                               </span>
                             )}
                           </div>
+
+                          <SubscriptionLimitsBadge credentialId={p.id} moduleId={p.module_id} name={p.name} />
 
                           {/* Proxy info */}
                           <div className="flex items-center gap-2 text-xs text-slate-400 mt-1">

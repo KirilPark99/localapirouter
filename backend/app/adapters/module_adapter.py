@@ -73,6 +73,16 @@ class CustomModuleAdapter(BaseProviderAdapter):
         adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout)
         return await adapter.list_models(ctx)
 
+    async def get_subscription_limits(
+        self,
+        api_key: str,
+        configuration: Dict[str, Any],
+        proxy_url: Optional[str] = None,
+        timeout: float = 30.0,
+    ):
+        adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout)
+        return await adapter.get_subscription_limits(ctx)
+
     async def validate_credentials(
         self,
         base_url: str,

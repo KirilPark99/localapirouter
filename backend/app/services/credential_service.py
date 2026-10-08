@@ -356,6 +356,35 @@ class CredentialService:
         return True
 
     @classmethod
+    async def get_subscription_limits(cls, db: AsyncSession, credential_id: int):
+        import asyncio
+        from app.modules.base import SubscriptionLimits
+        cred = await cls.get_credential(db, credential_id)
+        if cred is None:
+            return None
+        provider = cred.provider
+        result = SubscriptionLimits(status="unsupported")
+        if provider.adapter_type.strip().lower() == "custom_module":
+            try:
+                async with asyncio.timeout(30):
+                    result = SubscriptionLimits.model_validate(await get_adapter(provider.adapter_type).get_subscription_limits(
+                        api_key=decrypt_secret(cred.encrypted_api_key),
+                        configuration=cls.module_runtime_configuration(provider, cred),
+                        proxy_url=ProxyService.build_proxy_url(cred.proxy) if cred.proxy else None,
+                        timeout=15.0,
+                    ))
+            except RouterException as exc:
+                # Provider auth failure must not expire the administrator's session.
+                result = SubscriptionLimits(status="unavailable", message=f"Subscription limits unavailable ({exc.category.value}, HTTP {exc.status_code or 502})")
+            except TimeoutError:
+                result = SubscriptionLimits(status="unavailable", message="Subscription limits request timed out")
+            except Exception:
+                # Never forward upstream bodies, credentials or proxy URLs to the UI.
+                result = SubscriptionLimits(status="unavailable", message="Could not read subscription limits")
+        result.checked_at = datetime.now(timezone.utc).isoformat()
+        return result
+
+    @classmethod
     async def test_credential(cls, db: AsyncSession, credential_id: int) -> CredentialTestResult:
         cred = await cls.get_credential(db, credential_id)
         if not cred:

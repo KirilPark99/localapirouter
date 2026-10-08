@@ -6,7 +6,16 @@ from app.api.deps import get_current_admin
 from app.services.credential_service import CredentialService
 from app.schemas.entities import CredentialCreate, CredentialUpdate, CredentialRead, CredentialTestResult, CredentialBulkAssignProxy, CredentialBulkAssignGroup, NotesUpdate
 
+from app.modules.base import SubscriptionLimits
+
 router = APIRouter(prefix="/credentials", tags=["Admin Credentials"])
+
+@router.get("/{credential_id}/subscription-limits", response_model=SubscriptionLimits)
+async def subscription_limits(credential_id: int, username: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
+    result = await CredentialService.get_subscription_limits(db, credential_id)
+    if result is None:
+        raise HTTPException(404, "Credential not found")
+    return result
 
 @router.get("/{credential_id}/usage", response_model=List[dict])
 async def credential_usage(credential_id: int, username: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):

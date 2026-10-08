@@ -2,6 +2,7 @@ import os
 import asyncio
 import hashlib
 from contextlib import aclosing
+from datetime import datetime, timezone
 import json
 import time
 import uuid
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
-from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_chat_completion
+from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, SubscriptionLimit, SubscriptionLimits, collect_chat_completion
 from app.modules.responses import messages_to_input, tool_options, responses_to_chat
 from app.routing.cache_affinity import PrefixAnalyzer
 from app.schemas.chat import (
@@ -26,6 +27,7 @@ logger = logging.getLogger("app.modules.codex_cli")
 
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_CLIENT_VERSION = "0.160.0"
 CODEX_USER_AGENT = f"codex-cli/{CODEX_CLIENT_VERSION} (linux; x86_64)"
@@ -206,6 +208,66 @@ class CodexCliAdapter(BaseModuleAdapter):
         if account_id:
             headers["ChatGPT-Account-Id"] = account_id
         return headers
+
+    async def get_subscription_limits(self, ctx: ModuleExecutionContext) -> SubscriptionLimits:
+        checked_at = datetime.now(timezone.utc).isoformat()
+        try:
+            access_token, account_id = await self._get_valid_access_token(ctx)
+            headers = self._build_headers(access_token, account_id)
+            headers["Accept"] = "application/json"
+            async with self.create_http_client(ctx) as client:
+                resp = await client.get(CODEX_USAGE_URL, headers=headers)
+        except Exception:
+            return SubscriptionLimits(status="unavailable", checked_at=checked_at,
+                                      message="Codex usage authentication or request failed")
+        if resp.status_code != 200:
+            return SubscriptionLimits(status="unsupported" if resp.status_code in (404, 405, 501) else "unavailable",
+                                      checked_at=checked_at, message=f"Codex usage returned HTTP {resp.status_code}")
+        try:
+            # openai/codex rust-v0.160.0: backend-client and codex-backend-openapi-models.
+            data = resp.json()
+            plan = data.get("plan_type")
+            if plan is not None and not isinstance(plan, str):
+                raise ValueError("Invalid plan")
+            groups = [("Codex", data.get("rate_limit"))]
+            for extra in data.get("additional_rate_limits") or []:
+                name = extra["limit_name"]
+                if not isinstance(name, str) or not name:
+                    raise ValueError("Invalid limit name")
+                groups.append((name, extra.get("rate_limit")))
+            limits = []
+            for name, group in groups:
+                if group is None:
+                    continue
+                for kind in ("primary", "secondary"):
+                    window = group.get(f"{kind}_window")
+                    if window is None:
+                        continue
+                    percent = window.get("used_percent")
+                    if percent is None:
+                        continue
+                    if type(percent) not in (int, float):
+                        raise ValueError("Invalid usage")
+                    reset = window.get("reset_at")
+                    if reset is not None and (type(reset) is not int or reset < 0):
+                        raise ValueError("Invalid reset")
+                    limits.append(SubscriptionLimit.model_validate({
+                        "name": f"{name} {kind}", "used_percent": percent,
+                        "remaining_percent": max(0, 100 - percent),
+                        "window_seconds": window.get("limit_window_seconds"),
+                        "reset_at": datetime.fromtimestamp(reset, timezone.utc).isoformat() if reset is not None else None,
+                    }, strict=True))
+            credits = data.get("credits")
+            if credits is not None and credits.get("balance") is not None:
+                balance = credits["balance"]
+                if not isinstance(balance, str):
+                    raise ValueError("Invalid credit balance")
+                limits.append(SubscriptionLimit(name="Credits", remaining=float(balance), unit="credits"))
+            return SubscriptionLimits(status="ok" if limits else "unavailable", plan=plan, limits=limits,
+                                      checked_at=checked_at, message=None if limits else "Codex did not report numeric quotas")
+        except Exception:
+            return SubscriptionLimits(status="unavailable", checked_at=checked_at,
+                                      message="Codex usage response was malformed")
 
     async def validate_credentials(
         self,

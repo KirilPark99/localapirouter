@@ -2,6 +2,7 @@ import os
 import asyncio
 import hashlib
 from contextlib import aclosing
+from datetime import datetime, timezone
 import json
 import time
 import uuid
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
-from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_chat_completion
+from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, SubscriptionLimit, SubscriptionLimits, collect_chat_completion
 from app.modules.responses import messages_to_input, tool_options, responses_to_chat
 from app.schemas.chat import (
     ChatCompletionRequest,
@@ -26,6 +27,7 @@ GROK_TOKEN_URL = "https://auth.x.ai/oauth2/token"
 GROK_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
 GROK_RESPONSES_URL = f"{GROK_PROXY_BASE_URL}/responses"
 GROK_MODELS_URL = f"{GROK_PROXY_BASE_URL}/models"
+GROK_BILLING_URL = f"{GROK_PROXY_BASE_URL}/billing?format=credits"
 
 # Public Grok CLI OAuth Client ID
 GROK_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
@@ -103,6 +105,7 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
                 "access_token": access_token,
                 "refresh_token": refresh_token,
                 "email": _get_str(creds, "email"),
+                "user_id": _get_str(creds, "user_id"),
             }
 
         if auto_detect:
@@ -187,6 +190,72 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
             "Content-Type": "application/json",
             "Accept": "text/event-stream, application/json",
         }
+
+    async def get_subscription_limits(self, ctx: ModuleExecutionContext) -> SubscriptionLimits:
+        checked_at = datetime.now(timezone.utc).isoformat()
+        try:
+            raw = self._resolve_raw_tokens(ctx)
+            access_token, _ = await self._get_valid_access_token(ctx)
+            headers = self._build_headers(access_token)
+            headers["Accept"] = "application/json"
+            if raw.get("user_id"):
+                headers["x-userid"] = raw["user_id"]
+            async with self.create_http_client(ctx) as client:
+                resp = await client.get(GROK_BILLING_URL, headers=headers)
+        except Exception:
+            return SubscriptionLimits(status="unavailable", checked_at=checked_at,
+                                      message="Grok billing authentication or request failed")
+        if resp.status_code != 200:
+            return SubscriptionLimits(status="unsupported" if resp.status_code in (404, 405, 501) else "unavailable",
+                                      checked_at=checked_at, message=f"Grok billing returned HTTP {resp.status_code}")
+        try:
+            # xai-org/grok-build 2bdd1d6a: xai-grok-shell/src/extensions/billing.rs.
+            config = resp.json()["config"]
+            period = config.get("currentPeriod")
+            reset = period.get("end") if period is not None else config.get("billingPeriodEnd")
+            if reset is not None:
+                if not isinstance(reset, str) or datetime.fromisoformat(reset).tzinfo is None:
+                    raise ValueError("Invalid billing reset")
+
+            def cents(key):
+                value = config.get(key)
+                if value is None:
+                    return None
+                # The native Cent schema defaults an omitted proto3 val to zero.
+                value = value.get("val", 0)
+                if type(value) is not int or value < 0:
+                    raise ValueError("Invalid cents")
+                return value
+
+            percent = config.get("creditUsagePercent")
+            if percent is not None and type(percent) not in (int, float):
+                raise ValueError("Invalid usage")
+            limits = []
+            if percent is not None:
+                limits.append(SubscriptionLimit.model_validate({
+                    "name": "Included credits", "used_percent": percent,
+                    "remaining_percent": max(0, 100 - percent), "reset_at": reset,
+                }, strict=True))
+            else:
+                limit, used = cents("monthlyLimit"), cents("used")
+                if limit is not None or used is not None:
+                    limits.append(SubscriptionLimit(name="Included credits", limit=limit, used=used,
+                        remaining=max(0, limit - used) if limit is not None and used is not None else None,
+                        unit="USD cents", reset_at=reset))
+            limit, used = cents("onDemandCap"), cents("onDemandUsed")
+            if limit is not None or used is not None:
+                limits.append(SubscriptionLimit(name="On-demand", limit=limit, used=used,
+                    remaining=max(0, limit - used) if limit is not None and used is not None else None,
+                    unit="USD cents"))
+            prepaid = cents("prepaidBalance")
+            if prepaid is not None:
+                limits.append(SubscriptionLimit(name="Prepaid credits", remaining=prepaid, unit="USD cents"))
+            # subscription_tier in the native CLI is enriched from remote settings, not this response.
+            return SubscriptionLimits(status="ok" if limits else "unavailable", limits=limits, checked_at=checked_at,
+                                      message=None if limits else "Grok did not report numeric quotas")
+        except Exception:
+            return SubscriptionLimits(status="unavailable", checked_at=checked_at,
+                                      message="Grok billing response was malformed")
 
     async def validate_credentials(
         self,
