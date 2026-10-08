@@ -1,6 +1,9 @@
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 import json
+import math
+from decimal import Decimal, DecimalException
 import re
+from urllib.parse import urlparse
 import httpx
 from app.adapters.base import BaseProviderAdapter, DiscoveredModelData
 from app.schemas.chat import (
@@ -9,6 +12,7 @@ from app.schemas.chat import (
     ChatCompletionChoice,
     ChatMessage,
     UsageInfo,
+    openrouter_reasoning_details,
 )
 from app.core.http_client import http_client_manager
 from app.core.errors import RouterException
@@ -43,6 +47,24 @@ def _safe_int(val: Any) -> Optional[int]:
         except (ValueError, TypeError):
             return None
     return None
+
+
+def _price_per_million(value: Any) -> Optional[float]:
+    """Published USD/token → USD/million; invalid or unrepresentable stays unknown."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return None
+    text = str(value).strip()
+    if not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", text):
+        return None
+    try:
+        rate = Decimal(text)
+        if not rate.is_finite() or rate < 0:
+            return None
+        price = float(rate * 1_000_000)
+        # Do not turn positive underflow into a fabricated free tariff.
+        return price if math.isfinite(price) and (price > 0 or rate == 0) else None
+    except (DecimalException, ValueError, OverflowError):
+        return None
 
 
 class GenericOpenAIAdapter(BaseProviderAdapter):
@@ -158,6 +180,8 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
                     if "reasoning" in cap_raw:
                         capabilities["reasoning"] = bool(cap_raw["reasoning"])
 
+                pricing = item.get("pricing")
+                pricing = pricing if isinstance(pricing, dict) else {}
                 models_list.append(
                     DiscoveredModelData(
                         provider_model_id=str(model_id),
@@ -166,6 +190,8 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
                         supported_endpoints=["/chat/completions"],
                         context_length=context_length,
                         max_output_tokens=max_output_tokens,
+                        input_price_per_1m=_price_per_million(pricing.get("prompt")),
+                        output_price_per_1m=_price_per_million(pricing.get("completion")),
                     )
                 )
         return models_list
@@ -196,7 +222,14 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
 
     def _prepare_payload(self, model_id: str, request: ChatCompletionRequest, base_url: str = "") -> Dict[str, Any]:
         if any(d.get("type") == "reasoning" for m in request.messages for d in m.reasoning_details or []):
-            raise self.normalize_error(status_code=400, response_body="Responses reasoning history requires a Responses adapter")
+            if urlparse(base_url).hostname not in ("openrouter.ai", "api.kilo.ai"):
+                raise self.normalize_error(status_code=400, response_body="Responses reasoning history requires a Responses adapter")
+            try:
+                request = request.model_copy(update={"messages": [message.model_copy(update={
+                    "reasoning_details": openrouter_reasoning_details(message.reasoning_details),
+                }) if message.reasoning_details else message for message in request.messages]})
+            except ValueError as exc:
+                raise self.normalize_error(status_code=400, response_body=str(exc)) from exc
         if any(m.is_error is not None or m.cache_control is not None for m in request.messages):
             raise self.normalize_error(status_code=400, response_body="Chat cannot represent Anthropic tool-result or cache metadata")
         payload: Dict[str, Any] = {

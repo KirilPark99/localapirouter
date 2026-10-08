@@ -7,6 +7,7 @@ import pytest
 
 from app.adapters.anthropic import AnthropicAdapter
 from app.adapters.openai import GenericOpenAIAdapter
+from app.core.errors import RouterException
 from app.api.v1.router import (_anthropic_chat_request, _anthropic_payload,
                                _responses_event_stream, _responses_payload)
 from app.core.http_client import http_client_manager
@@ -41,6 +42,73 @@ def test_responses_collected_reasoning_and_detailed_usage():
         "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": 3}}
     response.usage = UsageInfo(prompt_tokens=12)
     assert _responses_payload(response, "resp_fixture")["usage"] == {"input_tokens": 12}
+
+
+@pytest.mark.parametrize('kind,field,target,part_type', [
+    ('reasoning.text','text','content','reasoning_text'),
+    ('reasoning.summary','summary','summary','summary_text'),
+])
+@pytest.mark.asyncio
+async def test_openrouter_plain_reasoning_responses_roundtrip(kind,field,target,part_type):
+    detail = {'type':kind,'id':None,'index':0,field:'aab','signature':None}
+    response = ChatCompletionResponse(model='fixture', choices=[ChatCompletionChoice(
+        message=ChatMessage(role='assistant',content='OK',reasoning_details=[detail]))])
+    item = _responses_payload(response,'resp_fixture')['output'][0]
+    assert item['type']=='reasoning' and item[target]==[{'type':part_type,'text':'aab'}]
+    assert item['summary']==([{'type':'summary_text','text':'aab'}] if target=='summary' else [])
+
+    async def source():
+        for text in ['a','a','b']:
+            yield 'data: '+json.dumps({'choices':[{'delta':{'reasoning_details':[
+                {'type':kind,'index':0,'id':None,field:text,'signature':None}]}}]})+'\n\n'
+        yield 'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+    frames = [f async for f in _responses_event_stream(source(),'fixture','resp_fixture')]
+    events = [json.loads(f.split('\ndata: ')[1]) for f in frames]
+    assert events[-1]['type']=='response.completed'
+    streamed = events[-1]['response']['output'][0]
+    assert streamed[target]==item[target]
+    delta_type = 'response.reasoning_text.delta' if target=='content' else 'response.reasoning_summary_text.delta'
+    deltas = [e for e in events if e['type']==delta_type]
+    assert [e['delta'] for e in deltas]==['a','a','b']
+    assert all(e['item_id']==streamed['id'] for e in deltas)
+    from app.schemas.chat import openrouter_reasoning_details
+    history = ResponsesRequest(model='fixture',input=events[-1]['response']['output']).to_chat_request()
+    raw = openrouter_reasoning_details(history.messages[0].reasoning_details)
+    assert raw[0]['type']==kind and raw[0][field]=='aab'
+    assert history.messages[0].reasoning_details[0]==streamed
+
+
+@pytest.mark.parametrize('detail', [
+    {'type':'reasoning.encrypted','data':'opaque'},
+    {'type':'reasoning.text','text':'plan','signature':'opaque'},
+])
+def test_openrouter_opaque_reasoning_not_silently_converted(detail):
+    response = ChatCompletionResponse(model='fixture',choices=[ChatCompletionChoice(
+        message=ChatMessage(role='assistant',reasoning_details=[detail]))])
+    with pytest.raises(ValueError,match='reasoning'):
+        _responses_payload(response,'resp_fixture')
+    response.choices[0].message.reasoning_details=[{'type':'reasoning.text','text':'plan','data':'opaque'}]
+    with pytest.raises(ValueError,match='reasoning'):
+        _responses_payload(response,'resp_fixture')
+
+
+@pytest.mark.parametrize('base_url',['https://openrouter.ai/api/v1','https://api.kilo.ai/api/gateway'])
+def test_openrouter_plain_history_boundary_preserves_request(base_url):
+    detail={'type':'reasoning','id':'rs_plain','summary':[],
+            'content':[{'type':'reasoning_text','text':'plan'}]}
+    request=ResponsesRequest(model='fixture',input=[detail]).to_chat_request()
+    before=request.model_dump()
+    adapter=GenericOpenAIAdapter()
+    payload=adapter._prepare_payload('fixture',request,base_url)
+    assert payload['messages'][0]['reasoning_details']==[
+        {'type':'reasoning.text','text':'plan','index':0,'id':'rs_plain'}]
+    assert request.model_dump()==before
+    with pytest.raises(RouterException):
+        adapter._prepare_payload('fixture',request,'https://openrouter.ai.fixture.invalid')
+    for opaque in (REASONING, {**detail,'signature':'opaque'}):
+        native=ResponsesRequest(model='fixture',input=[opaque]).to_chat_request()
+        with pytest.raises(RouterException,match='reasoning'):
+            adapter._prepare_payload('fixture',native,base_url)
 
 
 @pytest.mark.asyncio

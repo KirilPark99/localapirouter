@@ -195,11 +195,13 @@ class ChatStreamAccumulator:
                     state["content"].append(delta["content"])
                 if delta.get("reasoning_content"):
                     state["reasoning"].append(delta["reasoning_content"])
-                for detail in delta.get("reasoning_details") or []:
-                    target = state["reasoning_details"].setdefault(detail.get("index", 0), {})
+                for position, detail in enumerate(delta.get("reasoning_details") or []):
+                    target = state["reasoning_details"].setdefault(detail.get("index", position), {})
                     for key, value in detail.items():
-                        if key in ("thinking", "signature"):
+                        if key in ("thinking", "signature", "text", "summary") and isinstance(value, str):
                             target[key] = target.get(key, "") + value
+                        elif value is None and key in ("text", "summary", "signature"):
+                            continue
                         else:
                             target[key] = value
                 if choice.get("finish_reason"):

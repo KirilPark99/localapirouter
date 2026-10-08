@@ -92,6 +92,7 @@ class CredentialService:
 
         return CredentialRead(
             id=c.id,
+            quota_rules=c.quota_rules or [],
             provider_id=c.provider_id,
             provider_name=c.provider.name,
             name=c.name,
@@ -164,6 +165,8 @@ class CredentialService:
             encrypted_key = encrypt_secret("no-key")
             masked = "(Keyless / No Auth)"
 
+        from app.services.api_key_service import ApiKeyService
+        rules = ApiKeyService._prepare_rules(getattr(data, "quota_rules", []), [])
         raw_group = getattr(data, "group_name", None)
         cred = ProviderCredential(
             provider_id=data.provider_id,
@@ -183,6 +186,7 @@ class CredentialService:
             notes=getattr(data, "notes", None),
             consecutive_failures=0,
             metadata_json={},
+            quota_rules=rules,
         )
         db.add(cred)
         await db.commit()
@@ -206,6 +210,11 @@ class CredentialService:
         if not cred:
             return None
 
+        if "quota_rules" in data.model_fields_set:
+            from app.services.api_key_service import ApiKeyService
+            from app.services.quota_service import lock_key
+            cred = await lock_key(db, credential_id, ProviderCredential)
+            cred.quota_rules = ApiKeyService._prepare_rules(data.quota_rules or [], cred.quota_rules or [])
         if data.name is not None:
             cred.name = data.name
         if "group_name" in data.model_fields_set:

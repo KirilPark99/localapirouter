@@ -21,6 +21,8 @@ class DiscoveredModelData(BaseModel):
     supported_endpoints: List[str] = Field(default_factory=lambda: ["/chat/completions"])
     context_length: Optional[int] = None
     max_output_tokens: Optional[int] = None
+    input_price_per_1m: Optional[float] = None
+    output_price_per_1m: Optional[float] = None
 
 class BaseProviderAdapter(ABC):
     @abstractmethod

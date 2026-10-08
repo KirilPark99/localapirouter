@@ -30,16 +30,19 @@ import {
   StickyNote,
 } from "lucide-react";
 import { apiRequest } from "../api/client";
-import { Credential, Provider, Proxy, CredentialTestResult } from "../types";
+import { Credential, Provider, Proxy, CredentialTestResult, PeriodQuotaRule, PeriodQuotaUsage, DiscoveredModel } from "../types";
 import { StatusBadge } from "../components/StatusBadge";
 import { Modal } from "../components/Modal";
 import { NotesModal } from "../components/NotesModal";
 import { getCountryFlag } from "../utils/country";
 import { BackupExportModal, BackupImportModal } from "../components/BackupModals";
 import { useI18n } from "../i18n";
+import { QuotaEditor, quotaSummary } from "../components/QuotaEditor";
+import { credentialQuotaTranslations } from "../i18n/quotaTranslations";
 
 export const CredentialsPage: React.FC = () => {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
+  const q = credentialQuotaTranslations[language === "ru" ? "ru" : "en"];
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [proxies, setProxies] = useState<Proxy[]>([]);
@@ -49,6 +52,29 @@ export const CredentialsPage: React.FC = () => {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [editingCred, setEditingCred] = useState<Credential | null>(null);
+  const [formQuotas, setFormQuotas] = useState<PeriodQuotaRule[]>([]);
+  const [quotaUsage, setQuotaUsage] = useState<PeriodQuotaUsage[]>([]);
+  const [usageError, setUsageError] = useState("");
+  const [quotaModels, setQuotaModels] = useState<DiscoveredModel[]>([]);
+  const [catalogError, setCatalogError] = useState(false);
+
+  useEffect(() => {
+    if (!isModalOpen) return;
+    let cancelled = false;
+    apiRequest<DiscoveredModel[]>("/api/admin/models").then(models => {
+      if (!cancelled) { setQuotaModels(models); setCatalogError(false); }
+    }).catch(() => { if (!cancelled) setCatalogError(true); });
+    return () => { cancelled = true; };
+  }, [isModalOpen]);
+
+  const loadQuotaUsage = async (id: number) => {
+    setUsageError("");
+    try {
+      setQuotaUsage(await apiRequest<PeriodQuotaUsage[]>(`/api/admin/credentials/${id}/usage`));
+    } catch (err: any) {
+      setUsageError(err.message);
+    }
+  };
 
   const [formProviderId, setFormProviderId] = useState<number>(1);
   const [formName, setFormName] = useState("");
@@ -60,6 +86,11 @@ export const CredentialsPage: React.FC = () => {
   const [formRpm, setFormRpm] = useState<string>("");
   const [formNotes, setFormNotes] = useState<string>("");
   const [isKeyless, setIsKeyless] = useState(false);
+
+  const quotaCatalog = {
+    models: [...new Set(quotaModels.filter(model => model.provider_id === formProviderId).map(model => model.canonical_slug))].sort(),
+    profiles: [],
+  };
 
   // Notes Modal state
   const [notesModalOpen, setNotesModalOpen] = useState(false);
@@ -418,6 +449,9 @@ export const CredentialsPage: React.FC = () => {
 
   const openCreateModal = (defaultProviderId?: number, defaultGroupName?: string) => {
     setEditingCred(null);
+    setFormQuotas([]);
+    setQuotaUsage([]);
+    setUsageError("");
     const pid = defaultProviderId ?? (providers.length > 0 ? providers[0].id : 1);
     setFormProviderId(pid);
     const prov = providers.find((p) => p.id === pid);
@@ -435,6 +469,9 @@ export const CredentialsPage: React.FC = () => {
 
   const openEditModal = (c: Credential) => {
     setEditingCred(c);
+    setFormQuotas((c.quota_rules || []).map(rule => ({ ...rule })));
+    setQuotaUsage([]);
+    loadQuotaUsage(c.id);
     setFormProviderId(c.provider_id);
     setFormName(c.name);
     setFormGroupName(c.group_name ?? "");
@@ -524,7 +561,7 @@ export const CredentialsPage: React.FC = () => {
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const finalApiKey = isKeyless ? "no-key" : (formApiKey ? formApiKey.trim() : undefined);
+      const finalApiKey = isKeyless ? "no-key" : (formApiKey.trim() || undefined);
       const finalGroupName = formGroupName.trim() || null;
       const finalNotes = formNotes.trim() || null;
       if (editingCred) {
@@ -539,6 +576,7 @@ export const CredentialsPage: React.FC = () => {
             weight: formWeight,
             rpm_limit: formRpm ? parseInt(formRpm) : null,
             notes: finalNotes,
+            quota_rules: formQuotas,
           }),
         });
       } else {
@@ -554,6 +592,7 @@ export const CredentialsPage: React.FC = () => {
             weight: formWeight,
             rpm_limit: formRpm ? parseInt(formRpm) : null,
             notes: finalNotes,
+            quota_rules: formQuotas,
           }),
         });
       }
@@ -1874,6 +1913,9 @@ export const CredentialsPage: React.FC = () => {
                                                 Priority {c.priority} • Weight {c.weight}
                                                 {c.rpm_limit ? ` • ${c.rpm_limit} RPM` : ""}
                                               </div>
+                                              <div className="mt-1 max-w-xs space-y-1 text-[11px] text-indigo-200 break-words" aria-label={q.title}>
+                                                {(c.quota_rules || []).length ? c.quota_rules!.map((rule, index) => <div key={rule.id || index} className={rule.enabled ? "" : "text-slate-500"}>{quotaSummary(rule, q)}</div>) : q.unlimited}
+                                              </div>
                                               {c.notes && (
                                                 <button
                                                   type="button"
@@ -2047,8 +2089,10 @@ export const CredentialsPage: React.FC = () => {
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         title={editingCred ? t.credentials.editKey : t.credentials.addKey}
+        maxWidth="2xl"
       >
         <form onSubmit={handleSave} className="space-y-4">
+          <QuotaEditor q={q} formQuotas={formQuotas} setFormQuotas={setFormQuotas} quotaUsage={quotaUsage} usageError={usageError} quotaCatalog={quotaCatalog} catalogError={catalogError} allowProfiles={false} onRefresh={editingCred ? () => loadQuotaUsage(editingCred.id) : undefined} />
           <div>
             <label className="block text-xs font-medium text-slate-300 mb-1">{t.common.provider}</label>
             <select

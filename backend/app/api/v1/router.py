@@ -718,7 +718,9 @@ async def _native_chat_stream(source, model):
                     changed = {k: (v[len(prior.get(k, "")):] if k in ("thinking", "signature") else v)
                                for k, v in detail.items() if prior.get(k) != v}
                     if changed:
-                        details.append({"type": detail.get("type"), "index": index, **changed})
+                        details.append({"index": index, **detail} if detail.get("type") in
+                                       ("reasoning.text", "reasoning.summary") else
+                                       {"type": detail.get("type"), "index": index, **changed})
                 if details:
                     delta["reasoning_details"] = details
                 calls = []
@@ -940,15 +942,31 @@ def _anthropic_chat_request(body):
         tools=converted, tool_choice=choice, parallel_tool_calls=parallel, thinking=thinking)
 
 
+def _responses_reasoning_item(detail: dict, item_id: Optional[str] = None) -> dict:
+    kind = detail.get("type")
+    if kind == "reasoning":
+        return {k: v for k, v in detail.items() if k != "index"}
+    if kind not in ("reasoning.text", "reasoning.summary") or detail.get("signature") not in (None, ""):
+        raise ValueError("Unsupported Responses reasoning detail type or signature")
+    field = "text" if kind == "reasoning.text" else "summary"
+    if set(detail) - {"type", "id", "index", "format", "signature", field}:
+        raise ValueError("Unsupported Responses reasoning detail fields")
+    text = detail.get(field)
+    if text is not None and not isinstance(text, str):
+        raise ValueError("Invalid Responses reasoning text")
+    item = {"id": item_id or detail.get("id") or f"rs_{uuid.uuid4().hex[:16]}",
+            "type": "reasoning", "summary": []}
+    item["content" if field == "text" else "summary"] = [
+        {"type": "reasoning_text" if field == "text" else "summary_text", "text": text or ""}]
+    return item
+
+
 def _responses_payload(response: ChatCompletionResponse, response_id: str) -> dict:
     message = response.choices[0].message if response.choices else None
     text = message.content if message else ""
     finish = response.choices[0].finish_reason if response.choices else None
     terminal = "incomplete" if finish == "length" else "completed"
-    if message and any(detail.get("type") != "reasoning" for detail in message.reasoning_details or []):
-        raise ValueError("Unsupported Responses reasoning detail type")
-    output = [{k: v for k, v in detail.items() if k != "index"}
-              for detail in (message.reasoning_details or []) if detail.get("type") == "reasoning"] if message else []
+    output = [_responses_reasoning_item(detail) for detail in message.reasoning_details or []] if message else []
     if message and message.reasoning_content and not output:
         output.append({"id": f"rs_{uuid.uuid4().hex[:16]}", "type": "reasoning",
                        "summary": [{"type": "summary_text", "text": message.reasoning_content}]})
@@ -1023,27 +1041,34 @@ async def _responses_event_stream(source: AsyncGenerator[str, None], model: str,
                     reasoning_item["summary"][0]["text"] += reasoning
                     details = [reasoning_item]
                 for detail in details:
-                    if detail.get("type") != "reasoning":
-                        raise ValueError("Unsupported Responses reasoning detail type")
                     key = detail.get("index", 0)
+                    existing = output[reasoning_items[key]] if key in reasoning_items else None
+                    detail = _responses_reasoning_item(detail, existing["id"] if existing else None)
                     if key not in reasoning_items:
                         reasoning_items[key] = len(output)
                         item = {"id": detail["id"], "type": "reasoning", "summary": []}
                         output.append(item)
                         yield event("response.output_item.added", output_index=reasoning_items[key], item=item)
                     item = output[reasoning_items[key]]
-                    for summary_index, part in enumerate(detail.get("summary") or []):
-                        previous = item.get("summary") or []
-                        old_text = previous[summary_index]["text"] if summary_index < len(previous) else ""
-                        if summary_index >= len(previous):
-                            yield event("response.reasoning_summary_part.added", output_index=reasoning_items[key], item_id=item["id"], summary_index=summary_index, part={"type": "summary_text", "text": ""})
-                        if not part["text"].startswith(old_text):
-                            raise ValueError("Upstream reasoning summary changed after streaming")
-                        suffix = part["text"][len(old_text):]
-                        if suffix:
-                            yield event("response.reasoning_summary_text.delta", item_id=item["id"], output_index=reasoning_items[key], summary_index=summary_index, delta=suffix)
+                    for field, part_event, text_event, index_key in (
+                        ("summary", "response.reasoning_summary_part", "response.reasoning_summary_text", "summary_index"),
+                        ("content", "response.content_part", "response.reasoning_text", "content_index"),
+                    ):
+                        for part_index, part in enumerate(detail.get(field) or []):
+                            previous = item.get(field) or []
+                            old_text = previous[part_index]["text"] if part_index < len(previous) else ""
+                            fields = {"output_index": reasoning_items[key], "item_id": item["id"], index_key: part_index}
+                            if part_index >= len(previous):
+                                yield event(part_event + ".added", **fields, part={"type": part["type"], "text": ""})
+                            if not part["text"].startswith(old_text):
+                                raise ValueError("Upstream reasoning text changed after streaming")
+                            suffix = part["text"][len(old_text):]
+                            if suffix:
+                                yield event(text_event + ".delta", **fields, delta=suffix)
                     item.update({k: v for k, v in detail.items() if k != "index"})
-                    item["summary"] = [dict(part) for part in item.get("summary") or []]
+                    for field in ("summary", "content"):
+                        if field in item:
+                            item[field] = [dict(part) for part in item[field] or []]
                 text = delta.get("content")
                 if text:
                     if text_item is None:
@@ -1090,9 +1115,14 @@ async def _responses_event_stream(source: AsyncGenerator[str, None], model: str,
         if item["type"] != "reasoning":
             item["status"] = "incomplete" if finish == "length" else "completed"
         if item["type"] == "reasoning":
-            for summary_index, part in enumerate(item.get("summary") or []):
-                yield event("response.reasoning_summary_text.done", item_id=item["id"], output_index=index, summary_index=summary_index, text=part["text"])
-                yield event("response.reasoning_summary_part.done", item_id=item["id"], output_index=index, summary_index=summary_index, part=part)
+            for field, part_event, text_event, index_key in (
+                ("summary", "response.reasoning_summary_part", "response.reasoning_summary_text", "summary_index"),
+                ("content", "response.content_part", "response.reasoning_text", "content_index"),
+            ):
+                for part_index, part in enumerate(item.get(field) or []):
+                    fields = {"item_id": item["id"], "output_index": index, index_key: part_index}
+                    yield event(text_event + ".done", **fields, text=part["text"])
+                    yield event(part_event + ".done", **fields, part=part)
         elif item["type"] == "function_call":
             yield event("response.function_call_arguments.done", item_id=item["id"], output_index=index, name=item["name"], arguments=item["arguments"])
         else:

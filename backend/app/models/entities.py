@@ -90,6 +90,7 @@ class ProviderCredential(Base, TimestampMixin):
     max_concurrency: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    quota_rules: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, default=list, server_default="[]", nullable=False)
 
     provider: Mapped["Provider"] = relationship("Provider", back_populates="credentials")
     proxy: Mapped[Optional["Proxy"]] = relationship("Proxy", back_populates="credentials")
@@ -109,8 +110,8 @@ class DiscoveredModel(Base, TimestampMixin):
     supported_endpoints: Mapped[List[str]] = mapped_column(JSON, default=list, nullable=False)
     context_length: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     max_output_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    input_price_per_1m: Mapped[Optional[float]] = mapped_column(Float, default=0.0, nullable=True)
-    output_price_per_1m: Mapped[Optional[float]] = mapped_column(Float, default=0.0, nullable=True)
+    input_price_per_1m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    output_price_per_1m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_visible: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -320,6 +321,23 @@ class PeriodQuotaReservation(Base):
     __tablename__ = "period_quota_reservations"
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     key_id: Mapped[int] = mapped_column(ForeignKey("router_api_keys.id", ondelete="CASCADE"), nullable=False, index=True)
+    allocations: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    prices: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
+    settled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+class CredentialPeriodQuotaCounter(Base):
+    __tablename__ = "credential_period_quota_counters"
+    key_id: Mapped[int] = mapped_column(ForeignKey("provider_credentials.id", ondelete="CASCADE"), primary_key=True)
+    rule_identity: Mapped[str] = mapped_column(String(64), primary_key=True)
+    window_start: Mapped[str] = mapped_column(String(40), primary_key=True)
+    requests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    usd: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+
+class CredentialPeriodQuotaReservation(Base):
+    __tablename__ = "credential_period_quota_reservations"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    key_id: Mapped[int] = mapped_column(ForeignKey("provider_credentials.id", ondelete="CASCADE"), nullable=False, index=True)
     allocations: Mapped[List[Dict[str, Any]]] = mapped_column(JSON, nullable=False)
     prices: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
     settled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

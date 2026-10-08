@@ -14,11 +14,13 @@ from app.core.database import AsyncSessionLocal
 from app.core.errors import RouterException
 from app.core.http_client import http_client_manager
 from app.models.entities import (DiscoveredModel, FusionProfile, FusionParticipant,
-    JudgeProfile, JudgeCandidate, PeriodQuotaReservation)
+    JudgeProfile, JudgeCandidate, PeriodQuotaReservation, ProviderCredential,
+    CredentialPeriodQuotaReservation)
 from app.routing.engine import RoutingEngine
 from app.schemas.chat import ChatCompletionRequest, ChatMessage
-from app.schemas.entities import RouterApiKeyCreate, PeriodQuotaRule
+from app.schemas.entities import RouterApiKeyCreate, PeriodQuotaRule, CredentialUpdate
 from app.services.api_key_service import ApiKeyService
+from app.services.credential_service import CredentialService
 from app.services.quota_service import QuotaService
 from test_request_log_telemetry import seed
 
@@ -93,6 +95,10 @@ async def test_api_counts_every_physical_dispatch_and_settles_usage(monkeypatch,
         await db.commit()
         alias=model.canonical_slug if mode=='direct' else mode+'/'+slug+'-'+mode
         rules=[PeriodQuotaRule(requests=3,tokens=100000,usd=1),PeriodQuotaRule(scope='model',model=model.canonical_slug,requests=count,tokens=100000,usd=1)]
+        await CredentialService.update_credential(db, model.credential_id, CredentialUpdate(quota_rules=[
+            PeriodQuotaRule(requests=count,tokens=100000,usd=1),
+            PeriodQuotaRule(scope='model',model=model.canonical_slug,requests=count,tokens=100000,usd=1)]))
+        credential=await db.get(ProviderCredential, model.credential_id)
         if mode!='direct':
             rules.append(PeriodQuotaRule(scope='profile',model=alias,requests=3,tokens=100000,usd=1))
         created=await ApiKeyService.create_key(db,RouterApiKeyCreate(name=slug,quota_rules=rules))
@@ -115,6 +121,11 @@ async def test_api_counts_every_physical_dispatch_and_settles_usage(monkeypatch,
                 assert stats[2]['used']['requests']==1
             reservations=(await db.scalars(select(PeriodQuotaReservation).where(PeriodQuotaReservation.key_id==key.id))).all()
             assert len(reservations)==count and all(row.settled for row in reservations)
+            provider_stats=await QuotaService.usage(db,credential)
+            assert len(provider_stats)==2
+            assert all(row['used']=={'requests':count,'tokens':count*12,'usd':pytest.approx(count*.000014)} for row in provider_stats)
+            provider_reservations=(await db.scalars(select(CredentialPeriodQuotaReservation).where(CredentialPeriodQuotaReservation.key_id==credential.id))).all()
+            assert len(provider_reservations)==count and all(row.settled for row in provider_reservations)
             # A real local response-cache HIT consumes a logical request, not more tokens.
             if mode=='direct':
                 response=await client.post('/v1/'+endpoint,json=body)
@@ -144,6 +155,8 @@ async def test_native_decision_api_is_metered(monkeypatch):
         await db.commit()
         rules=[PeriodQuotaRule(requests=1,tokens=10000,usd=1),
             PeriodQuotaRule(scope='model',model=model.canonical_slug,requests=1,tokens=10000,usd=1)]
+        await CredentialService.update_credential(db,model.credential_id,CredentialUpdate(quota_rules=rules))
+        credential=await db.get(ProviderCredential,model.credential_id)
         created=await ApiKeyService.create_key(db,RouterApiKeyCreate(name=slug,quota_rules=rules))
         key=await ApiKeyService.get_key(db,created.id)
         app.dependency_overrides[get_inference_key_dep]=lambda:key
@@ -153,5 +166,120 @@ async def test_native_decision_api_is_metered(monkeypatch):
             assert response.status_code==200,response.text
             stats=await QuotaService.usage(db,key)
             assert all(row['used']=={'requests':1,'tokens':12,'usd':pytest.approx(.000014)} for row in stats)
+            assert all(row['used']=={'requests':1,'tokens':12,'usd':pytest.approx(.000014)} for row in await QuotaService.usage(db,credential))
             assert (await client.post('/v1/systemone',json=body)).status_code==429
             assert calls==[True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stream',[False,True])
+@pytest.mark.parametrize('fallback',[False,True])
+async def test_provider_quota_gates_dispatch_and_preserves_key_fallback(monkeypatch,stream,fallback):
+    from fastapi import FastAPI
+    from app.core.crypto import encrypt_secret
+    from app.core.circuit_breaker import circuit_breaker
+    app=FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_inference_key_dep]=lambda:None
+    calls=[]
+    def upstream(req):
+        calls.append(req.headers['authorization'])
+        if stream:
+            return httpx.Response(200,text='data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+        return httpx.Response(200,json={'choices':[{'message':{'role':'assistant','content':'ok'},'finish_reason':'stop'}]})
+    async with AsyncSessionLocal() as db, httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as provider_client:
+        slug=await seed(db)
+        model=await db.scalar(select(DiscoveredModel).where(DiscoveredModel.canonical_slug==slug))
+        primary=await CredentialService.get_credential(db,model.credential_id)
+        await CredentialService.update_credential(db,primary.id,CredentialUpdate(quota_rules=[PeriodQuotaRule(requests=1)]))
+        ticket,_=await QuotaService.reserve_dispatch(primary.provider,model,ChatCompletionRequest(model=slug,messages=[ChatMessage(role='user',content='pre-used')]),credential=primary)
+        await ticket.finish({'prompt_tokens':0,'completion_tokens':0})
+        before=circuit_breaker.get_status(primary.id)
+        if fallback:
+            secondary=ProviderCredential(provider_id=primary.provider_id,name=slug+'-second',priority=primary.priority+1,
+                encrypted_api_key=encrypt_secret('synthetic-second'),key_fingerprint=slug+'-second',masked_key='synthetic')
+            db.add(secondary)
+            await db.commit()
+            await CredentialService.update_credential(db,secondary.id,CredentialUpdate(quota_rules=[PeriodQuotaRule(requests=1)]))
+        monkeypatch.setattr(http_client_manager,'get_client',AsyncMock(return_value=provider_client))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture') as client:
+            response=await client.post('/v1/chat/completions',json={'model':slug,'stream':stream,'messages':[{'role':'user','content':'fallback '+slug}]})
+            if fallback:
+                assert response.status_code==200 and '"error"' not in response.text,response.text
+                assert calls==['Bearer synthetic-second']
+                assert (await QuotaService.usage(db,secondary))[0]['used']['requests']==1
+            else:
+                assert not calls
+                assert response.status_code==429 or 'Period requests quota reached' in response.text
+            assert (await QuotaService.usage(db,primary))[0]['used']['requests']==1
+            assert circuit_breaker.get_status(primary.id)==before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stream',[False,True])
+async def test_provider_quota_does_not_charge_a_local_cache_hit(monkeypatch,stream):
+    from fastapi import FastAPI
+    app=FastAPI()
+    app.include_router(router)
+    calls=[]
+    usage={'prompt_tokens':10,'completion_tokens':2,'total_tokens':12}
+    def upstream(req):
+        calls.append(True)
+        if stream:
+            return httpx.Response(200,text='data: '+json.dumps({'choices':[{'index':0,'delta':{'content':'ok'},'finish_reason':'stop'}],'usage':usage})+'\n\ndata: [DONE]\n\n')
+        return httpx.Response(200,json={'choices':[{'message':{'role':'assistant','content':'ok'},'finish_reason':'stop'}],'usage':usage})
+    async with AsyncSessionLocal() as db, httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as provider_client:
+        slug=await seed(db)
+        model=await db.scalar(select(DiscoveredModel).where(DiscoveredModel.canonical_slug==slug))
+        await CredentialService.update_credential(db,model.credential_id,CredentialUpdate(quota_rules=[PeriodQuotaRule(requests=1)]))
+        credential=await db.get(ProviderCredential,model.credential_id)
+        created=await ApiKeyService.create_key(db,RouterApiKeyCreate(name=slug,quota_rules=[PeriodQuotaRule(requests=3)]))
+        key=await ApiKeyService.get_key(db,created.id)
+        app.dependency_overrides[get_inference_key_dep]=lambda:key
+        monkeypatch.setattr(http_client_manager,'get_client',AsyncMock(return_value=provider_client))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture') as client:
+            body={'model':slug,'stream':stream,'temperature':0,'messages':[{'role':'user','content':'cached '+slug}]}
+            for _ in range(2):
+                response=await client.post('/v1/chat/completions',json=body)
+                assert response.status_code==200 and '"error"' not in response.text,response.text
+            assert response.headers['x-cache']=='HIT'
+            assert calls==[True]
+            assert (await QuotaService.usage(db,credential))[0]['used']['requests']==1
+            assert (await QuotaService.usage(db,key))[0]['used']['requests']==2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stream',[False,True])
+@pytest.mark.parametrize('limit',[1,2])
+async def test_provider_quota_counts_and_bounds_retries_without_router_key(monkeypatch,stream,limit):
+    from fastapi import FastAPI
+    from app.models.entities import RoutingProfile
+    app=FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_inference_key_dep]=lambda:None
+    calls=[]
+    def upstream(req):
+        calls.append(True)
+        if len(calls)==1:
+            return httpx.Response(503,json={'error':{'message':'synthetic retry'}})
+        if stream:
+            return httpx.Response(200,text='data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+        return httpx.Response(200,json={'choices':[{'message':{'role':'assistant','content':'ok'},'finish_reason':'stop'}]})
+    async with AsyncSessionLocal() as db, httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as provider_client:
+        slug=await seed(db)
+        model=await db.scalar(select(DiscoveredModel).where(DiscoveredModel.canonical_slug==slug))
+        route=await db.scalar(select(RoutingProfile).where(RoutingProfile.slug==slug+'-route'))
+        route.retry_count=1
+        await db.commit()
+        await CredentialService.update_credential(db,model.credential_id,CredentialUpdate(quota_rules=[PeriodQuotaRule(requests=limit)]))
+        credential=await db.get(ProviderCredential,model.credential_id)
+        monkeypatch.setattr(http_client_manager,'get_client',AsyncMock(return_value=provider_client))
+        monkeypatch.setattr(RoutingEngine,'_pause_retry',AsyncMock(return_value=True))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture') as client:
+            response=await client.post('/v1/chat/completions',json={'model':'route/'+route.slug,'stream':stream,'messages':[{'role':'user','content':'retry '+slug}]})
+            assert len(calls)==limit
+            assert (await QuotaService.usage(db,credential))[0]['used']['requests']==limit
+            if limit==2:
+                assert response.status_code==200 and '"error"' not in response.text,response.text
+            else:
+                assert response.status_code==429 or 'Period requests quota reached' in response.text

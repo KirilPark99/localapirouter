@@ -5,9 +5,12 @@ import { RouterApiKey, RouterApiKeyCreated, PeriodQuotaRule, PeriodQuotaUsage } 
 import { Modal } from "../components/Modal";
 import { NotesModal } from "../components/NotesModal";
 import { useI18n } from "../i18n/context";
+import { quotaTranslations } from "../i18n/quotaTranslations";
+import { QuotaEditor, quotaSummary } from "../components/QuotaEditor";
 
 export const ApiKeysPage: React.FC = () => {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
+  const q = quotaTranslations[language === "ru" ? "ru" : "en"];
   const [keys, setKeys] = useState<RouterApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -31,6 +34,27 @@ export const ApiKeysPage: React.FC = () => {
 
   const [createdKeyData, setCreatedKeyData] = useState<RouterApiKeyCreated | null>(null);
   const [copied, setCopied] = useState(false);
+  const [quotaCatalog, setQuotaCatalog] = useState<{ models: string[]; profiles: string[] }>({ models: [], profiles: [] });
+  const [catalogError, setCatalogError] = useState(false);
+
+  useEffect(() => {
+    if (!isModalOpen) return;
+    let cancelled = false;
+    Promise.allSettled([
+      apiRequest<{ canonical_slug: string }[]>("/api/admin/models"),
+      apiRequest<{ slug: string }[]>("/api/admin/routes"),
+      apiRequest<{ slug: string }[]>("/api/admin/fusion"),
+      apiRequest<{ slug: string }[]>("/api/admin/judges"),
+    ]).then(([models, ...profiles]) => {
+      if (cancelled) return;
+      setQuotaCatalog({
+        models: [...new Set(models.status === "fulfilled" ? models.value.map(model => model.canonical_slug) : [])].sort(),
+        profiles: profiles.flatMap((result, index) => result.status === "fulfilled" ? result.value.map(profile => `${["route", "fusion", "judge"][index]}/${profile.slug}`) : []).sort(),
+      });
+      setCatalogError(models.status === "rejected" || profiles.some(result => result.status === "rejected"));
+    });
+    return () => { cancelled = true; };
+  }, [isModalOpen]);
 
   const loadKeys = async () => {
     setLoading(true);
@@ -85,10 +109,6 @@ export const ApiKeysPage: React.FC = () => {
     setQuotaUsage([]);
     setIsModalOpen(true);
     loadQuotaUsage(key.id);
-  };
-
-  const changeQuota = (index: number, patch: Partial<PeriodQuotaRule>) => {
-    setFormQuotas(previous => previous.map((rule, i) => i === index ? { ...rule, ...patch } : rule));
   };
 
   const openNotesModal = (k: RouterApiKey) => {
@@ -240,14 +260,14 @@ export const ApiKeysPage: React.FC = () => {
       )}
 
       {/* Keys Table */}
-      <div className="glass-card card-specular rounded-2xl border border-white/[0.07] overflow-hidden shadow-xl">
+      <div className="glass-card card-specular rounded-2xl border border-white/[0.07] overflow-x-auto shadow-xl">
         <table className="w-full text-left border-collapse text-xs">
           <thead>
             <tr className="border-b border-white/[0.06] bg-white/[0.02] text-slate-400 font-semibold uppercase tracking-wider text-[10px] font-mono">
               <th className="py-3.5 px-4">{t.keys.keyName}</th>
               <th className="py-3.5 px-4">{t.common.details}</th>
               <th className="py-3.5 px-4">{t.common.status}</th>
-              <th className="py-3.5 px-4">{t.common.total}</th>
+              <th className="py-3.5 px-4">{q.title}</th>
               <th className="py-3.5 px-4">{t.common.status}</th>
               <th className="py-3.5 px-4 text-right">{t.common.actions}</th>
             </tr>
@@ -294,8 +314,10 @@ export const ApiKeysPage: React.FC = () => {
                     </div>
                   </td>
                   <td className="py-3.5 px-4 font-mono text-[11px] text-slate-300">
-                    {k.total_requests} reqs
-                    <div className="text-slate-400">{(k.quota_rules || []).filter(r => r.enabled).length} period rules</div>
+                    {k.total_requests} {q.requests.toLowerCase()}
+                    <div className="mt-1 min-w-48 space-y-1 text-slate-400 break-words">
+                      {(k.quota_rules || []).length ? k.quota_rules!.map((rule, index) => <div key={rule.id || index} className={rule.enabled ? "text-indigo-200" : "text-slate-500"}>{quotaSummary(rule, q)}</div>) : q.unlimited}
+                    </div>
                   </td>
                   <td className="py-3.5 px-4">
                     <button
@@ -310,7 +332,7 @@ export const ApiKeysPage: React.FC = () => {
                     </button>
                   </td>
                   <td className="py-3.5 px-4 text-right space-x-1 whitespace-nowrap">
-                    <button type="button" onClick={() => openEditModal(k)} className="btn-press px-2 py-1 text-indigo-300 hover:bg-white/[0.06] rounded-lg">Edit / quotas</button>
+                    <button type="button" onClick={() => openEditModal(k)} className="btn-press px-2 py-1 text-indigo-300 hover:bg-white/[0.06] rounded-lg">{q.edit}</button>
                     <button
                       type="button"
                       onClick={() => openNotesModal(k)}
@@ -342,13 +364,16 @@ export const ApiKeysPage: React.FC = () => {
       <Modal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        title={editingKey ? `Edit key: ${editingKey.name}` : t.keys.createKey}
+        title={editingKey ? `${q.editTitle}: ${editingKey.name}` : t.keys.createKey}
+        maxWidth="2xl"
       >
         <form onSubmit={handleCreate} className="space-y-4">
+          <QuotaEditor q={q} formQuotas={formQuotas} setFormQuotas={setFormQuotas} quotaUsage={quotaUsage} usageError={usageError} quotaCatalog={quotaCatalog} catalogError={catalogError} onRefresh={editingKey ? () => loadQuotaUsage(editingKey.id) : undefined} />
           <div>
             <label className="block text-xs font-medium text-slate-300 mb-1">{t.keys.keyName}</label>
             <input
               type="text"
+              name="key-name"
               required
               value={formName}
               onChange={(e) => setFormName(e.target.value)}
@@ -419,58 +444,7 @@ export const ApiKeysPage: React.FC = () => {
             />
           </div>
 
-          <section className="space-y-3 border-t border-white/10 pt-3" aria-label="Period quotas">
-            <h3 className="text-sm font-semibold text-slate-100">Period quotas</h3>
-            <p className="text-xs text-slate-400">Key-wide requests count admitted client calls, including local cache hits. Direct canonical-model rules also count admission (including cache hits); their first upstream dispatch is not counted twice, but extra retries consume requests. Behind route/fusion/judge profiles, model rules count every actual canonical upstream dispatch, including retries and fallback. Requested profile rules count one client request and all its upstream calls. Tokens and USD count upstream calls only.</p>
-            <p className="text-xs text-slate-400">All windows use UTC; weeks start Monday, months are calendar months. Custom periods repeat from their anchor. Outside an explicit interval access is denied, not unlimited. Unknown usage retains a conservative reservation; actual measured usage can exceed the estimate. USD rules require known prices (zero is valid).</p>
-            {formQuotas.map((rule, index) => {
-              const current = quotaUsage.find(item => item.rule_id === rule.id);
-              const locked = Boolean(rule.id);
-              return <fieldset key={rule.id || index} className="space-y-2 p-3 rounded-xl border border-white/10 bg-slate-950/50">
-                <legend className="text-xs text-slate-300">Rule {index + 1}</legend>
-                <div className="flex items-center justify-between gap-2">
-                  <label className="text-xs text-slate-300"><input type="checkbox" checked={rule.enabled} onChange={e => changeQuota(index, { enabled: e.target.checked })} /> Enabled</label>
-                  <button type="button" onClick={() => setFormQuotas(previous => previous.filter((_, i) => i !== index))} className="text-xs text-rose-300">Remove</button>
-                </div>
-                <label className="block text-xs text-slate-300">Scope
-                  <select aria-label={`Quota ${index + 1} scope`} value={rule.scope} disabled={locked} onChange={e => changeQuota(index, {scope: e.target.value as PeriodQuotaRule["scope"], model: null})} className="w-full p-2 rounded bg-slate-900">
-                    <option value="key">Entire API key</option><option value="model">Actual canonical upstream model</option><option value="profile">Requested virtual profile</option>
-                  </select>
-                </label>
-                {rule.scope !== "key" && <label className="block text-xs text-slate-300">{rule.scope === "model" ? "Canonical model (provider/model)" : "Requested profile (route/, fusion/, judge/)"}
-                  <input required disabled={locked} pattern="[^\s*\/]+/[^\s*]+" value={rule.model || ""} onChange={e => changeQuota(index, {model: e.target.value})} className="w-full p-2 rounded bg-slate-900" />
-                </label>}
-                <label className="block text-xs text-slate-300">UTC window
-                  <select value={rule.period} disabled={locked} onChange={e => changeQuota(index, {period: e.target.value as PeriodQuotaRule["period"], duration_seconds: null, anchor: null, start: null, end: null})} className="w-full p-2 rounded bg-slate-900">
-                    {["minute", "hour", "day", "week", "month", "custom", "interval"].map(period => <option key={period}>{period}</option>)}
-                  </select>
-                </label>
-                {rule.period === "custom" && <>
-                  <label className="block text-xs text-slate-300">Duration in seconds<input required type="number" min="1" max="315360000" step="1" disabled={locked} value={rule.duration_seconds ?? ""} onChange={e => changeQuota(index, {duration_seconds: e.target.value ? Number(e.target.value) : null})} className="w-full p-2 rounded bg-slate-900" /></label>
-                  <label className="block text-xs text-slate-300">Stable anchor (UTC)<input required type="datetime-local" step="1" disabled={locked} value={rule.anchor ? rule.anchor.slice(0,19) : ""} onChange={e => changeQuota(index, {anchor: e.target.value ? new Date(e.target.value + "Z").toISOString() : null})} className="w-full p-2 rounded bg-slate-900" /></label>
-                </>}
-                {rule.period === "interval" && (["start", "end"] as const).map(field => <label key={field} className="block text-xs text-slate-300">{field} (UTC)<input required type="datetime-local" step="1" disabled={locked} value={rule[field] ? rule[field]!.slice(0,19) : ""} onChange={e => changeQuota(index, {[field]: e.target.value ? new Date(e.target.value + "Z").toISOString() : null})} className="w-full p-2 rounded bg-slate-900" /></label>)}
-                <div className="grid grid-cols-3 gap-2">
-                  {(["requests", "tokens", "usd"] as const).map(field => <label key={field} className="text-xs text-slate-300">{field === "usd" ? "USD" : field === "tokens" ? "Total tokens" : "Requests"}
-                    <input aria-label={`Quota ${index + 1} ${field}`} type="number" min={field === "usd" ? "5e-324" : "1"} max={field === "usd" ? "1000000000000" : field === "requests" ? "2147483647" : "9007199254740991"} step={field === "usd" ? "any" : "1"} value={rule[field] ?? ""} onChange={e => changeQuota(index, {[field]: e.target.value ? Number(e.target.value) : null})} placeholder="Unlimited" className="w-full p-2 rounded bg-slate-900" />
-                  </label>)}
-                </div>
-                {locked && <p className="text-xs text-slate-500">Scope/window identity is fixed; limits and enabled status are editable without resetting usage. Remove and add to change scope/window. Re-adding the same window keeps its spending.</p>}
-                {current && <div className="text-xs text-slate-400 space-y-1">
-                  <div>{current.active ? "Current window" : "Inactive"}: {current.start} → {current.end}</div>
-                  <div>Used: {current.used.requests} requests · {current.used.tokens} tokens · ${current.used.usd.toFixed(8)}</div>
-                  <div>Remaining: {current.remaining.requests ?? "∞"} requests · {current.remaining.tokens ?? "∞"} tokens · {current.remaining.usd == null ? "∞ USD" : `$${current.remaining.usd.toFixed(8)}`}</div>
-                </div>}
-              </fieldset>;
-            })}
-            <div className="flex gap-3 text-xs">
-              <button type="button" disabled={formQuotas.length >= 64} onClick={() => setFormQuotas(previous => [...previous, { enabled: true, scope: "key", period: "day", requests: null, tokens: null, usd: null }])} className="text-indigo-300 disabled:opacity-40">Add quota rule</button>
-              <button type="button" onClick={() => setFormQuotas([])} className="text-rose-300">Clear all rules</button>
-              {editingKey && <button type="button" onClick={() => loadQuotaUsage(editingKey.id)} className="text-indigo-300">Refresh usage</button>}
-            </div>
-            {usageError && <p role="alert" className="text-xs text-rose-300">{usageError}</p>}
-            {!formQuotas.length && <p className="text-xs text-slate-400">No period quotas: unlimited (existing lifetime/RPM/TPM limits still apply).</p>}
-          </section>
+
 
           <div className="flex justify-end gap-2.5 pt-4 border-t border-white/[0.08]">
             <button
@@ -485,7 +459,7 @@ export const ApiKeysPage: React.FC = () => {
               disabled={saving}
               className="btn-press px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-indigo-600/25 transition-all cursor-pointer"
             >
-              {saving ? "Saving…" : editingKey ? "Save changes" : t.common.create}
+              {saving ? q.saving : editingKey ? t.common.save : t.common.create}
             </button>
           </div>
         </form>

@@ -8,6 +8,15 @@ from app.schemas.entities import CredentialCreate, CredentialUpdate, CredentialR
 
 router = APIRouter(prefix="/credentials", tags=["Admin Credentials"])
 
+@router.get("/{credential_id}/usage", response_model=List[dict])
+async def credential_usage(credential_id: int, username: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
+    from app.services.quota_service import QuotaService
+    credential = await CredentialService.get_credential(db, credential_id)
+    if credential is None:
+        raise HTTPException(404, "Credential not found")
+    return await QuotaService.usage(db, credential)
+
+
 @router.get("", response_model=List[CredentialRead])
 async def list_credentials(
     provider_id: Optional[int] = None,

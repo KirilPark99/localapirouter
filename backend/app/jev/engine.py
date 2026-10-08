@@ -437,7 +437,7 @@ class JevEngine:
         for attempt in range(retry_count + 1):
             if not RoutingEngine._eligible(provider, model_obj, cred):
                 raise RouterException('JEV credential unavailable', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
-            quota, _ = await QuotaService.reserve_dispatch(provider, model_obj, request)
+            quota, _ = await QuotaService.reserve_dispatch(provider, model_obj, request, credential=cred)
             try:
                 reservation = admission.reserve('credential', cred.id, rpm=cred.rpm_limit, tpm=cred.tpm_limit,
                     concurrency=cred.max_concurrency, tokens=prompt_tokens + (model_obj.max_output_tokens or 0))

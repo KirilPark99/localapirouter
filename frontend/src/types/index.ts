@@ -102,6 +102,7 @@ export interface ProviderCreate {
 }
 
 export interface Credential {
+  quota_rules?: PeriodQuotaRule[];
   id: number;
   provider_id: number;
   provider_name: string;
@@ -130,6 +131,7 @@ export interface Credential {
 }
 
 export interface CredentialCreate {
+  quota_rules?: PeriodQuotaRule[];
   provider_id: number;
   name: string;
   api_key: string;
@@ -199,8 +201,8 @@ export interface DiscoveredModel {
   supported_endpoints: string[];
   context_length?: number;
   max_output_tokens?: number;
-  input_price_per_1m: number;
-  output_price_per_1m: number;
+  input_price_per_1m: number | null;
+  output_price_per_1m: number | null;
   enabled: boolean;
   available: boolean;
   is_visible: boolean;

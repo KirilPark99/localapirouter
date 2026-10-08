@@ -357,6 +357,7 @@ def test_migration_fresh_and_representative_upgrade_twice(monkeypatch):
     from pathlib import Path
     from alembic import command
     from alembic.config import Config
+    from alembic.script import ScriptDirectory
     from app.core.config import settings
     from app.core.database import engine
     original=Path(engine.url.database).resolve()
@@ -376,7 +377,7 @@ def test_migration_fresh_and_representative_upgrade_twice(monkeypatch):
         with sqlite3.connect(path) as db:
             tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             assert {'period_quota_counters','period_quota_reservations'}<=tables
-            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='p9q0r1s2t3u4'
+            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]==ScriptDirectory.from_config(config).get_current_head()
             if legacy:
                 assert db.execute('SELECT total_requests,quota_rules FROM router_api_keys').fetchone()==(7,'[]')
             assert not db.execute('PRAGMA foreign_key_check').fetchall()

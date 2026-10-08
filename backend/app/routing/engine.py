@@ -83,6 +83,15 @@ class RoutingEngine:
         # Reject native history before charging quota or dispatching to a lossy adapter.
         wire = getattr(provider, 'adapter_type', '')
         module = (getattr(provider, 'configuration', None) or {}).get('module_id')
+        from urllib.parse import urlparse
+        from app.schemas.chat import openrouter_reasoning_details
+        if wire in ('openai', 'generic_openai', 'openrouter') and urlparse(getattr(provider, 'base_url', '') or '').hostname in ('openrouter.ai', 'api.kilo.ai'):
+            try:
+                request = request.model_copy(update={'messages': [message.model_copy(update={
+                    'reasoning_details': openrouter_reasoning_details(message.reasoning_details),
+                }) if message.reasoning_details else message for message in request.messages]})
+            except ValueError as exc:
+                raise RouterException(str(exc), ErrorCategory.INVALID_REQUEST, status_code=400) from exc
         supported = ({'thinking', 'redacted_thinking'} if wire == 'anthropic' else
                      {'reasoning'} if wire == 'custom_module' and module in ('codex_cli', 'grok_builder_cli') else set())
         if any(detail.get('type') in {'reasoning', 'thinking', 'redacted_thinking'} - supported
@@ -96,7 +105,7 @@ class RoutingEngine:
             raise RouterException('Selected adapter cannot preserve Anthropic history/cache metadata',
                                   ErrorCategory.INVALID_REQUEST, status_code=400)
         from app.services.quota_service import QuotaService
-        quota, request = await QuotaService.reserve_dispatch(provider, model_obj, request)
+        quota, request = await QuotaService.reserve_dispatch(provider, model_obj, request, credential=cred)
         try:
             reservation, request = cls._reserve_credential(cred, request, model_obj)
             return reservation, request, quota

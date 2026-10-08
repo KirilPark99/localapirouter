@@ -25,6 +25,37 @@ class ChatMessage(BaseModel):
     is_error: Optional[bool] = None
     cache_control: Optional[Dict[str, Any]] = None
 
+def openrouter_reasoning_details(details: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert only unsigned Responses plaintext; never reinterpret opaque history."""
+    result = []
+    for detail in details:
+        if detail.get("type") != "reasoning":
+            result.append(detail)
+            continue
+        if detail.get("encrypted_content") is not None or set(detail) - {
+            "type", "id", "index", "status", "summary", "content", "encrypted_content",
+        }:
+            raise ValueError("OpenRouter cannot preserve opaque Responses reasoning history")
+        start = len(result)
+        for field, part_type, kind, text_key in (
+            ("summary", "summary_text", "reasoning.summary", "summary"),
+            ("content", "reasoning_text", "reasoning.text", "text"),
+        ):
+            parts = detail.get(field)
+            if parts is None:
+                parts = []
+            if not isinstance(parts, list):
+                raise ValueError("Invalid Responses reasoning parts")
+            for part in parts:
+                if not isinstance(part, dict) or part.get("type") != part_type or set(part) - {"type", "text"} or not isinstance(part.get("text"), str):
+                    raise ValueError("Unsupported Responses reasoning part")
+                result.append({"type": kind, text_key: part["text"], "index": len(result),
+                               **({"id": detail["id"]} if detail.get("id") else {})})
+        if len(result) == start:
+            raise ValueError("Responses reasoning history has no plaintext")
+    return result
+
+
 class ResponsesRequest(BaseModel):
     model: str
     input: Union[str, List[Dict[str, Any]]]
