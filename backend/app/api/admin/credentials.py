@@ -6,7 +6,9 @@ from app.api.deps import get_current_admin
 from app.services.credential_service import CredentialService
 from app.schemas.entities import CredentialCreate, CredentialUpdate, CredentialRead, CredentialTestResult, CredentialBulkAssignProxy, CredentialBulkAssignGroup, NotesUpdate
 
-from app.modules.base import SubscriptionLimits
+from uuid import UUID
+from pydantic import BaseModel, Field, ConfigDict
+from app.modules.base import SubscriptionLimits, SubscriptionResetResult
 
 router = APIRouter(prefix="/credentials", tags=["Admin Credentials"])
 
@@ -16,6 +18,23 @@ async def subscription_limits(credential_id: int, username: str = Depends(get_cu
     if result is None:
         raise HTTPException(404, "Credential not found")
     return result
+
+class SubscriptionResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    redeem_request_id: UUID
+    confirmed: bool = Field(strict=True)
+
+
+@router.post("/{credential_id}/subscription-limits/reset", response_model=SubscriptionResetResult)
+async def reset_subscription_limits(credential_id: int, data: SubscriptionResetRequest,
+                                    username: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
+    if not data.confirmed:
+        raise HTTPException(400, "Explicit confirmation is required to spend a Codex reset")
+    result = await CredentialService.reset_subscription_limits(db, credential_id, str(data.redeem_request_id))
+    if result is None:
+        raise HTTPException(404, "Credential not found")
+    return result
+
 
 @router.get("/{credential_id}/usage", response_model=List[dict])
 async def credential_usage(credential_id: int, username: str = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):

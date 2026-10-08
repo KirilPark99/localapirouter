@@ -1,0 +1,191 @@
+{
+  "id": "claude_web",
+  "name": "Claude Web",
+  "version": "1.0.0",
+  "description": "OmniRoute-derived Claude Web text chat, strict SSE and explicit recovery history; Chrome TLS with optional on-demand browser fallback.",
+  "author": "OmniRoute port (upstream: diegosouzapw)",
+  "icon": "MessageSquare",
+  "auth_type": "custom_fields",
+  "fields": [
+    {
+      "key": "cookie",
+      "label": "Cookie header or sessionKey value",
+      "type": "password",
+      "required": true,
+      "description": "Full claude.ai Cookie header containing sessionKey, or its bare value."
+    },
+    {
+      "key": "orgId",
+      "label": "Organization UUID (required for multiple organizations)",
+      "type": "password",
+      "required": false
+    },
+    {
+      "key": "deviceId",
+      "label": "Anthropic device ID",
+      "type": "password",
+      "required": false
+    },
+    {
+      "key": "locale",
+      "label": "Locale (default en-US)",
+      "type": "text",
+      "required": false
+    },
+    {
+      "key": "timezone",
+      "label": "IANA timezone (default UTC)",
+      "type": "text",
+      "required": false
+    },
+    {
+      "key": "browser_fallback",
+      "label": "Allow ephemeral Playwright fallback for recognized 403 challenges",
+      "type": "select",
+      "required": false,
+      "default": "false",
+      "options": [
+        {
+          "label": "Disabled",
+          "value": "false"
+        },
+        {
+          "label": "Enabled",
+          "value": "true"
+        }
+      ]
+    }
+  ],
+  "default_models": [
+    {
+      "id": "claude-fable-5-1",
+      "name": "claude-fable-5-1 (Web)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": "unknown",
+        "reasoning": true
+      }
+    },
+    {
+      "id": "claude-fable-5",
+      "name": "claude-fable-5 (Web)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": "unknown",
+        "reasoning": true
+      }
+    },
+    {
+      "id": "claude-opus-5",
+      "name": "claude-opus-5 (Web)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": "unknown",
+        "reasoning": true
+      }
+    },
+    {
+      "id": "claude-opus-4-8",
+      "name": "claude-opus-4-8 (Web)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": "unknown",
+        "reasoning": true
+      }
+    },
+    {
+      "id": "claude-opus-4-7",
+      "name": "claude-opus-4-7 (Web)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": "unknown",
+        "reasoning": true
+      }
+    },
+    {
+      "id": "claude-opus-4-6",
+      "name": "claude-opus-4-6 (Web)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": "unknown",
+        "reasoning": true
+      }
+    },
+    {
+      "id": "claude-sonnet-5",
+      "name": "claude-sonnet-5 (Web)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": "unknown",
+        "reasoning": true
+      }
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "name": "claude-sonnet-5-5 (Web)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": "unknown",
+        "reasoning": true
+      }
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "name": "claude-sonnet-4-6 (Web)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": "unknown",
+        "reasoning": true
+      }
+    },
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "name": "claude-haiku-4-5-20251001 (Web)",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": "unknown",
+        "reasoning": true
+      }
+    }
+  ]
+}

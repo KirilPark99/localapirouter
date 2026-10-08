@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
-from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, SubscriptionLimit, SubscriptionLimits, collect_chat_completion
+from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, SubscriptionLimit, SubscriptionLimits, SubscriptionResetResult, collect_chat_completion
 from app.modules.responses import messages_to_input, tool_options, responses_to_chat
 from app.routing.cache_affinity import PrefixAnalyzer
 from app.schemas.chat import (
@@ -28,6 +28,7 @@ logger = logging.getLogger("app.modules.codex_cli")
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_CLIENT_VERSION = "0.160.0"
 CODEX_USER_AGENT = f"codex-cli/{CODEX_CLIENT_VERSION} (linux; x86_64)"
@@ -77,6 +78,7 @@ class CodexCliAdapter(BaseModuleAdapter):
         super().__init__()
         self._token_cache: Dict[str, Dict[str, Any]] = {}
         self._refresh_locks: Dict[str, asyncio.Lock] = {}
+        self._reset_locks: Dict[str, asyncio.Lock] = {}
 
     def _find_local_auth_file(self) -> Optional[Path]:
         for p in LOCAL_AUTH_PATHS:
@@ -226,6 +228,21 @@ class CodexCliAdapter(BaseModuleAdapter):
         try:
             # openai/codex rust-v0.160.0: backend-client and codex-backend-openapi-models.
             data = resp.json()
+            # openai/codex rust-v0.161.0 backend-client/src/types.rs: use the
+            # provider count, not the size of the possibly capped credit list.
+            summary = data.get("rate_limit_reset_credits")
+            reset_count = summary.get("available_count") if isinstance(summary, dict) else None
+            if type(reset_count) is not int or reset_count < 0:
+                reset_count = None
+                try:
+                    async with self.create_http_client(ctx) as client:
+                        details = await client.get(CODEX_RESET_CREDITS_URL, headers=headers)
+                    if details.status_code == 200:
+                        count = details.json().get("available_count")
+                        if type(count) is int and count >= 0:
+                            reset_count = count
+                except Exception:
+                    pass  # Optional reset metadata must not hide valid usage windows.
             plan = data.get("plan_type")
             if plan is not None and not isinstance(plan, str):
                 raise ValueError("Invalid plan")
@@ -263,11 +280,30 @@ class CodexCliAdapter(BaseModuleAdapter):
                 if not isinstance(balance, str):
                     raise ValueError("Invalid credit balance")
                 limits.append(SubscriptionLimit(name="Credits", remaining=float(balance), unit="credits"))
-            return SubscriptionLimits(status="ok" if limits else "unavailable", plan=plan, limits=limits,
-                                      checked_at=checked_at, message=None if limits else "Codex did not report numeric quotas")
+            return SubscriptionLimits(status="ok" if limits or reset_count is not None else "unavailable", plan=plan, limits=limits,
+                                      reset_credits_available=reset_count, checked_at=checked_at,
+                                      message=None if limits else "Codex did not report numeric quotas")
         except Exception:
             return SubscriptionLimits(status="unavailable", checked_at=checked_at,
                                       message="Codex usage response was malformed")
+
+    async def reset_subscription_limits(self, ctx: ModuleExecutionContext, redeem_request_id: str) -> SubscriptionResetResult:
+        access_token, account_id = await self._get_valid_access_token(ctx)
+        identity = account_id or str(ctx.extra_config.get("credential_id") or hashlib.sha256(access_token.encode()).hexdigest())
+        # ponytail: one-worker double-click guard; upstream redeem_request_id handles retries.
+        lock = self._reset_locks.setdefault(identity, asyncio.Lock())
+        if lock.locked():
+            raise normalize_upstream_error(status_code=409, response_body="Codex reset already in progress")
+        async with lock:
+            headers = self._build_headers(access_token, account_id)
+            headers["Accept"] = "application/json"
+            async with self.create_http_client(ctx, timeout=10.0) as client:
+                # No automatic retries: one POST per explicit, confirmed user action.
+                resp = await client.post(CODEX_RESET_CREDITS_URL + "/consume", headers=headers,
+                    json={"redeem_request_id": redeem_request_id}, follow_redirects=False)
+            if not 200 <= resp.status_code < 300:
+                raise normalize_upstream_error(status_code=resp.status_code, response_body="Codex reset request rejected")
+            return SubscriptionResetResult.model_validate(resp.json(), strict=True)
 
     async def validate_credentials(
         self,

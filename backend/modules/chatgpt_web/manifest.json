@@ -1,0 +1,176 @@
+{
+  "id": "chatgpt_web",
+  "name": "ChatGPT Web (Browser)",
+  "version": "1.0.0",
+  "description": "Common browser-owned ChatGPT Web clean-room port; text only, buffered streaming.",
+  "author": "MyAIrouter; adapted from OmniRoute (MIT)",
+  "icon": "MessageSquare",
+  "auth_type": "custom_fields",
+  "fields": [
+    {
+      "key": "storage_state",
+      "label": "Playwright browser storage state JSON",
+      "type": "password",
+      "required": false,
+      "description": "Paste first-party browser storage state JSON, not a file path. Encrypted secret; preferred over Cookie."
+    },
+    {
+      "key": "cookie",
+      "label": "ChatGPT browser Cookie header",
+      "type": "password",
+      "required": false,
+      "description": "Alternative browser cookie header including __Secure-next-auth.session-token (or chunks). Never an API key."
+    },
+    {
+      "key": "chrome_executable_path",
+      "label": "Chrome/Chromium executable path",
+      "type": "text",
+      "required": false,
+      "description": "Optional installed browser executable. Otherwise use Playwright Chromium. Headed display required."
+    },
+    {
+      "key": "locale",
+      "label": "Browser locale",
+      "type": "text",
+      "required": false,
+      "default": "en-US"
+    },
+    {
+      "key": "timezone",
+      "label": "Browser timezone",
+      "type": "text",
+      "required": false,
+      "default": "America/New_York"
+    }
+  ],
+  "default_models": [
+    {
+      "id": "gpt-5-6",
+      "name": "GPT-5.6 Sol — Instant",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "audio_input": false,
+        "audio_output": false,
+        "structured_output": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5-6-thinking",
+      "name": "GPT-5.6 Sol — Thinking",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "audio_input": false,
+        "audio_output": false,
+        "structured_output": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5-6-pro",
+      "name": "GPT-5.6 Sol — Pro",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "audio_input": false,
+        "audio_output": false,
+        "structured_output": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5.6-luna-free",
+      "name": "GPT-5.6 Luna — Free",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "audio_input": false,
+        "audio_output": false,
+        "structured_output": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5.6-luna-free-thinking",
+      "name": "GPT-5.6 Luna — Free Thinking",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "audio_input": false,
+        "audio_output": false,
+        "structured_output": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5-5-instant",
+      "name": "GPT-5.5 — Instant",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "audio_input": false,
+        "audio_output": false,
+        "structured_output": false,
+        "reasoning": false
+      }
+    },
+    {
+      "id": "gpt-5-5-thinking",
+      "name": "GPT-5.5 — Thinking",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "audio_input": false,
+        "audio_output": false,
+        "structured_output": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "gpt-5-5-pro",
+      "name": "GPT-5.5 — Pro",
+      "context_length": null,
+      "max_output_tokens": null,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "audio_input": false,
+        "audio_output": false,
+        "structured_output": false,
+        "reasoning": true
+      }
+    }
+  ]
+}

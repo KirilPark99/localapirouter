@@ -385,6 +385,40 @@ class CredentialService:
         return result
 
     @classmethod
+    async def reset_subscription_limits(cls, db: AsyncSession, credential_id: int, redeem_request_id: str):
+        import asyncio
+        from fastapi import HTTPException
+        from app.modules.base import SubscriptionResetResult
+        cred = await cls.get_credential(db, credential_id)
+        if cred is None:
+            return None
+        provider = cred.provider
+        if provider.adapter_type.strip().lower() != "custom_module" or (provider.configuration or {}).get("module_id") != "codex_cli":
+            raise HTTPException(400, "Subscription reset is supported only for Codex CLI")
+        if not cred.enabled or not provider.enabled:
+            raise HTTPException(400, "Enable the Codex credential and provider before resetting")
+        try:
+            async with asyncio.timeout(30):
+                result = SubscriptionResetResult.model_validate(await get_adapter(provider.adapter_type).reset_subscription_limits(
+                    api_key=decrypt_secret(cred.encrypted_api_key),
+                    configuration=cls.module_runtime_configuration(provider, cred),
+                    redeem_request_id=redeem_request_id,
+                    proxy_url=ProxyService.build_proxy_url(cred.proxy) if cred.proxy else None,
+                ))
+        except RouterException as exc:
+            # Never turn native OAuth errors into an administrator logout or expose bodies.
+            code = exc.status_code if exc.status_code and 400 <= exc.status_code < 600 else 502
+            if code in (401, 403):
+                code = 502
+            raise HTTPException(code, "Codex reset was not confirmed. Retry the same attempt; do not create another reset request.") from None
+        except Exception:
+            # A timeout/invalid reply is ambiguous: preserve the same redemption ID on retry.
+            raise HTTPException(502, "Codex reset result is unknown. Refresh usage and retry the same attempt if needed.") from None
+        if result.code == "reset":
+            await cls.reset_circuit_breaker(db, credential_id)
+        return result
+
+    @classmethod
     async def test_credential(cls, db: AsyncSession, credential_id: int) -> CredentialTestResult:
         cred = await cls.get_credential(db, credential_id)
         if not cred:

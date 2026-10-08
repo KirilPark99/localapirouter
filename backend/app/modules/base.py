@@ -90,6 +90,12 @@ class SubscriptionLimits(BaseModel):
     limits: List[SubscriptionLimit] = Field(default_factory=list)
     message: Optional[str] = None
     checked_at: Optional[str] = None
+    reset_credits_available: Optional[int] = Field(default=None, ge=0, strict=True)
+
+
+class SubscriptionResetResult(BaseModel):
+    code: Literal["reset", "nothing_to_reset", "no_credit", "already_redeemed"]
+    windows_reset: int = Field(default=0, ge=0, strict=True)
 
 
 class BaseModuleAdapter(ABC):

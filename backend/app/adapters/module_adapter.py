@@ -83,6 +83,13 @@ class CustomModuleAdapter(BaseProviderAdapter):
         adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout)
         return await adapter.get_subscription_limits(ctx)
 
+    async def reset_subscription_limits(self, api_key: str, configuration: Dict[str, Any],
+                                        redeem_request_id: str, proxy_url: Optional[str] = None):
+        if configuration.get("module_id") != "codex_cli":
+            raise ValueError("Subscription reset is supported only for Codex CLI")
+        adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, 10.0)
+        return await adapter.reset_subscription_limits(ctx, redeem_request_id)
+
     async def validate_credentials(
         self,
         base_url: str,

@@ -164,6 +164,12 @@ export interface SubscriptionLimits {
   limits: SubscriptionLimit[];
   message?: string | null;
   checked_at?: string | null;
+  reset_credits_available?: number | null;
+}
+
+export interface SubscriptionResetResult {
+  code: "reset" | "nothing_to_reset" | "no_credit" | "already_redeemed";
+  windows_reset: number;
 }
 
 export interface CredentialTestResult {
