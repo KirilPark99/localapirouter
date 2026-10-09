@@ -176,6 +176,7 @@ confirmed = true; await moduleState.handleExportProfile(23); assert.equal(module
 console.log('PASS: module-profile actual create/edit/OAuth/export handlers, shared quota edits, provider-filtered catalog, exact masks/bullets and JSON types, pending/expiry/proxy guards, malformed JSON rejection; zero network.');
 
 const moduleScratch = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'module-profile-render-'));
+let renderedOAuth = null;
 const moduleServer = await createServer({ root, configFile: false, cacheDir: moduleScratch, server: { middlewareMode: true }, plugins: [{
   name: 'module-profile-offline-render', enforce: 'pre', transform(code, id) {
     if (!id.endsWith('/pages/ModulesPage.tsx')) return;
@@ -186,6 +187,7 @@ const moduleServer = await createServer({ root, configFile: false, cacheDir: mod
     replace('useState<PeriodQuotaRule[]>([])', `useState<PeriodQuotaRule[]>(${JSON.stringify(rules)})`);
     replace('useState<DiscoveredModel[]>([])', `useState<DiscoveredModel[]>(${JSON.stringify(models)})`);
     replace('useState<Record<string, any>>({})', `useState<Record<string, any>>(${JSON.stringify(moduleProfile.fields)})`);
+    replace('useState<OAuthSession | null>(null)', `useState<OAuthSession | null>(${JSON.stringify(renderedOAuth)})`);
     return code;
   },
 }] });
@@ -200,6 +202,18 @@ try {
   assert.equal((catalog.match(/<option/g) || []).length, 1); assert.ok(!catalog.includes('other/model'));
   assert.ok(!html.includes('quota-profile-options')); assert.equal(fetches, 0);
   console.log('PASS: real module modal renders shared quotas, scoped model catalog, group/rate controls, JSON fields and masked password; zero network.');
+  renderedOAuth = { ...session, status: 'pending', auth_url: 'https://unit.invalid/authorize?state=synthetic', loopback: false };
+  moduleServer.moduleGraph.invalidateAll();
+  const { ModulesPage: OAuthPage } = await moduleServer.ssrLoadModule('/src/pages/ModulesPage.tsx');
+  const { I18nProvider: OAuthProvider } = await moduleServer.ssrLoadModule('/src/i18n/context.tsx');
+  const oauthHtml = renderToStaticMarkup(React.createElement(OAuthProvider, null, React.createElement(OAuthPage)));
+  const urlInput = oauthHtml.match(/<input[^>]*id="module-oauth-url"[^>]*>/)?.[0];
+  assert.ok(urlInput && /readonly=""/i.test(urlInput) && urlInput.includes(`value="${renderedOAuth.auth_url}"`), urlInput || 'OAuth URL input missing');
+  assert.ok(oauthHtml.includes('URL возврата после входа') && oauthHtml.includes('Отменить OAuth'));
+  assert.ok(oauthHtml.includes('Ссылка не открывается автоматически') && oauthHtml.includes('статический выходной IP'));
+  assert.equal(oauthHtml.includes(`href="${renderedOAuth.auth_url}"`), false, 'Only a copyable URL; no browser-opening link');
+  assert.equal(fetches, 0);
+  console.log('PASS: actual pending OAuth modal renders a read-only full URL, callback/cancel controls and static-IP guidance; zero network.');
 } finally { await moduleServer.close(); fs.rmSync(moduleScratch, { recursive: true, force: true }); }
 
 // A completed request is not proof that an import transaction committed.
@@ -300,3 +314,38 @@ for (const mode of ['tor', 'proxy', 'mixed']) {
   } finally { await poolServer.close(); fs.rmSync(poolScratch, { recursive: true, force: true }); }
 }
 console.log('PASS: Lingling Tor/proxy/mixed actual modal, ordered registry controls, disabled exits, no Direct label, typed pool create/edit payload; zero network.');
+
+// Extract the real shared start handler: creating a session must never open a browser.
+for (const moduleId of ['codex_cli', 'grok_builder_cli', 'agy_cli']) {
+  for (const proxyId of [undefined, 8]) {
+    let opens = 0;
+    const oauthCalls = [];
+    const oauth = {
+      URL, Date, JSON, selectedModule: { manifest: { id: moduleId } },
+      supportsBrowserOAuth: true, oauthStarting: false, savingProfile: false,
+      formProxyId: proxyId, oauthGeneration: { current: 0 }, session: null,
+      window: { open() { opens++; return { opener: null, closed: false, close() {}, location: { replace() {} } }; } },
+      cancelOAuth() { oauth.oauthGeneration.current++; oauth.session = null; },
+      updateOAuthSession(value) { oauth.session = value; },
+      setOAuthStarting(value) { oauth.oauthStarting = value; },
+      setFormError(value) { oauth.error = value; },
+      async apiRequest(url, options) {
+        oauthCalls.push({ url, method: options.method, body: options.body && JSON.parse(options.body) });
+        return { session_id: 'synthetic-session', auth_url: 'https://unit.invalid/authorize?state=synthetic', loopback: true, status: 'pending', expires_in: 600 };
+      },
+    };
+    vm.createContext(oauth);
+    vm.runInContext(extract('pages/ModulesPage.tsx', ['handleStartOAuth']), oauth);
+    await oauth.handleStartOAuth();
+    assert.equal(opens, 0, `${moduleId} must only return the URL, never open a tab`);
+    assert.equal(oauthCalls.length, 1);
+    assert.equal(oauthCalls[0].url, `/api/admin/modules/${moduleId}/oauth/start`);
+    assert.equal(oauthCalls[0].body.proxy_id, proxyId ?? null);
+    assert.equal(oauth.session.auth_url, 'https://unit.invalid/authorize?state=synthetic');
+    assert.equal(oauth.session.proxyId, proxyId ?? null);
+    assert.equal(oauth.oauthStarting, false);
+    assert.equal(oauth.error, null);
+  }
+}
+assert.equal(fetches, 0);
+console.log('PASS: actual Codex/Grok/Antigravity OAuth start handlers return URLs with unchanged proxy binding and zero browser opens; zero network.');

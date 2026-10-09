@@ -257,9 +257,6 @@ export const ModulesPage: React.FC = () => {
     const generation = oauthGeneration.current;
     const moduleId = selectedModule.manifest.id;
     const proxyId = formProxyId ?? null;
-    // Open synchronously from the click; the visible link also works if blocked.
-    const popup = window.open("about:blank", "_blank");
-    if (popup) popup.opener = null;
     setOAuthStarting(true);
     setFormError(null);
     try {
@@ -268,16 +265,13 @@ export const ModulesPage: React.FC = () => {
         { method: "POST", body: JSON.stringify({ proxy_id: proxyId }) }
       );
       if (generation !== oauthGeneration.current) {
-        popup?.close();
         await apiRequest(`/api/admin/modules/${moduleId}/oauth/${result.session_id}`, { method: "DELETE" });
         return;
       }
       const session = { ...result, moduleId, proxyId, expiresAt: Date.now() + result.expires_in * 1000 };
       updateOAuthSession(session);
       if (new URL(result.auth_url).protocol !== "https:") throw new Error("Некорректная ссылка авторизации");
-      if (popup && !popup.closed) popup.location.replace(result.auth_url);
     } catch (err: any) {
-      popup?.close();
       if (generation === oauthGeneration.current) {
         cancelOAuth();
         setFormError(err.message || "Не удалось начать авторизацию");
@@ -1191,7 +1185,7 @@ export const ModulesPage: React.FC = () => {
             {supportsBrowserOAuth && (
               <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 space-y-3 text-xs">
                 <p className="text-slate-400 leading-relaxed">
-                  Страница входа использует сеть вашего браузера. Выбранный прокси применяется на сервере для обмена токенами и вызовов моделей. Во время OAuth прокси изменить нельзя.
+                  Ссылка не открывается автоматически: скопируйте её в выбранный браузер. Для одного IP настройте браузер и прокси профиля на один и тот же статический выходной IP. Выбранный прокси применяется на сервере для обмена токенами и вызовов моделей, но не управляет сетью браузера. Во время OAuth прокси изменить нельзя.
                 </p>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
@@ -1200,7 +1194,7 @@ export const ModulesPage: React.FC = () => {
                     disabled={oauthStarting || savingProfile || (!!oauthSession && oauthSession.status !== "error")}
                     className="btn-press px-3 py-2 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 rounded-xl font-medium disabled:opacity-50"
                   >
-                    {oauthStarting ? "Начало авторизации..." : oauthSession?.status === "error" ? "Повторить авторизацию" : "Авторизоваться через браузер"}
+                    {oauthStarting ? "Получение ссылки..." : oauthSession?.status === "error" ? "Получить новую ссылку" : "Получить ссылку для входа"}
                   </button>
                   {(oauthSession || oauthStarting) && (
                     <button type="button" onClick={() => cancelOAuth(true)} disabled={savingProfile} className="btn-press px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl disabled:opacity-50">
@@ -1215,9 +1209,17 @@ export const ModulesPage: React.FC = () => {
                     </div>
                     {oauthSession.status === "pending" && (
                       <>
-                        <a href={oauthSession.auth_url} target="_blank" rel="noopener noreferrer" className="inline-block text-indigo-300 underline underline-offset-2">
-                          Открыть страницу входа в новой вкладке (если она не открылась)
-                        </a>
+                        <label htmlFor="module-oauth-url" className="block text-slate-300">Ссылка для входа — скопируйте в выбранный браузер</label>
+                        <input
+                          id="module-oauth-url"
+                          type="text"
+                          readOnly
+                          value={oauthSession.auth_url}
+                          onFocus={(e) => e.currentTarget.select()}
+                          autoComplete="off"
+                          spellCheck={false}
+                          className="w-full px-3 py-2 bg-slate-950 border border-white/[0.08] focus:border-indigo-500 rounded-xl text-slate-200 focus:outline-hidden"
+                        />
                         <p className="text-slate-400 leading-relaxed">
                           {oauthSession.loopback ? "Возврат может обработаться автоматически, если браузер и сервер находятся на одном компьютере. " : "Автоматический возврат недоступен. "}
                           Если вход не завершился здесь, скопируйте полный URL из адресной строки после входа (даже если страница localhost не открылась) и вставьте ниже. Не вставляйте токены.
