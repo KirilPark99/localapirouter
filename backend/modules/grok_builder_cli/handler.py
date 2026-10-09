@@ -384,7 +384,8 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
         request: ChatCompletionRequest,
         ctx: ModuleExecutionContext,
     ) -> AsyncGenerator[str, None]:
-        options = tool_options(request)
+        # Grok CLI does not use sampling options; keep the caller's request intact.
+        options = tool_options(request.model_copy(update={"temperature": None, "top_p": None}))
         affinity_headers = {}
         for name, value in (ctx.extra_config.get("extra_headers") or {}).items():
             if (not isinstance(name, str) or name.lower() not in ("x-grok-conv-id", "x-grok-session-id")

@@ -90,12 +90,13 @@ async def test_cli_tools_roundtrip(monkeypatch, module_id, adapter_type, stream,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False])
-@pytest.mark.parametrize("temperature,top_p", [(0.7, 1.0), (0.0, 0.0), (None, 0.5), (0.8, None)])
-async def test_cli_sampling_compatibility_is_codex_only(monkeypatch, stream, temperature, top_p):
+@pytest.mark.parametrize("temperature,top_p", [(0.7, 1.0), (0.0, 0.0), (None, 0.5), (0.8, None), (None, None)])
+async def test_cli_sampling_compatibility_preserves_requests(monkeypatch, stream, temperature, top_p):
     request = ChatCompletionRequest(model="synthetic", stream=stream, messages=history(),
         temperature=temperature, top_p=top_p, max_tokens=4096,
         tools=[{"type": "function", "function": FUNCTION}], parallel_tool_calls=False)
-    request = RoutingEngine._apply_model_defaults(request, eff_thinking="high")
+    request = RoutingEngine._apply_model_defaults(request, eff_thinking="high",
+        candidate_temperature=0.7 if temperature is None and top_p is None else None)
     snapshot = request.model_dump()
     provenance = set(getattr(request, "_routing_client_fields"))
     for module_id, adapter_type in (("grok_builder_cli", GrokBuilderCliAdapter), ("codex_cli", CodexCliAdapter)):
@@ -124,24 +125,19 @@ async def test_cli_sampling_compatibility_is_codex_only(monkeypatch, stream, tem
             if stream:
                 return await collect_chat_completion(bridge.stream_chat(**kwargs), "synthetic")
             return await bridge.chat_completions(**kwargs)
-        if module_id == "grok_builder_cli":
-            with pytest.raises(RouterException, match="temperature|top_p") as caught:
+        response = await invoke()
+        assert response.choices[0].finish_reason == "tool_calls" and response.usage.total_tokens == 14
+        assert len(auth_calls) == len(bodies) == 1
+        for unsupported in ({"seed": 1}, {"stop": ["END"]},
+                            {"thinking": {"type": "enabled", "budget_tokens": 16384}, "_routing_client_fields": {"thinking"}}):
+            overrides: dict[str, Any] = dict(unsupported)
+            explicit_fields = overrides.pop("_routing_client_fields", None)
+            kwargs["request"] = request.model_copy(update=overrides)
+            if explicit_fields is not None:
+                object.__setattr__(kwargs["request"], "_routing_client_fields", explicit_fields)
+            with pytest.raises(RouterException) as caught:
                 await invoke()
-            assert caught.value.status_code == 422 and not auth_calls and not bodies
-        else:
-            response = await invoke()
-            assert response.choices[0].finish_reason == "tool_calls" and response.usage.total_tokens == 14
-            assert len(auth_calls) == len(bodies) == 1
-            for unsupported in ({"seed": 1}, {"stop": ["END"]},
-                                {"thinking": {"type": "enabled", "budget_tokens": 16384}, "_routing_client_fields": {"thinking"}}):
-                overrides: dict[str, Any] = dict(unsupported)
-                explicit_fields = overrides.pop("_routing_client_fields", None)
-                kwargs["request"] = request.model_copy(update=overrides)
-                if explicit_fields is not None:
-                    object.__setattr__(kwargs["request"], "_routing_client_fields", explicit_fields)
-                with pytest.raises(RouterException) as caught:
-                    await invoke()
-                assert caught.value.status_code == 422 and len(auth_calls) == len(bodies) == 1
+            assert caught.value.status_code == 422 and len(auth_calls) == len(bodies) == 1
         assert request.model_dump() == snapshot and getattr(request, "_routing_client_fields") == provenance
 
 

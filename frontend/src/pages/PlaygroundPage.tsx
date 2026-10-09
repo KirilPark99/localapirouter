@@ -462,7 +462,10 @@ export const PlaygroundPage: React.FC = () => {
   const supportsSampling = (targetId: string) => {
     const model = models.find((m) => m.canonical_slug === targetId || m.provider_model_id === targetId);
     const provider = providers.find((p) => p.id === model?.provider_id);
-    return !targetId.startsWith("codex_cli/") && provider?.configuration?.module_id !== "codex_cli";
+    return !["codex_cli", "grok_builder_cli"].some((moduleId) =>
+      targetId.startsWith(`${moduleId}/`) || targetId.startsWith(`module_${moduleId}/`) ||
+      provider?.configuration?.module_id === moduleId
+    );
   };
   const samplingDisabled = !supportsSampling(targetA) && (mode !== "compare" || !supportsSampling(targetB));
 
@@ -1784,7 +1787,7 @@ main();`;
 
                 {/* Stream Toggle */}
                 {(!supportsSampling(targetA) || (mode === "compare" && !supportsSampling(targetB))) && (
-                  <p className="text-[10px] text-slate-400">Codex CLI: temperature / top_p are not sent.</p>
+                  <p className="text-[10px] text-slate-400">Codex / Grok CLI: temperature / top_p are not sent.</p>
                 )}
                 <div className="pt-1 border-t border-slate-800 flex items-center justify-between">
                   <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
