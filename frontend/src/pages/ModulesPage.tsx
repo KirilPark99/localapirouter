@@ -20,7 +20,9 @@ import {
   StickyNote,
 } from "lucide-react";
 import { apiRequest } from "../api/client";
-import { Proxy } from "../types";
+import { Proxy, PeriodQuotaRule, PeriodQuotaUsage, DiscoveredModel } from "../types";
+import { QuotaEditor } from "../components/QuotaEditor";
+import { credentialQuotaTranslations } from "../i18n/quotaTranslations";
 import { Modal } from "../components/Modal";
 import { NotesModal } from "../components/NotesModal";
 import { StatusBadge } from "../components/StatusBadge";
@@ -79,6 +81,11 @@ interface ModuleProfile {
   status: string;
   priority: number;
   weight: number;
+  group_name?: string | null;
+  rpm_limit?: number | null;
+  tpm_limit?: number | null;
+  max_concurrency?: number | null;
+  quota_rules?: PeriodQuotaRule[];
   proxy_id?: number | null;
   proxy?: {
     id: number;
@@ -115,7 +122,8 @@ interface OAuthSession extends OAuthStatus {
 }
 
 export const ModulesPage: React.FC = () => {
-  const { t } = useI18n();
+  const { language } = useI18n();
+  const q = credentialQuotaTranslations[language === "ru" ? "ru" : "en"];
   const [modules, setModules] = useState<LoadedModule[]>([]);
   const [proxies, setProxies] = useState<Proxy[]>([]);
   const [loading, setLoading] = useState(true);
@@ -133,6 +141,15 @@ export const ModulesPage: React.FC = () => {
   const [formProxyId, setFormProxyId] = useState<number | undefined>(undefined);
   const [formPriority, setFormPriority] = useState(1);
   const [formWeight, setFormWeight] = useState(1);
+  const [formGroupName, setFormGroupName] = useState("");
+  const [formRpm, setFormRpm] = useState("");
+  const [formTpm, setFormTpm] = useState("");
+  const [formMaxConcurrency, setFormMaxConcurrency] = useState("");
+  const [formQuotas, setFormQuotas] = useState<PeriodQuotaRule[]>([]);
+  const [quotaUsage, setQuotaUsage] = useState<PeriodQuotaUsage[]>([]);
+  const [usageError, setUsageError] = useState("");
+  const [quotaModels, setQuotaModels] = useState<DiscoveredModel[]>([]);
+  const [catalogError, setCatalogError] = useState(false);
   const [formFields, setFormFields] = useState<Record<string, any>>({});
   const [formProfileNotes, setFormProfileNotes] = useState("");
   const [showPasswordFields, setShowPasswordFields] = useState<Record<string, boolean>>({});
@@ -146,6 +163,29 @@ export const ModulesPage: React.FC = () => {
   const [oauthCallbackBusy, setOAuthCallbackBusy] = useState(false);
   const [callbackUrl, setCallbackUrl] = useState("");
   const supportsBrowserOAuth = ["agy_cli", "codex_cli", "grok_builder_cli"].includes(selectedModule?.manifest.id || "");
+
+  const quotaCatalog = {
+    models: [...new Set(quotaModels.filter(model => model.provider_id === selectedModule?.provider_id).map(model => model.canonical_slug))].sort(),
+    profiles: [],
+  };
+
+  useEffect(() => {
+    if (!isProfileModalOpen) return;
+    let cancelled = false;
+    apiRequest<DiscoveredModel[]>("/api/admin/models").then(models => {
+      if (!cancelled) setQuotaModels(models);
+    }).catch(() => { if (!cancelled) setCatalogError(true); });
+    return () => { cancelled = true; };
+  }, [isProfileModalOpen, selectedModule?.provider_id]);
+
+  const loadQuotaUsage = async (id: number) => {
+    setUsageError("");
+    try {
+      setQuotaUsage(await apiRequest<PeriodQuotaUsage[]>(`/api/admin/credentials/${id}/usage`));
+    } catch (err: any) {
+      setUsageError(err.message);
+    }
+  };
 
   const updateOAuthSession = (session: OAuthSession | null) => {
     oauthRef.current = session;
@@ -443,6 +483,16 @@ export const ModulesPage: React.FC = () => {
     setFormProxyId(undefined);
     setFormPriority(1);
     setFormWeight(1);
+    setFormGroupName("");
+    setFormRpm("");
+    setFormTpm("");
+    setFormMaxConcurrency("");
+    setFormQuotas([]);
+    setQuotaUsage([]);
+    setUsageError("");
+    setQuotaModels([]);
+    setCatalogError(false);
+    setShowPasswordFields({});
     setFormProfileNotes("");
     const initialFields: Record<string, any> = {};
     for (const f of mod.manifest.fields) {
@@ -461,6 +511,17 @@ export const ModulesPage: React.FC = () => {
     setFormProxyId(profile.proxy_id || undefined);
     setFormPriority(profile.priority);
     setFormWeight(profile.weight);
+    setFormGroupName(profile.group_name ?? "");
+    setFormRpm(profile.rpm_limit?.toString() ?? "");
+    setFormTpm(profile.tpm_limit?.toString() ?? "");
+    setFormMaxConcurrency(profile.max_concurrency?.toString() ?? "");
+    setFormQuotas((profile.quota_rules || []).map(rule => ({ ...rule })));
+    setQuotaUsage([]);
+    setUsageError("");
+    setQuotaModels([]);
+    setCatalogError(false);
+    setShowPasswordFields({});
+    void loadQuotaUsage(profile.id);
     setFormProfileNotes(profile.notes || "");
     setFormFields({ ...(profile.fields || {}) });
     setFormError(null);
@@ -480,14 +541,36 @@ export const ModulesPage: React.FC = () => {
 
     try {
       const finalNotes = formProfileNotes.trim() || null;
+      const settings = {
+        group_name: formGroupName.trim() || null,
+        rpm_limit: formRpm === "" ? null : Number(formRpm),
+        tpm_limit: formTpm === "" ? null : Number(formTpm),
+        max_concurrency: formMaxConcurrency === "" ? null : Number(formMaxConcurrency),
+        quota_rules: formQuotas,
+      };
+      // Text controls display JSON, but untouched and edited structured fields retain JSON types.
+      const finalFields = Object.fromEntries(Object.entries(formFields).filter(([key]) => !session ||
+        (selectedModule.manifest.fields.some(field => field.key === key && field.type !== "password") &&
+          !["auth_json", "access_token", "refresh_token", "id_token"].includes(key))).map(([key, value]) => {
+        const spec = selectedModule.manifest.fields.find(field => field.key === key);
+        const initial = editingProfile && key in editingProfile.fields ? editingProfile.fields[key] : spec?.default;
+        if (spec?.type === "number") {
+          value = value === "" ? (spec.default ?? null) : Number(value);
+          if (value !== null && !Number.isFinite(value)) throw new Error(`Некорректное число в поле ${key}`);
+        } else if (typeof value === "string" && initial !== undefined && typeof initial !== "string") {
+          try { value = JSON.parse(value); }
+          catch { throw new Error(`Некорректный JSON в поле ${key}`); }
+        }
+        return [key, value];
+      }).filter(([key, value]) => !editingProfile || session ||
+        JSON.stringify(value) !== JSON.stringify(editingProfile.fields[key])));
       if (session) {
         if (session.proxyId !== (formProxyId ?? null)) throw new Error("Прокси изменён. Начните авторизацию заново.");
-        const fields = Object.fromEntries(selectedModule.manifest.fields
-          .filter((field) => field.type !== "password" && !["auth_json", "access_token", "refresh_token", "id_token"].includes(field.key))
-          .map((field) => [field.key, formFields[field.key]]));
+        const fields = finalFields;
         await apiRequest(`/api/admin/modules/${session.moduleId}/oauth/${session.session_id}/save`, {
           method: "POST",
           body: JSON.stringify({
+            ...settings,
             profile_id: editingProfile?.id ?? null,
             name: formName,
             proxy_id: session.proxyId,
@@ -508,7 +591,8 @@ export const ModulesPage: React.FC = () => {
             proxy_id: formProxyId || null,
             priority: formPriority,
             weight: formWeight,
-            fields: formFields,
+            ...settings,
+            fields: finalFields,
             notes: finalNotes,
           }),
         });
@@ -521,7 +605,8 @@ export const ModulesPage: React.FC = () => {
             proxy_id: formProxyId || null,
             priority: formPriority,
             weight: formWeight,
-            fields: formFields,
+            ...settings,
+            fields: finalFields,
             notes: finalNotes,
           }),
         });
@@ -604,13 +689,14 @@ export const ModulesPage: React.FC = () => {
 
   const handleExportProfile = async (profileId: number) => {
     if (!selectedModule) return;
+    if (!window.confirm("Создать JSON в папке profiles/ на сервере? Файл содержит открытые секреты. Это не скачивание зашифрованного бэкапа и не полный снимок SQLite.")) return;
     try {
       const res = await apiRequest<{ success: boolean; relative_path: string }>(
         `/api/admin/modules/${selectedModule.manifest.id}/profiles/${profileId}/export`,
         { method: "POST" }
       );
       if (res && res.success) {
-        alert(`Профиль успешно экспортирован в файл:\nprofiles/${res.relative_path}\n\nЭтот файл защищён в .gitignore и никогда не попадёт в Git.`);
+        alert(`JSON профиля создан на сервере:\nprofiles/${res.relative_path}\n\nСекреты в файле не зашифрованы. .gitignore исключает папку из обычного добавления в Git, но не защищает содержимое файла. Это не скачанный бэкап и не снимок SQLite.`);
         await fetchProfiles(selectedModule.manifest.id);
       }
     } catch (err: any) {
@@ -853,7 +939,7 @@ export const ModulesPage: React.FC = () => {
             <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-xs text-indigo-300 flex items-start gap-2.5">
               <Shield size={16} className="shrink-0 mt-0.5 text-indigo-400" />
               <div className="leading-relaxed">
-                <strong>Изоляция от Git:</strong> Механизмы модулей (<code className="text-slate-200">backend/modules/</code>) отделены от личных профилей. Профили сохраняются в локальной зашифрованной БД или в файлах в папке <code className="bg-slate-900 px-1 py-0.5 rounded text-slate-200">profiles/</code>, которая полностью исключена из Git (<code className="text-slate-400 font-mono">.gitignore</code>) и никогда не попадёт на GitHub.
+                <strong>Три разных формата:</strong> Экспорт профиля создаёт JSON с открытыми секретами в папке <code className="text-slate-200">profiles/</code> на сервере, без скачивания. Эта папка исключена из обычного добавления в Git, но файл не зашифрован. Экспорт конфигурации на странице ключей скачивает зашифрованный бэкап провайдеров, ключей и выбранных прокси. Для полного восстановления всех таблиц нужен отдельный снимок SQLite.
               </div>
             </div>
 
@@ -957,7 +1043,7 @@ export const ModulesPage: React.FC = () => {
                           <button
                             onClick={() => handleExportProfile(p.id)}
                             className="btn-press p-1.5 bg-slate-800 hover:bg-slate-700 text-sky-400 rounded-lg text-xs border border-white/[0.06] transition-all"
-                            title="Экспортировать профиль в папку profiles/ (в файл вне Git)"
+                            title="Создать JSON профиля на сервере (открытые секреты, не бэкап)"
                           >
                             <FolderCode size={13} />
                           </button>
@@ -1039,6 +1125,20 @@ export const ModulesPage: React.FC = () => {
                 <span>{formError}</span>
               </div>
             )}
+
+            <QuotaEditor q={q} formQuotas={formQuotas} setFormQuotas={setFormQuotas} quotaUsage={quotaUsage} usageError={usageError} quotaCatalog={quotaCatalog} catalogError={catalogError} allowProfiles={false} onRefresh={editingProfile ? () => loadQuotaUsage(editingProfile.id) : undefined} />
+
+            <div>
+              <label htmlFor="module-profile-group" className="block text-xs font-semibold text-slate-300 mb-1">Группа</label>
+              <input id="module-profile-group" value={formGroupName} onChange={e => setFormGroupName(e.target.value)} className="w-full px-3 py-2 bg-slate-950 border border-white/[0.08] rounded-xl text-xs text-slate-200" />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {([["RPM", formRpm, setFormRpm], ["TPM", formTpm, setFormTpm], ["Параллельные запросы", formMaxConcurrency, setFormMaxConcurrency]] as const).map(([label, value, setValue]) => (
+                <label key={label} className="block text-xs text-slate-300">{label}
+                  <input type="number" min="1" step="1" value={value} onChange={e => setValue(e.target.value)} placeholder="Без лимита" className="w-full mt-1 px-3 py-2 bg-slate-950 border border-white/[0.08] rounded-xl text-xs text-slate-200" />
+                </label>
+              ))}
+            </div>
 
             {/* Profile Name */}
             <div>
@@ -1174,7 +1274,8 @@ export const ModulesPage: React.FC = () => {
                 {selectedModule.manifest.fields.filter((field) => !oauthSession || (field.type !== "password" && !["auth_json", "access_token", "refresh_token", "id_token"].includes(field.key))).map((field) => {
                   const isPassword = field.type === "password";
                   const showPass = !!showPasswordFields[field.key];
-                  const value = formFields[field.key] ?? "";
+                  const rawValue = formFields[field.key];
+                  const value = rawValue === undefined ? "" : typeof rawValue === "string" ? rawValue : JSON.stringify(rawValue);
 
                   return (
                     <div key={field.key} className="space-y-1">

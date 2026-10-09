@@ -123,3 +123,129 @@ await state.handleSave({ preventDefault() {} }); assert.equal(alerts.at(-1), 'sy
 await state.loadQuotaUsage(17); assert.equal(state.usageError, 'synthetic rejection');
 assert.equal(fetches, 0);
 console.log('PASS: actual credential create/edit/error/usage and shared-editor change handlers; exact UTC rules, empty/replacement secrets, keyless/provider behavior, groups/proxy/metadata/restrictions preserved; zero network.');
+
+// Module profiles share the credential quota editor; exercise only offline handlers.
+const moduleProfile = { id: 23, name: 'Module fixture', proxy_id: 8, priority: 2, weight: 3, group_name: 'Team', rpm_limit: 5, tpm_limit: 77, max_concurrency: 3, quota_rules: rules, notes: 'note', fields: { storage_state: 'masked••', data: { nested: [true, 4, null] }, count: 7, flag: false, list: [1, '•'], nullable: null } };
+const module = { provider_id: 1, manifest: { id: 'codex_cli', name: 'Codex', fields: [{ key: 'storage_state', type: 'password' }, { key: 'data', type: 'textarea', default: {} }, { key: 'count', type: 'number', default: 0 }, { key: 'flag', type: 'text', default: false }, { key: 'list', type: 'textarea', default: [] }, { key: 'nullable', type: 'textarea', default: null }] } };
+const moduleState = { console, JSON, Number, Date, Set, Object, selectedModule: module, quotaModels: models, editingProfile: null, savingProfile: false, oauthStarting: false, oauthRef: { current: null }, formName: '', formGroupName: '', formRpm: '', formTpm: '', formMaxConcurrency: '', formQuotas: [], formProxyId: undefined, formPriority: 1, formWeight: 1, formFields: {}, formProfileNotes: '', formError: null, isProfileModalOpen: false, catalogError: false, showPasswordFields: {}, quotaUsage: [], usageError: '', cancelOAuth() {}, updateOAuthSession() {}, setCallbackUrl() {}, fetchProfiles: async () => {}, fetchModules: async () => {} };
+for (const name of Object.keys(moduleState)) if (!name.startsWith('set')) moduleState['set' + name[0].toUpperCase() + name.slice(1)] = value => { moduleState[name] = typeof value === 'function' ? value(moduleState[name]) : value; };
+let moduleCalls = [];
+moduleState.apiRequest = async (url, options = {}) => { moduleCalls.push({ url, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : undefined }); return []; };
+vm.createContext(moduleState);
+vm.runInContext(extract('pages/ModulesPage.tsx', ['openCreateModal', 'openEditModal', 'handleSaveProfile', 'quotaCatalog', 'loadQuotaUsage']), moduleState);
+vm.runInContext(extract('components/QuotaEditor.tsx', ['changeQuota']), moduleState);
+assert.deepEqual(Array.from(moduleState.quotaCatalog.models), ['google/gemini-fixture']);
+moduleState.openEditModal(structuredClone(moduleProfile)); await new Promise(resolve => setImmediate(resolve));
+moduleState.changeQuota(0, { requests: 9 });
+moduleState.formFields.data = '{"nested":[false,8,null]}';
+await moduleState.handleSaveProfile({ preventDefault() {} });
+let saved = moduleCalls.find(call => call.method === 'PUT');
+assert.equal(saved.url, '/api/admin/modules/codex_cli/profiles/23');
+for (const field of ['group_name', 'rpm_limit', 'tpm_limit', 'max_concurrency', 'proxy_id', 'priority', 'weight', 'notes']) assert.equal(saved.body[field], moduleProfile[field]);
+assert.equal(saved.body.quota_rules[0].requests, 9); assert.equal(moduleProfile.quota_rules[0].requests, 4);
+assert.deepEqual(saved.body.fields, { data: { nested: [false, 8, null] } }, 'Unchanged fields and stale secret masks are never replayed');
+assert.equal(saved.body.quota_rules[1].anchor, rules[1].anchor);
+moduleCalls = []; moduleState.formFields = { ...moduleState.formFields, storage_state: ' new•secret ', count: '8', flag: 'true', list: '[2,"•"]', nullable: 'null' };
+await moduleState.handleSaveProfile({ preventDefault() {} });
+assert.deepEqual(moduleCalls[0].body.fields, { storage_state: ' new•secret ', data: { nested: [false, 8, null] }, count: 8, flag: true, list: [2, '•'] });
+moduleState.openCreateModal(module); assert.equal(moduleState.formQuotas.length, 0); assert.equal(moduleState.formGroupName, ''); assert.equal(moduleState.formTpm, ''); assert.equal(moduleState.showPasswordFields.storage_state, undefined);
+moduleCalls = []; await moduleState.handleSaveProfile({ preventDefault() {} });
+assert.equal(moduleCalls[0].method, 'POST'); assert.equal(moduleCalls[0].body.rpm_limit, null); assert.deepEqual(moduleCalls[0].body.fields.data, {});
+const session = { status: 'authorized', expiresAt: Date.now() + 60000, proxyId: null, moduleId: 'codex_cli', session_id: 'fixture' };
+for (const blocked of [{ ...session, status: 'pending' }, { ...session, expiresAt: 0 }, { ...session, proxyId: 9 }]) {
+  moduleCalls = []; moduleState.oauthRef.current = blocked; await moduleState.handleSaveProfile({ preventDefault() {} }); assert.equal(moduleCalls.length, 0);
+}
+moduleState.oauthRef.current = session; moduleCalls = []; moduleState.formQuotas = rules;
+await moduleState.handleSaveProfile({ preventDefault() {} });
+assert.equal(moduleCalls[0].url, '/api/admin/modules/codex_cli/oauth/fixture/save'); assert.equal('storage_state' in moduleCalls[0].body.fields, false); assert.deepEqual(moduleCalls[0].body.quota_rules, rules);
+moduleState.oauthRef.current = null; moduleState.openEditModal(structuredClone(moduleProfile)); await new Promise(resolve => setImmediate(resolve));
+moduleCalls = []; await moduleState.handleSaveProfile({ preventDefault() {} }); assert.deepEqual(moduleCalls[0].body.fields, {});
+moduleState.formFields.count = ''; moduleCalls = []; await moduleState.handleSaveProfile({ preventDefault() {} }); assert.equal(moduleCalls[0].body.fields.count, 0);
+moduleState.formFields.count = '08'; moduleCalls = []; await moduleState.handleSaveProfile({ preventDefault() {} }); assert.equal(moduleCalls[0].body.fields.count, 8);
+moduleState.openEditModal(structuredClone(moduleProfile)); await new Promise(resolve => setImmediate(resolve));
+moduleState.formFields.count = 'NaN'; moduleCalls = []; await moduleState.handleSaveProfile({ preventDefault() {} }); assert.equal(moduleCalls.length, 0);
+moduleState.formFields.count = '7'; moduleState.formFields.data = '{invalid'; moduleCalls = []; await moduleState.handleSaveProfile({ preventDefault() {} }); assert.equal(moduleCalls.length, 0); assert.equal(moduleState.isProfileModalOpen, true); assert.ok(moduleState.formError);
+assert.equal(fetches, 0);
+let confirmed = false; const exportAlerts = [];
+moduleState.window = { confirm: message => { assert.ok(message.includes('открытые секреты') && message.includes('SQLite')); return confirmed; } };
+moduleState.alert = message => exportAlerts.push(message);
+moduleState.apiRequest = async (url, options) => { moduleCalls.push({ url, method: options.method }); return { success: true, relative_path: 'codex_cli/fixture.json' }; };
+vm.runInContext(extract('pages/ModulesPage.tsx', ['handleExportProfile']), moduleState);
+moduleCalls = []; await moduleState.handleExportProfile(23); assert.equal(moduleCalls.length, 0);
+confirmed = true; await moduleState.handleExportProfile(23); assert.equal(moduleCalls[0].url, '/api/admin/modules/codex_cli/profiles/23/export'); assert.ok(exportAlerts[0].includes('не зашифрованы'));
+console.log('PASS: module-profile actual create/edit/OAuth/export handlers, shared quota edits, provider-filtered catalog, exact masks/bullets and JSON types, pending/expiry/proxy guards, malformed JSON rejection; zero network.');
+
+const moduleScratch = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'module-profile-render-'));
+const moduleServer = await createServer({ root, configFile: false, cacheDir: moduleScratch, server: { middlewareMode: true }, plugins: [{
+  name: 'module-profile-offline-render', enforce: 'pre', transform(code, id) {
+    if (!id.endsWith('/pages/ModulesPage.tsx')) return;
+    const replace = (anchor, value) => { assert.ok(code.includes(anchor), anchor); code = code.replace(anchor, value); };
+    replace('useState<LoadedModule | null>(null)', `useState<LoadedModule | null>(${JSON.stringify(module)})`);
+    replace('useState<ModuleProfile | null>(null)', `useState<ModuleProfile | null>(${JSON.stringify(moduleProfile)})`);
+    replace('const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);', 'const [isProfileModalOpen, setIsProfileModalOpen] = useState(true);');
+    replace('useState<PeriodQuotaRule[]>([])', `useState<PeriodQuotaRule[]>(${JSON.stringify(rules)})`);
+    replace('useState<DiscoveredModel[]>([])', `useState<DiscoveredModel[]>(${JSON.stringify(models)})`);
+    replace('useState<Record<string, any>>({})', `useState<Record<string, any>>(${JSON.stringify(moduleProfile.fields)})`);
+    return code;
+  },
+}] });
+try {
+  const { ModulesPage } = await moduleServer.ssrLoadModule('/src/pages/ModulesPage.tsx');
+  const { I18nProvider } = await moduleServer.ssrLoadModule('/src/i18n/context.tsx');
+  const html = renderToStaticMarkup(React.createElement(I18nProvider, null, React.createElement(ModulesPage)));
+  assert.ok(html.includes('aria-label="Period quotas"') && html.includes('module-profile-group') && html.includes('Параллельные запросы'));
+  assert.ok(html.includes('<input type="password"') && html.includes('masked••'));
+  assert.ok(html.includes('&quot;nested&quot;:[true,4,null]'), 'Structured fields render editable JSON, not object coercion');
+  const catalog = html.match(/<datalist id="quota-model-options">(.*?)<\/datalist>/)[1];
+  assert.equal((catalog.match(/<option/g) || []).length, 1); assert.ok(!catalog.includes('other/model'));
+  assert.ok(!html.includes('quota-profile-options')); assert.equal(fetches, 0);
+  console.log('PASS: real module modal renders shared quotas, scoped model catalog, group/rate controls, JSON fields and masked password; zero network.');
+} finally { await moduleServer.close(); fs.rmSync(moduleScratch, { recursive: true, force: true }); }
+
+// A completed request is not proof that an import transaction committed.
+const backupState = { JSON, fileContent: { encrypted: true }, passphrase: 'synthetic-backup-password', updateExistingProviders: true, skipDuplicateCredentials: true, autoDiscoverModels: false, onSuccess() { refreshes++; } };
+let refreshes = 0, result = null;
+backupState.setIsImporting = value => { backupState.importing = value; };
+backupState.setErrorMsg = value => { backupState.error = value; };
+backupState.setImportResult = value => { backupState.result = value; };
+backupState.apiRequest = async (url, options) => {
+  assert.equal(url, '/api/admin/backup/import');
+  assert.equal(JSON.parse(options.body).auto_discover_models, false);
+  return result;
+};
+vm.createContext(backupState);
+vm.runInContext(extract('components/BackupModals.tsx', ['handleExecuteImport']), backupState);
+const importCases = [
+  { success: false, errors: ['Configuration import failed: synthetic'], title: 'Import Failed', applied: false },
+  { success: false, partial: true, errors: ['Model discovery failed: synthetic'], title: 'Import Completed with Warnings', applied: true },
+  { success: true, partial: false, errors: [], title: 'Import Completed Successfully!', applied: true },
+];
+for (const fixture of importCases) {
+  result = { imported_providers: 0, updated_providers: 0, skipped_providers: 0, imported_credentials: 0, updated_credentials: 0, skipped_credentials: 0, imported_proxies: 0, discovery_triggered: false, ...fixture };
+  const before = refreshes;
+  await backupState.handleExecuteImport();
+  assert.equal(refreshes - before, fixture.applied ? 1 : 0);
+  assert.equal(backupState.result, result); assert.equal(backupState.importing, false);
+  const backupScratch = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'backup-result-render-'));
+  const backupServer = await createServer({ root, configFile: false, cacheDir: backupScratch, server: { middlewareMode: true }, plugins: [{
+    name: 'backup-result-offline-render', enforce: 'pre', transform(code, id) {
+      if (!id.endsWith('/components/BackupModals.tsx')) return;
+      const anchor = 'useState<BackupImportResponse | null>(null)';
+      assert.ok(code.includes(anchor));
+      return code.replace(anchor, `useState<BackupImportResponse | null>(${JSON.stringify(result)})`);
+    },
+  }] });
+  try {
+    const { BackupImportModal } = await backupServer.ssrLoadModule('/src/components/BackupModals.tsx');
+    const html = renderToStaticMarkup(React.createElement(BackupImportModal, { isOpen: true, onClose() {}, onSuccess() {} }));
+    for (const other of importCases) assert.equal(html.includes(other.title), other.title === fixture.title);
+    assert.equal(html.includes('Configuration has been applied.'), fixture.applied);
+    assert.equal(html.includes('The import was rolled back.'), !fixture.applied);
+    assert.equal(html.includes('Close &amp; Refresh'), fixture.applied);
+    assert.equal(fetches, 0);
+  } finally { await backupServer.close(); fs.rmSync(backupScratch, { recursive: true, force: true }); }
+}
+backupState.apiRequest = async () => { throw new Error('synthetic transport failure'); };
+const before = refreshes; await backupState.handleExecuteImport();
+assert.equal(refreshes, before); assert.equal(backupState.error, 'synthetic transport failure'); assert.equal(backupState.importing, false);
+console.log('PASS: real backup import handler and render: rollback, partial application, success and transport failure; no false success/refresh and zero network.');

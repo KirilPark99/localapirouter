@@ -22,7 +22,10 @@ class CredentialService:
         if configuration.get("module_id") not in ("codex_cli", "grok_builder_cli"):
             return configuration
 
+        original_secret = credential.encrypted_api_key
+
         async def persist_credentials(fields):
+            nonlocal original_secret
             import json
             from app.core.database import AsyncSessionLocal
             if (not isinstance(fields, dict) or not fields or
@@ -32,6 +35,8 @@ class CredentialService:
                 current = await cls.get_credential(db, credential.id)
                 if current is None:
                     raise ValueError("CLI credential was deleted during refresh")
+                if decrypt_secret(current.encrypted_api_key) != decrypt_secret(original_secret):
+                    raise ValueError("CLI credential was changed during refresh")
                 values = json.loads(decrypt_secret(current.encrypted_api_key))
                 if not isinstance(values, dict):
                     raise ValueError("CLI credentials must use encrypted JSON storage")
@@ -53,7 +58,8 @@ class CredentialService:
                         else:
                             raise ValueError("Grok pasted auth JSON has no token entry")
                     values["auth_json"] = json.dumps(auth)
-                await cls.update_credential(db, current.id, CredentialUpdate(api_key=json.dumps(values)))
+                await cls.update_credential(db, current.id, CredentialUpdate(api_key=json.dumps(values)), invalidate_module=False)
+                original_secret = current.encrypted_api_key
 
         configuration["persist_credentials"] = persist_credentials
         return configuration
@@ -205,16 +211,17 @@ class CredentialService:
             await module.close_profile(credential_id)
 
     @classmethod
-    async def update_credential(cls, db: AsyncSession, credential_id: int, data: CredentialUpdate) -> Optional[CredentialRead]:
+    async def update_credential(cls, db: AsyncSession, credential_id: int, data: CredentialUpdate, *, invalidate_module: bool = True) -> Optional[CredentialRead]:
         cred = await cls.get_credential(db, credential_id)
         if not cred:
             return None
-
         if "quota_rules" in data.model_fields_set:
             from app.services.api_key_service import ApiKeyService
             from app.services.quota_service import lock_key
             cred = await lock_key(db, credential_id, ProviderCredential)
             cred.quota_rules = ApiKeyService._prepare_rules(data.quota_rules or [], cred.quota_rules or [])
+        from app.modules.profile_loader import mark_profile_db_owned
+        mark_profile_db_owned(cred)
         if data.name is not None:
             cred.name = data.name
         if "group_name" in data.model_fields_set:
@@ -255,7 +262,7 @@ class CredentialService:
         await db.commit()
         full_cred = await cls.get_credential(db, credential_id)
         assert full_cred is not None
-        if data.api_key is not None or data.enabled is False or "proxy_id" in data.model_fields_set:
+        if invalidate_module and (data.api_key is not None or data.enabled is False or "proxy_id" in data.model_fields_set):
             await cls.close_module_profile(full_cred.provider, credential_id)
         return cls._build_credential_read(full_cred)
 
@@ -277,6 +284,9 @@ class CredentialService:
             .where(ProviderCredential.id.in_(credential_ids))
             .values(proxy_id=clean_proxy_id)
         )
+        from app.modules.profile_loader import mark_profile_db_owned
+        for cred in (await db.scalars(select(ProviderCredential).where(ProviderCredential.id.in_(credential_ids)))).all():
+            mark_profile_db_owned(cred)
         await db.execute(stmt)
         await db.commit()
 
@@ -309,6 +319,9 @@ class CredentialService:
             .where(ProviderCredential.id.in_(credential_ids))
             .values(group_name=clean_group)
         )
+        from app.modules.profile_loader import mark_profile_db_owned
+        for cred in (await db.scalars(select(ProviderCredential).where(ProviderCredential.id.in_(credential_ids)))).all():
+            mark_profile_db_owned(cred)
         await db.execute(stmt)
 
         # Ensure folder name is persisted in provider configuration folders if given
@@ -510,6 +523,15 @@ class CredentialService:
 
     @classmethod
     async def set_model_preferences(cls, db: AsyncSession, credential_id: int, model_ids: List[int]):
+        cred = await cls.get_credential(db, credential_id)
+        if not cred:
+            raise ValueError("Credential not found")
+        models = (await db.scalars(select(DiscoveredModel).where(
+            DiscoveredModel.id.in_(model_ids), DiscoveredModel.provider_id == cred.provider_id))).all()
+        if len(set(model_ids)) != len(model_ids) or len(models) != len(model_ids):
+            raise ValueError("Model preferences must belong to this provider and contain no duplicates")
+        from app.modules.profile_loader import mark_profile_db_owned
+        mark_profile_db_owned(cred)
         await db.execute(delete(CredentialModelPreference).where(CredentialModelPreference.credential_id == credential_id))
         for order, mid in enumerate(model_ids):
             pref = CredentialModelPreference(
@@ -526,6 +548,8 @@ class CredentialService:
         if not cred:
             return None
         clean_notes = notes.strip() if notes and isinstance(notes, str) and notes.strip() else None
+        from app.modules.profile_loader import mark_profile_db_owned
+        mark_profile_db_owned(cred)
         cred.notes = clean_notes
         await db.commit()
         await db.refresh(cred)

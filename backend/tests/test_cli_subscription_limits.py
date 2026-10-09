@@ -62,7 +62,9 @@ async def test_codex_primary_secondary_additional_and_credits(monkeypatch):
     assert result.limits[0].window_seconds == 18000
     assert result.limits[0].reset_at == "2026-10-08T09:00:00+00:00"
     assert result.limits[3].remaining == 12.5 and result.limits[3].unit == "credits"
-    assert len(requests) == 1 and requests[0].method == "GET" and str(requests[0].url) == CODEX_USAGE
+    assert [(r.method, str(r.url)) for r in requests] == [
+        ("GET", CODEX_USAGE), ("GET", CODEX_USAGE.replace("/usage", "/rate-limit-reset-credits"))]
+    assert result.reset_credits_available is None
     assert requests[0].headers["chatgpt-account-id"] == "synthetic-account"
     assert requests[0].headers["authorization"] == "Bearer synthetic-access"
     assert requests[0].headers["accept"] == "application/json"
@@ -196,9 +198,9 @@ async def test_refresh_reuse_and_profile_isolation(monkeypatch, adapter_type):
     second.extra_config = {"credential_id": 102, "persist_credentials": persist}
     results = await asyncio.gather(adapter.get_subscription_limits(first), adapter.get_subscription_limits(second))
     assert [r.limits[0].used_percent for r in results] == [20, 80]
-    assert len(persisted) == 2 and len(requests) == 4
+    assert len(persisted) == 2 and len(requests) == (6 if adapter_type is CodexCliAdapter else 4)
     assert (await adapter.get_subscription_limits(first)).limits[0].used_percent == 20
-    assert len(persisted) == 2 and len(requests) == 5
+    assert len(persisted) == 2 and len(requests) == (8 if adapter_type is CodexCliAdapter else 5)
     assert all(r.method == "GET" or str(r.url).endswith("/token") for r in requests)
 
 

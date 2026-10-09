@@ -137,7 +137,10 @@ async def set_model_preferences(
     db: AsyncSession = Depends(get_db),
 ):
     model_ids = payload.get("model_ids", [])
-    await CredentialService.set_model_preferences(db, credential_id, model_ids)
+    try:
+        await CredentialService.set_model_preferences(db, credential_id, model_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {"message": "Model preferences saved"}
 
 @router.put("/{credential_id}/notes")

@@ -1,418 +1,358 @@
 import os
 import json
 import logging
-import uuid
+import hashlib
 import re
+import tempfile
+from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 import yaml
-from sqlalchemy import select, update
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crypto import encrypt_secret, compute_fingerprint, mask_secret
+from app.core.crypto import encrypt_secret, decrypt_secret, compute_fingerprint, mask_secret
 from app.core.circuit_breaker import CredentialStatus
-from app.models.entities import Provider, ProviderCredential, Proxy
+from app.models.entities import Provider, ProviderCredential, Proxy, DiscoveredModel, CredentialModelPreference
+from app.schemas.entities import CredentialQuotaRules
 
 logger = logging.getLogger("app.modules.profile_loader")
-
-# Project root: directory containing 'backend'
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 
 def get_profiles_dir() -> Path:
-    """
-    Get the directory where external module profiles are stored.
-    Defaults to `<PROJECT_ROOT>/profiles/`, or the env var `PROFILES_DIR`.
-    Ensures the directory exists.
-    """
     custom = os.environ.get("PROFILES_DIR")
-    if custom and custom.strip():
-        p = Path(custom.strip()).resolve()
-    else:
-        p = PROJECT_ROOT / "profiles"
-
+    p = Path(custom.strip()).resolve() if custom and custom.strip() else PROJECT_ROOT / "profiles"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 class DiskProfileData(BaseModel):
-    module_id: str
-    name: str
+    module_id: str = Field(pattern=r"^[\w-]+$")
+    name: str = Field(min_length=1)
     enabled: bool = True
-    priority: int = 1
-    weight: int = 1
-    proxy_id: Optional[int] = None
+    priority: int = Field(default=1, ge=1)
+    weight: int = Field(default=1, ge=1)
+    group_name: Optional[str] = None
+    rpm_limit: Optional[int] = Field(default=None, ge=1)
+    tpm_limit: Optional[int] = Field(default=None, ge=1)
+    max_concurrency: Optional[int] = Field(default=None, ge=1)
+    quota_rules: CredentialQuotaRules = Field(default_factory=list)
+    model_preferences: List[str] = Field(default_factory=list)
+    proxy_id: Optional[int] = Field(default=None, ge=1)
     proxy_name: Optional[str] = None
     proxy_url: Optional[str] = None
     notes: Optional[str] = None
     fields: Dict[str, Any] = Field(default_factory=dict)
     file_path: str = ""
     file_key: str = ""
+    file_hash: str = ""
 
 
-def _parse_profile_dict(raw: Dict[str, Any], default_module_id: str, default_name: str, file_rel: str) -> Optional[DiskProfileData]:
+def _parse_profile_dict(raw: Dict[str, Any], default_module_id: str, default_name: str, file_rel: str) -> DiskProfileData:
     if not isinstance(raw, dict):
-        return None
-
+        raise ValueError("Profile must be an object")
     module_id = str(raw.get("module") or raw.get("module_id") or default_module_id).strip()
-    if not module_id:
-        return None
-
     name = str(raw.get("name") or default_name).strip()
-    enabled = bool(raw.get("enabled", True))
-    priority = int(raw.get("priority", 1))
-    weight = int(raw.get("weight", 1))
-
-    proxy_id = raw.get("proxy_id")
-    if proxy_id is not None:
-        try:
-            proxy_id = int(proxy_id)
-        except (ValueError, TypeError):
-            proxy_id = None
-
-    proxy_name = raw.get("proxy_name")
-    proxy_url = raw.get("proxy_url")
-    raw_notes = raw.get("notes")
-    notes = raw_notes.strip() if raw_notes and isinstance(raw_notes, str) and raw_notes.strip() else None
-
-    # Fields can be nested under `fields` or placed at top-level
-    raw_fields = raw.get("fields")
-    fields: Dict[str, Any] = {}
-    if isinstance(raw_fields, dict):
-        fields.update(raw_fields)
-
-    # Also capture any extra top-level keys that look like credential tokens
-    reserved_keys = {
-        "module", "module_id", "name", "enabled", "priority", "weight",
-        "proxy_id", "proxy_name", "proxy_url", "notes", "fields", "source", "description"
-    }
-    for k, v in raw.items():
-        if k not in reserved_keys and k not in fields:
-            fields[k] = v
-
-    file_key = f"{module_id}:{name}"
-
-    return DiskProfileData(
-        module_id=module_id,
-        name=name,
-        enabled=enabled,
-        priority=priority,
-        weight=weight,
-        proxy_id=proxy_id,
-        proxy_name=proxy_name,
-        proxy_url=proxy_url,
-        notes=notes,
-        fields=fields,
-        file_path=file_rel,
-        file_key=file_key,
-    )
+    reserved = set(DiskProfileData.model_fields) | {"module", "source", "description"}
+    fields = raw.get("fields", {})
+    if not isinstance(fields, dict):
+        raise ValueError("Profile fields must be an object")
+    fields = {**{k: v for k, v in raw.items() if k not in reserved}, **fields}
+    values = {k: raw[k] for k in DiskProfileData.model_fields if k in raw and k not in ("module_id", "name", "fields", "file_path", "file_key", "file_hash")}
+    return DiskProfileData(**values, module_id=module_id, name=name, fields=fields,
+                           file_path=file_rel, file_key=f"{module_id}:{name}")
 
 
-def scan_disk_profiles(profiles_dir: Optional[Path] = None) -> List[DiskProfileData]:
-    """
-    Recursively scans the profiles directory for .json, .yaml, and .yml profile definitions.
-    Skips:
-      - Files / folders starting with '.' or '_'
-      - Example templates ending with .example.json, .example.yaml, etc.
-      - Documentation files (.md, .txt)
-    """
-    target_dir = profiles_dir or get_profiles_dir()
-    if not target_dir.exists():
-        return []
-
-    discovered: List[DiskProfileData] = []
-
-    for path in sorted(target_dir.rglob("*")):
-        if not path.is_file():
-            continue
-
-        # Skip hidden or private files/dirs
-        rel_parts = path.relative_to(target_dir).parts
-        if any(part.startswith(".") or part.startswith("_") for part in rel_parts):
-            continue
-
-        # Skip examples and docs
-        filename = path.name.lower()
-        if ".example." in filename or filename.endswith(".md") or filename.endswith(".txt"):
-            continue
-
-        suffix = path.suffix.lower()
-        if suffix not in (".json", ".yaml", ".yml"):
-            continue
-
-        try:
-            content = path.read_text(encoding="utf-8").strip()
-            if not content:
+def scan_disk_profiles(profiles_dir: Optional[Path] = None, errors: Optional[List[str]] = None) -> List[DiskProfileData]:
+    target_dir = profiles_dir if profiles_dir is not None else get_profiles_dir()
+    discovered = []
+    try:
+        paths = sorted(target_dir.rglob("*"))
+        for path in paths:
+            rel = path.relative_to(target_dir)
+            if any(part.startswith((".", "_")) for part in rel.parts) or ".example." in path.name.lower():
                 continue
+            suffix = path.suffix.lower()
+            if suffix not in (".json", ".yaml", ".yml") or not path.is_file():
+                continue
+            try:
+                source = path.read_bytes()
+                data = json.loads(source) if suffix == ".json" else yaml.safe_load(source.decode("utf-8"))
+                default_mod = rel.parts[0] if len(rel.parts) > 1 else path.stem
+                default_name = path.stem.replace("_", " ").title() if len(rel.parts) > 1 else f"{default_mod.title()} File Profile"
+                items = data if isinstance(data, list) else [data]
+                parsed = []
+                for idx, item in enumerate(items):
+                    name = f"{default_name} #{idx + 1}" if isinstance(data, list) else default_name
+                    prof = _parse_profile_dict(item, default_mod, name, str(rel))
+                    prof.file_hash = hashlib.sha256(source).hexdigest()
+                    parsed.append(prof)
+                discovered.extend(parsed)
+            except Exception as exc:
+                # Do not expose validation input values (which can contain secrets).
+                msg = f"Error parsing profile file '{rel}': {type(exc).__name__}"
+                logger.error(msg)
+                if errors is not None:
+                    errors.append(msg)
+    except OSError as exc:
+        msg = f"Error scanning profiles directory: {type(exc).__name__}"
+        logger.error(msg)
+        if errors is not None:
+            errors.append(msg)
+    duplicates = {key for key, count in Counter(p.file_key for p in discovered).items() if count > 1}
+    for key in sorted(duplicates):
+        msg = f"Duplicate profile key '{key}' in source files"
+        logger.error(msg)
+        if errors is not None:
+            errors.append(msg)
+    return [p for p in discovered if p.file_key not in duplicates]
 
-            if suffix == ".json":
-                data = json.loads(content)
-            else:
-                data = yaml.safe_load(content)
 
-            # Determine default module ID and profile name from folder / filename
-            rel_path = path.relative_to(target_dir)
-            rel_str = str(rel_path)
+def _profile_hash(profile: DiskProfileData) -> str:
+    # One shared file may contain several accounts; edits to a sibling are not this account's edits.
+    value = profile.model_dump(mode="json", exclude={"file_path", "file_key", "file_hash"})
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
-            if len(rel_parts) > 1:
-                default_mod = rel_parts[0]
-                default_name = path.stem.replace("_", " ").title()
-            else:
-                default_mod = path.stem
-                default_name = f"{default_mod.title()} File Profile"
 
-            if isinstance(data, list):
-                for idx, item in enumerate(data):
-                    if isinstance(item, dict):
-                        item_name = item.get("name") or f"{default_name} #{idx + 1}"
-                        prof = _parse_profile_dict(item, default_mod, item_name, rel_str)
-                        if prof:
-                            discovered.append(prof)
-            elif isinstance(data, dict):
-                prof = _parse_profile_dict(data, default_mod, default_name, rel_str)
-                if prof:
-                    discovered.append(prof)
+def _profile_metadata(cred, fields, module_id):
+    """Remove old sync's plaintext field copies, retaining unrelated metadata."""
+    from app.modules.loader import ModuleLoader
+    decrypted = decrypt_secret(cred.encrypted_api_key)
+    stored = json.loads(decrypted) if decrypted.strip().startswith("{") else {}
+    keys = set(fields) | set(stored) | {"api_key", "apiKey", "cookie", "cookies", "storage_state", "auth_json", "access_token", "refresh_token", "id_token", "token", "token_v2", "user_token", "key"}
+    loaded = ModuleLoader.get_module(module_id)
+    if loaded:
+        keys.update(f.key for f in loaded.manifest.fields)
+    return {k: v for k, v in (cred.metadata_json or {}).items() if k not in keys}
 
-        except Exception as e:
-            logger.error(f"Error parsing profile file '{path}': {e}")
 
-    return discovered
+def mark_profile_db_owned(cred) -> None:
+    """Called before committing DB mutations; unchanged files must not undo them."""
+    meta = cred.metadata_json if isinstance(cred.metadata_json, dict) else {}
+    module_id = meta.get("_file_profile_key", "").split(":", 1)[0]
+    cleaned = _profile_metadata(cred, {}, module_id)
+    if meta.get("_source") == "file":
+        cleaned["_file_db_owned"] = True
+    cred.metadata_json = cleaned
 
 
 async def sync_profiles_from_disk(db: AsyncSession, profiles_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """
-    Synchronizes disk profiles with the `provider_credentials` database table.
-    - Matches or registers credentials under `Provider(slug=module_<module_id>)`.
-    - Upserts credentials with encrypted secrets.
-    - Flags deleted disk profiles as disabled.
-    """
     from app.modules.loader import ModuleLoader
+    from app.services.api_key_service import ApiKeyService
 
     if not ModuleLoader._modules:
         ModuleLoader.scan_modules()
-
-    disk_profiles = scan_disk_profiles(profiles_dir)
-    logger.info(f"Scanned {len(disk_profiles)} profile definitions from disk ({get_profiles_dir()})")
-
-    created_count = 0
-    updated_count = 0
+    target_dir = profiles_dir if profiles_dir is not None else get_profiles_dir()
     errors: List[str] = []
-    seen_file_keys = set()
+    disk_profiles = scan_disk_profiles(target_dir, errors)
+    created_count = updated_count = orphaned_count = 0
+    seen_file_keys = {p.file_key for p in disk_profiles}
+    path_counts = Counter(p.file_path for p in disk_profiles)
 
     for p in disk_profiles:
         try:
-            # 1. Check if module is loaded
-            module_id = p.module_id
-            loaded = ModuleLoader.get_module(module_id)
-            if not loaded or loaded.status != "ready":
-                msg = f"Skipping profile '{p.name}': module '{module_id}' is not loaded or failed"
-                logger.warning(msg)
-                errors.append(msg)
-                continue
+            # One bad profile must not partially mutate itself or poison the session.
+            async with db.begin_nested():
+                loaded = ModuleLoader.get_module(p.module_id)
+                if not loaded or loaded.status != "ready":
+                    raise ValueError(f"Module '{p.module_id}' is not ready")
+                prov = await db.scalar(select(Provider).where(Provider.slug == f"module_{p.module_id}"))
+                if not prov:
+                    raise ValueError(f"Provider for '{p.module_id}' not found")
+                existing = (await db.scalars(select(ProviderCredential).where(ProviderCredential.provider_id == prov.id))).all()
+                target = next((c for c in existing if (c.metadata_json or {}).get("_file_profile_key") == p.file_key), None)
+                if target is None and path_counts[p.file_path] == 1:
+                    same_path = [c for c in existing if (c.metadata_json or {}).get("_file_path") == p.file_path
+                                 and (c.metadata_json or {}).get("_file_root", str(target_dir.resolve())) == str(target_dir.resolve())]
+                    if len(same_path) == 1:
+                        target = same_path[0]
+                if target is None:
+                    target = next((c for c in existing if c.name == p.name), None)
+                if target and (target.metadata_json or {}).get("_file_db_owned"):
+                    old_hash = target.metadata_json.get("_file_hash")
+                    if (not old_hash or old_hash == p.file_hash or
+                            target.metadata_json.get("_file_profile_hash") == _profile_hash(p)):
+                        target.metadata_json = {**_profile_metadata(target, p.fields, p.module_id),
+                            "_file_hash": p.file_hash, "_file_profile_hash": _profile_hash(p)}
+                        continue
 
-            # 2. Find Provider
-            provider_slug = f"module_{module_id}"
-            prov = (await db.execute(select(Provider).where(Provider.slug == provider_slug))).scalar_one_or_none()
-            if not prov:
-                msg = f"Provider record for '{provider_slug}' not found in DB"
-                logger.warning(msg)
-                errors.append(msg)
-                continue
+                proxy_id = p.proxy_id
+                if proxy_id is not None and await db.get(Proxy, proxy_id) is None:
+                    raise ValueError("Profile proxy not found")
+                if proxy_id is None and (p.proxy_name or p.proxy_url):
+                    proxy = await db.scalar(select(Proxy).where(Proxy.name == p.proxy_name)) if p.proxy_name else None
+                    if proxy is None and p.proxy_url:
+                        proxy = await db.scalar(select(Proxy).where(Proxy.host.contains(p.proxy_url)))
+                    if proxy is None:
+                        raise ValueError("Profile proxy not found")
+                    proxy_id = proxy.id
 
-            # 3. Resolve Proxy if specified by name or url
-            proxy_id = p.proxy_id
-            if not proxy_id and (p.proxy_name or p.proxy_url):
-                if p.proxy_name:
-                    px = (await db.execute(select(Proxy).where(Proxy.name == p.proxy_name))).scalar_one_or_none()
-                    if px:
-                        proxy_id = px.id
-                if not proxy_id and p.proxy_url:
-                    px = (await db.execute(select(Proxy).where(Proxy.host.contains(p.proxy_url)))).scalar_one_or_none()
-                    if px:
-                        proxy_id = px.id
+                models = []
+                if len(set(p.model_preferences)) != len(p.model_preferences):
+                    raise ValueError("Duplicate model preferences")
+                for slug in p.model_preferences:
+                    model = await db.scalar(select(DiscoveredModel).where(DiscoveredModel.provider_id == prov.id, DiscoveredModel.canonical_slug == slug).order_by(DiscoveredModel.id))
+                    if model is None:
+                        raise ValueError(f"Model preference '{slug}' not found for module")
+                    models.append(model)
 
-            # 4. Serialize and encrypt fields
-            serialized_fields = json.dumps(p.fields)
-            encrypted_key = encrypt_secret(serialized_fields)
-            fingerprint = compute_fingerprint(f"{module_id}_{p.name}_{serialized_fields}")
-
-            # Mask primary field for display
-            masked = "(File Profile)"
-            for k in ("api_key", "token_v2", "user_token", "apiKey", "cookie"):
-                if k in p.fields and p.fields[k]:
-                    masked = mask_secret(str(p.fields[k]))
-                    break
-            if masked == "(File Profile)" and p.fields:
-                masked = mask_secret(str(list(p.fields.values())[0]))
-
-            metadata = dict(p.fields)
-            metadata["_source"] = "file"
-            metadata["_file_path"] = p.file_path
-            metadata["_file_profile_key"] = p.file_key
-
-            seen_file_keys.add(p.file_key)
-
-            # 5. Look for existing credential with same provider_id and matching file key or name
-            existing_creds = (await db.execute(
-                select(ProviderCredential).where(ProviderCredential.provider_id == prov.id)
-            )).scalars().all()
-
-            target_cred: Optional[ProviderCredential] = None
-            for c in existing_creds:
-                meta = c.metadata_json if isinstance(c.metadata_json, dict) else {}
-                if meta.get("_file_profile_key") == p.file_key or c.name == p.name:
-                    target_cred = c
-                    break
-
-            if target_cred:
-                # Update existing
-                target_cred.name = p.name
-                target_cred.encrypted_api_key = encrypted_key
-                target_cred.key_fingerprint = fingerprint
-                target_cred.masked_key = masked
-                target_cred.enabled = p.enabled
-                target_cred.priority = p.priority
-                target_cred.weight = p.weight
-                if p.notes:
-                    target_cred.notes = p.notes
-                if proxy_id:
-                    target_cred.proxy_id = proxy_id
-                target_cred.metadata_json = metadata
-                if target_cred.status == CredentialStatus.DISABLED and p.enabled:
-                    target_cred.status = CredentialStatus.HEALTHY
+                # Rule IDs belong to the destination credential, not the export DB.
+                old_rules = target.quota_rules or [] if target else []
+                prepared = (ApiKeyService._restore_credential_rules(p.quota_rules, old_rules)
+                            if "quota_rules" in p.model_fields_set or target is None else old_rules)
+                serialized = json.dumps(p.fields)
+                masked = next((p.fields[k] for k in ("api_key", "token_v2", "user_token", "apiKey", "cookie") if p.fields.get(k)), next(iter(p.fields.values()), None))
+                metadata = _profile_metadata(target, p.fields, p.module_id) if target else {}
+                metadata.update(_source="file", _file_path=p.file_path, _file_profile_key=p.file_key,
+                                _file_hash=p.file_hash, _file_profile_hash=_profile_hash(p),
+                                _file_db_owned=False, _file_root=str(target_dir.resolve()))
+                values = dict(name=p.name, encrypted_api_key=encrypt_secret(serialized),
+                              key_fingerprint=compute_fingerprint(f"{p.module_id}_{p.name}_{serialized}"),
+                              masked_key=mask_secret(str(masked)) if masked is not None else "(File Profile)",
+                              enabled=p.enabled, priority=p.priority, weight=p.weight, proxy_id=proxy_id,
+                              notes=p.notes, group_name=p.group_name, rpm_limit=p.rpm_limit, tpm_limit=p.tpm_limit,
+                              max_concurrency=p.max_concurrency, quota_rules=prepared, metadata_json=metadata)
+                if target:
+                    # Old profile files predate these optional controls; absence is not a reset.
+                    for key in ("notes", "proxy_id", "group_name", "rpm_limit", "tpm_limit", "max_concurrency"):
+                        if key not in p.model_fields_set and not (key == "proxy_id" and (p.proxy_name or p.proxy_url)):
+                            values.pop(key)
+                    for key, value in values.items():
+                        setattr(target, key, value)
+                    if not p.enabled:
+                        target.status = CredentialStatus.DISABLED
+                    elif target.status == CredentialStatus.DISABLED:
+                        target.status = CredentialStatus.HEALTHY
+                else:
+                    target = ProviderCredential(provider_id=prov.id, **values,
+                        status=CredentialStatus.HEALTHY if p.enabled else CredentialStatus.DISABLED, consecutive_failures=0)
+                    db.add(target)
+                await db.flush()
+                if "model_preferences" in p.model_fields_set or target not in existing:
+                    await db.execute(delete(CredentialModelPreference).where(CredentialModelPreference.credential_id == target.id))
+                    db.add_all([CredentialModelPreference(credential_id=target.id, model_id=m.id, priority_order=i) for i, m in enumerate(models)])
+                await db.flush()
+            if target in existing:
                 updated_count += 1
-                logger.info(f"Updated file-based profile '{p.name}' for module '{module_id}'")
             else:
-                # Create new
-                new_cred = ProviderCredential(
-                    provider_id=prov.id,
-                    name=p.name,
-                    encrypted_api_key=encrypted_key,
-                    key_fingerprint=fingerprint,
-                    masked_key=masked,
-                    enabled=p.enabled,
-                    proxy_id=proxy_id,
-                    status=CredentialStatus.HEALTHY if p.enabled else CredentialStatus.DISABLED,
-                    priority=p.priority,
-                    weight=p.weight,
-                    notes=p.notes,
-                    consecutive_failures=0,
-                    metadata_json=metadata,
-                )
-                db.add(new_cred)
                 created_count += 1
-                logger.info(f"Created file-based profile '{p.name}' for module '{module_id}' from {p.file_path}")
+        except Exception as exc:
+            msg = f"Failed to sync profile '{p.name}': {type(exc).__name__}"
+            logger.error(msg)
+            errors.append(msg)
 
-        except Exception as e:
-            err_msg = f"Failed to sync profile '{p.name}': {e}"
-            logger.error(err_msg, exc_info=True)
-            errors.append(err_msg)
-
-    # 6. Flag any previous file credentials whose file was removed from disk as disabled
-    all_file_creds = (await db.execute(
-        select(ProviderCredential)
-    )).scalars().all()
-
-    orphaned_count = 0
-    for c in all_file_creds:
-        meta = c.metadata_json if isinstance(c.metadata_json, dict) else {}
-        if meta.get("_source") == "file":
-            f_key = meta.get("_file_profile_key")
-            if f_key and f_key not in seen_file_keys:
+    # A failed scan/import is not evidence of deletion. Only complete scans prune.
+    if not errors:
+        for c in (await db.scalars(select(ProviderCredential))).all():
+            meta = c.metadata_json or {}
+            if meta.get("_file_root") and meta["_file_root"] != str(target_dir.resolve()):
+                continue
+            if meta.get("_source") == "file" and meta.get("_file_profile_key") not in seen_file_keys:
                 if c.enabled:
                     c.enabled = False
                     c.status = CredentialStatus.DISABLED
                     c.last_error = "Profile file no longer exists in profiles directory"
                     orphaned_count += 1
-                    logger.info(f"Disabled orphaned file profile '{c.name}' (key: {f_key})")
-
     await db.commit()
-
-    return {
-        "total_scanned": len(disk_profiles),
-        "created": created_count,
-        "updated": updated_count,
-        "orphaned_disabled": orphaned_count,
-        "errors": errors,
-        "profiles_dir": str(get_profiles_dir()),
-    }
+    return {"total_scanned": len(disk_profiles), "created": created_count, "updated": updated_count,
+            "orphaned_disabled": orphaned_count, "errors": errors, "profiles_dir": str(target_dir)}
 
 
-async def export_profile_to_file(
-    db: AsyncSession,
-    credential_id: int,
-    module_id: str,
-    format_ext: str = "json",
-    target_profiles_dir: Optional[Path] = None,
-) -> Dict[str, Any]:
-    """
-    Exports a credential from DB to `<PROFILES_DIR>/<module_id>/<safe_name>.json` (or .yaml).
-    """
-    from app.core.crypto import decrypt_secret
-
-    cred = (await db.execute(
-        select(ProviderCredential).where(ProviderCredential.id == credential_id)
-    )).scalar_one_or_none()
-
+async def export_profile_to_file(db: AsyncSession, credential_id: int, module_id: str,
+                                 format_ext: str = "json", target_profiles_dir: Optional[Path] = None) -> Dict[str, Any]:
+    cred = await db.get(ProviderCredential, credential_id)
     if not cred:
         raise ValueError(f"Credential {credential_id} not found")
-
-    # Decrypt fields
-    fields: Dict[str, Any] = {}
-    if cred.encrypted_api_key:
-        try:
-            decrypted = decrypt_secret(cred.encrypted_api_key)
-            if decrypted.strip().startswith("{") and decrypted.strip().endswith("}"):
-                fields = json.loads(decrypted)
-            else:
-                fields = {"api_key": decrypted}
-        except Exception:
-            if isinstance(cred.metadata_json, dict):
-                fields = {k: v for k, v in cred.metadata_json.items() if not k.startswith("_")}
-
-    if isinstance(cred.metadata_json, dict):
-        for k, v in cred.metadata_json.items():
-            if not k.startswith("_") and k not in fields:
-                fields[k] = v
-
-    safe_name = re.sub(r"[^\w\-_]+", "_", cred.name).strip("_").lower() or "profile"
-
-    base_dir = target_profiles_dir or get_profiles_dir()
+    provider = await db.get(Provider, cred.provider_id)
+    if not re.fullmatch(r"[\w-]+", module_id) or (provider.configuration or {}).get("module_id") != module_id:
+        raise ValueError("Profile does not belong to this module")
+    ext = format_ext.lower()
+    if ext not in ("json", "yaml", "yml"):
+        raise ValueError("Export format must be json or yaml")
+    ext = "yaml" if ext == "yml" else ext
+    # No plaintext metadata fallback, and no successful empty export on failure.
+    decrypted = decrypt_secret(cred.encrypted_api_key)
+    if not decrypted:
+        raise ValueError("Profile credentials are empty")
+    fields = json.loads(decrypted) if decrypted.strip().startswith(("{", "[")) else {"api_key": decrypted}
+    if not isinstance(fields, dict):
+        raise ValueError("Profile credentials must be an object")
+    prefs = (await db.execute(select(DiscoveredModel.canonical_slug).join(CredentialModelPreference,
+        CredentialModelPreference.model_id == DiscoveredModel.id).where(CredentialModelPreference.credential_id == cred.id)
+        .order_by(CredentialModelPreference.priority_order, CredentialModelPreference.id))).scalars().all()
+    payload = {"module": module_id, "fields": fields, "model_preferences": list(prefs)}
+    for key in ("name", "enabled", "priority", "weight", "notes", "proxy_id", "group_name",
+                "rpm_limit", "tpm_limit", "max_concurrency", "quota_rules"):
+        payload[key] = getattr(cred, key)
+    # Validate the complete payload before publishing anything.
+    profile = _parse_profile_dict(payload, module_id, cred.name, "")
+    base_dir = target_profiles_dir if target_profiles_dir is not None else get_profiles_dir()
     profile_dir = base_dir / module_id
     profile_dir.mkdir(parents=True, exist_ok=True)
-
-    ext = "yaml" if format_ext.lower() in ("yaml", "yml") else "json"
+    safe_name = re.sub(r"[^\w-]+", "_", cred.name).strip("_").lower() or "profile"
     file_path = profile_dir / f"{safe_name}.{ext}"
-
-    payload = {
-        "module": module_id,
-        "name": cred.name,
-        "enabled": cred.enabled,
-        "priority": cred.priority,
-        "weight": cred.weight,
-        "fields": fields,
-    }
-    if cred.notes:
-        payload["notes"] = cred.notes
-    if cred.proxy_id:
-        payload["proxy_id"] = cred.proxy_id
-
-    if ext == "json":
-        file_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    else:
-        file_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
-
-    # Update metadata in DB to link to the exported file
-    if isinstance(cred.metadata_json, dict):
-        cred.metadata_json["_source"] = "file"
-        cred.metadata_json["_file_path"] = str(file_path.relative_to(base_dir))
-        cred.metadata_json["_file_profile_key"] = f"{module_id}:{cred.name}"
-        await db.commit()
-
-    return {
-        "success": True,
-        "file_path": str(file_path),
-        "relative_path": str(file_path.relative_to(base_dir)),
-    }
+    metadata = _profile_metadata(cred, fields, module_id)
+    document = payload
+    replace_hash = None
+    if (metadata.get("_source") == "file" and metadata.get("_file_path") and
+            metadata.get("_file_root", str(base_dir.resolve())) == str(base_dir.resolve())):
+        linked = base_dir / metadata["_file_path"]
+        if linked.parent.resolve() != profile_dir.resolve():
+            raise ValueError("Linked profile path is outside this module directory")
+        if linked.exists():
+            source = linked.read_bytes()
+            replace_hash = metadata.get("_file_hash")
+            if not replace_hash or hashlib.sha256(source).hexdigest() != replace_hash:
+                raise ValueError("Profile source changed on disk; synchronize it before exporting")
+            linked_ext = "yaml" if linked.suffix.lower() in (".yaml", ".yml") else "json"
+            if linked_ext != ext:
+                raise ValueError("Use the linked profile's existing format or another export directory")
+            document = json.loads(source) if ext == "json" else yaml.safe_load(source.decode("utf-8"))
+            if isinstance(document, list):
+                matches = [i for i, entry in enumerate(document) if _parse_profile_dict(
+                    entry, module_id, "", metadata["_file_path"]).file_key == metadata.get("_file_profile_key")]
+                if len(matches) != 1:
+                    raise ValueError("Linked profile is missing or ambiguous in its source file")
+                document[matches[0]] = payload
+                keys = [_parse_profile_dict(entry, module_id, "", "").file_key for entry in document]
+                if len(keys) != len(set(keys)):
+                    raise ValueError("Profile name conflicts with another account in the source file")
+            else:
+                document = payload
+            file_path = linked
+    content = (json.dumps(document, indent=2, ensure_ascii=False) + "\n" if ext == "json" else
+               yaml.safe_dump(document, allow_unicode=True, sort_keys=False)).encode("utf-8")
+    fd, temporary = tempfile.mkstemp(prefix=".profile-", dir=profile_dir)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if replace_hash is not None:
+            if hashlib.sha256(file_path.read_bytes()).hexdigest() != replace_hash:
+                raise ValueError("Profile source changed during export; no file was replaced")
+            os.replace(temporary, file_path)
+        else:
+            # New exports never replace an unrelated or concurrently created file.
+            suffix = 0
+            while True:
+                try:
+                    os.link(temporary, file_path)
+                    break
+                except FileExistsError:
+                    suffix += 1
+                    file_path = profile_dir / f"{safe_name}-{cred.id}-{suffix}.{ext}"
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    cred.metadata_json = {**metadata, "_source": "file",
+                         "_file_path": str(file_path.relative_to(base_dir)),
+                         "_file_profile_key": f"{module_id}:{cred.name}",
+                         "_file_hash": hashlib.sha256(content).hexdigest(),
+                         "_file_profile_hash": _profile_hash(profile), "_file_db_owned": True,
+                         "_file_root": str(base_dir.resolve())}
+    await db.commit()
+    return {"success": True, "file_path": str(file_path), "relative_path": str(file_path.relative_to(base_dir))}

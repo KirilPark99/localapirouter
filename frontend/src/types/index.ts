@@ -763,6 +763,7 @@ export interface BackupImportRequest {
 
 export interface BackupImportResponse {
   success: boolean;
+  partial?: boolean;
   imported_providers: number;
   updated_providers: number;
   skipped_providers: number;

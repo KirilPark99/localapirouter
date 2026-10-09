@@ -18,13 +18,20 @@ from app.services.model_discovery_service import ModelDiscoveryService
 from app.core.circuit_breaker import CredentialStatus, circuit_breaker
 from app.services import module_oauth
 from app.services.proxy_service import ProxyService
+from app.schemas.entities import CredentialUpdate, CredentialQuotaRules
+from app.services.api_key_service import ApiKeyService
 
 router = APIRouter(prefix="/modules", tags=["Modules Management"], dependencies=[Depends(get_current_admin)])
 
 
 class ModuleProfileCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    proxy_id: Optional[int] = None
+    group_name: Optional[str] = None
+    rpm_limit: Optional[int] = Field(None, ge=1)
+    tpm_limit: Optional[int] = Field(None, ge=1)
+    max_concurrency: Optional[int] = Field(None, ge=1)
+    quota_rules: CredentialQuotaRules = Field(default_factory=list)
+    proxy_id: Optional[int] = Field(None, ge=1)
     priority: int = 1
     weight: int = 1
     fields: Dict[str, Any] = Field(default_factory=dict)
@@ -33,7 +40,12 @@ class ModuleProfileCreate(BaseModel):
 
 class ModuleProfileUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
-    proxy_id: Optional[int] = None
+    group_name: Optional[str] = None
+    rpm_limit: Optional[int] = Field(None, ge=1)
+    tpm_limit: Optional[int] = Field(None, ge=1)
+    max_concurrency: Optional[int] = Field(None, ge=1)
+    quota_rules: Optional[CredentialQuotaRules] = None
+    proxy_id: Optional[int] = Field(None, ge=1)
     priority: Optional[int] = None
     weight: Optional[int] = None
     enabled: Optional[bool] = None
@@ -47,10 +59,9 @@ async def list_modules(db: AsyncSession = Depends(get_db)):
     List all discovered custom modules in `backend/modules/`, their status,
     and the number of created profiles and discovered models.
     """
-    # Ensure modules are scanned and DB providers synced
+    # Reading the list must not import files or overwrite saved profiles.
     if not ModuleLoader._modules:
         ModuleLoader.scan_modules()
-    await ModuleLoader.sync_with_db(db)
 
     results = []
     for mod_id, loaded in ModuleLoader._modules.items():
@@ -204,7 +215,7 @@ async def list_module_profiles(module_id: str, db: AsyncSession = Depends(get_db
         field_specs = {f.key: f for f in loaded.manifest.fields}
         for k, v in raw_fields.items():
             spec = field_specs.get(k)
-            if (spec and spec.type == "password") or k in ("auth_json", "access_token", "refresh_token", "id_token", "key"):
+            if (spec and spec.type == "password") or k in ("auth_json", "access_token", "refresh_token", "id_token", "key", "api_key", "apiKey", "user_token", "cookie", "cookies", "storage_state", "token_v2"):
                 masked_fields[k] = mask_secret(str(v))
             else:
                 masked_fields[k] = v
@@ -222,6 +233,11 @@ async def list_module_profiles(module_id: str, db: AsyncSession = Depends(get_db
             "status": c.status,
             "priority": c.priority,
             "weight": c.weight,
+            "group_name": c.group_name,
+            "rpm_limit": c.rpm_limit,
+            "tpm_limit": c.tpm_limit,
+            "max_concurrency": c.max_concurrency,
+            "quota_rules": c.quota_rules or [],
             "proxy_id": c.proxy_id,
             "proxy": proxy_info,
             "fields": masked_fields,
@@ -292,6 +308,11 @@ async def create_module_profile(
     cred = ProviderCredential(
         provider_id=prov.id,
         name=data.name,
+        group_name=data.group_name.strip() if data.group_name and data.group_name.strip() else None,
+        rpm_limit=data.rpm_limit,
+        tpm_limit=data.tpm_limit,
+        max_concurrency=data.max_concurrency,
+        quota_rules=ApiKeyService._prepare_rules(data.quota_rules, []),
         encrypted_api_key=encrypted_key,
         key_fingerprint=fingerprint,
         masked_key=masked,
@@ -321,6 +342,13 @@ async def create_module_profile(
     }
 
 
+async def _get_module_profile(db: AsyncSession, module_id: str, profile_id: int) -> ProviderCredential:
+    cred = await CredentialService.get_credential(db, profile_id)
+    if not cred or cred.provider.slug != f"module_{module_id}":
+        raise HTTPException(404, "Profile does not belong to this module")
+    return cred
+
+
 @router.put("/{module_id}/profiles/{profile_id}")
 async def update_module_profile(
     module_id: str,
@@ -331,74 +359,35 @@ async def update_module_profile(
     """
     Update an existing profile for a module.
     """
-    cred = (await db.execute(
-        select(ProviderCredential).where(ProviderCredential.id == profile_id)
-    )).scalar_one_or_none()
-
-    if not cred:
-        raise HTTPException(status_code=404, detail=f"Profile with ID {profile_id} not found")
-
-    if data.name is not None:
-        cred.name = data.name
-    if data.priority is not None:
-        cred.priority = data.priority
-    if data.weight is not None:
-        cred.weight = data.weight
-    if data.enabled is not None:
-        cred.enabled = data.enabled
-    if "proxy_id" in data.model_fields_set:
-        cred.proxy_id = data.proxy_id
-    if "notes" in data.model_fields_set:
-        raw_notes = data.notes
-        cred.notes = raw_notes.strip() if (raw_notes and isinstance(raw_notes, str) and raw_notes.strip()) else None
-
-    # If new fields were submitted, merge and re-encrypt
+    cred = await _get_module_profile(db, module_id, profile_id)
+    changes = data.model_dump(exclude_unset=True, exclude={"fields"})
+    if "proxy_id" in changes and data.proxy_id is not None and await db.get(Proxy, data.proxy_id) is None:
+        raise HTTPException(404, "Proxy not found")
     if data.fields is not None:
-        current_fields = {}
-        if cred.encrypted_api_key:
-            try:
-                decrypted = decrypt_secret(cred.encrypted_api_key)
-                if decrypted.startswith("{") and decrypted.endswith("}"):
-                    current_fields = json.loads(decrypted)
-            except Exception:
-                pass
-        for k, v in data.fields.items():
-            if v is None:
+        try:
+            raw = decrypt_secret(cred.encrypted_api_key)
+            current_fields = json.loads(raw) if raw.strip().startswith("{") else ({} if raw == "no-key" else {"api_key": raw})
+            if not isinstance(current_fields, dict):
+                raise ValueError("Profile fields must be a JSON object")
+        except Exception:
+            raise HTTPException(400, "Cannot decrypt profile fields; existing credentials were not changed") from None
+        loaded = ModuleLoader.get_module(module_id)
+        secret_keys = {f.key for f in loaded.manifest.fields if f.type == "password"} if loaded else set()
+        secret_keys.update(("auth_json", "access_token", "refresh_token", "id_token", "key", "api_key", "apiKey", "user_token", "cookie", "cookies", "storage_state", "token_v2"))
+        original_fields = current_fields.copy()
+        for key, value in data.fields.items():
+            if value is None:
                 continue
-            v_str = str(v).strip()
-            # If the value contains mask bullets (•), user did not edit this field; preserve existing secret
-            if "•" in v_str:
-                continue
-            current_fields[k] = v_str
-
-        serialized_fields = json.dumps(current_fields)
-        cred.encrypted_api_key = encrypt_secret(serialized_fields)
-        cred.metadata_json = {k: v for k, v in (cred.metadata_json or {}).items() if k.startswith("_")}
-        if "api_key" in current_fields:
-            cred.masked_key = mask_secret(str(current_fields["api_key"]))
-        elif "token" in current_fields:
-            cred.masked_key = mask_secret(str(current_fields["token"]))
-        elif current_fields:
-            first_val = list(current_fields.values())[0]
-            cred.masked_key = mask_secret(str(first_val))
-
-    await db.commit()
-    await db.refresh(cred)
-    if data.fields is not None or data.enabled is False or "proxy_id" in data.model_fields_set:
-        provider = await db.get(Provider, cred.provider_id)
-        await CredentialService.close_module_profile(provider, cred.id)
-
-    return {
-        "id": cred.id,
-        "module_id": module_id,
-        "name": cred.name,
-        "enabled": cred.enabled,
-        "status": cred.status,
-        "proxy_id": cred.proxy_id,
-        "priority": cred.priority,
-        "weight": cred.weight,
-        "notes": cred.notes,
-    }
+            if key in secret_keys:
+                if key in current_fields and value == mask_secret(str(current_fields[key])):
+                    continue
+                if isinstance(value, str) and value and value == mask_secret(value):
+                    raise HTTPException(409, "Profile secret changed; reload the form before saving")
+            current_fields[key] = value
+        if current_fields != original_fields:
+            changes["api_key"] = json.dumps(current_fields)
+    result = await CredentialService.update_credential(db, profile_id, CredentialUpdate(**changes))
+    return {**result.model_dump(mode="json"), "module_id": module_id}
 
 
 @router.put("/{module_id}/profiles/{profile_id}/notes")
@@ -411,18 +400,11 @@ async def update_module_profile_notes(
     """
     Update plain text notes for a module profile (credential).
     """
-    cred = (await db.execute(
-        select(ProviderCredential).where(ProviderCredential.id == profile_id)
-    )).scalar_one_or_none()
-
-    if not cred:
-        raise HTTPException(status_code=404, detail=f"Profile with ID {profile_id} not found")
+    cred = await _get_module_profile(db, module_id, profile_id)
 
     clean_notes = data.notes.strip() if data.notes and data.notes.strip() else None
-    cred.notes = clean_notes
-    await db.commit()
-    await db.refresh(cred)
-    return {"profile_id": profile_id, "notes": cred.notes}
+    notes = await CredentialService.update_credential_notes(db, profile_id, clean_notes)
+    return {"profile_id": profile_id, "notes": notes}
 
 
 @router.delete("/{module_id}/profiles/{profile_id}")
@@ -434,12 +416,7 @@ async def delete_module_profile(
     """
     Delete a module profile.
     """
-    cred = (await db.execute(
-        select(ProviderCredential).where(ProviderCredential.id == profile_id)
-    )).scalar_one_or_none()
-
-    if not cred:
-        raise HTTPException(status_code=404, detail=f"Profile with ID {profile_id} not found")
+    cred = await _get_module_profile(db, module_id, profile_id)
 
     await CredentialService.delete_credential(db, profile_id)
     return {"success": True, "message": f"Profile {profile_id} deleted"}
@@ -454,6 +431,7 @@ async def test_module_profile(
     """
     Execute live credential and proxy validation test for this module profile.
     """
+    await _get_module_profile(db, module_id, profile_id)
     result = await CredentialService.test_credential(db, profile_id)
     return result
 
@@ -467,9 +445,7 @@ async def sync_module_models(
     """
     Fetch live models from this module profile and store them in the catalog.
     """
-    cred = await CredentialService.get_credential(db, profile_id)
-    if not cred or (cred.provider.configuration or {}).get("module_id") != module_id:
-        raise HTTPException(status_code=404, detail="Profile does not belong to this module")
+    cred = await _get_module_profile(db, module_id, profile_id)
     await ModelDiscoveryService.fetch_models_for_credential(db, profile_id)
     count = await db.scalar(select(func.count(DiscoveredModel.id)).where(
         DiscoveredModel.provider_id == cred.provider_id, DiscoveredModel.available == True)) or 0
@@ -487,6 +463,7 @@ async def export_module_profile(
     Export a profile to the profiles/ directory outside git.
     """
     from app.modules.profile_loader import export_profile_to_file
+    await _get_module_profile(db, module_id, profile_id)
     try:
         res = await export_profile_to_file(db, profile_id, module_id, format)
         return res
@@ -573,8 +550,7 @@ async def save_browser_oauth(module_id: str, session_id: str, data: BrowserOAuth
             if not cred:
                 raise HTTPException(404, "Profile does not belong to this module")
             result = await update_module_profile(module_id, data.profile_id, ModuleProfileUpdate(
-                name=data.name, proxy_id=data.proxy_id, priority=data.priority, weight=data.weight,
-                fields=fields, notes=data.notes), db)
+                **{**data.model_dump(exclude_unset=True, exclude={"profile_id", "fields"}), "fields": fields}), db)
             cred.status = CredentialStatus.HEALTHY if cred.enabled else CredentialStatus.DISABLED
             cred.consecutive_failures = 0
             cred.last_error = None
@@ -584,8 +560,7 @@ async def save_browser_oauth(module_id: str, session_id: str, data: BrowserOAuth
             result["status"] = cred.status
         else:
             result = await create_module_profile(module_id, ModuleProfileCreate(
-                name=data.name, proxy_id=data.proxy_id, priority=data.priority, weight=data.weight,
-                fields=fields, notes=data.notes), db)
+                **{**data.model_dump(exclude_unset=True, exclude={"profile_id", "fields"}), "fields": fields}), db)
         module_oauth.discard(session_id)
         return result
 

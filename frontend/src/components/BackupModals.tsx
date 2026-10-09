@@ -136,8 +136,9 @@ export const BackupExportModal: React.FC<BackupExportModalProps> = ({
           <FileDown size={18} className="text-indigo-400 shrink-0 mt-0.5" />
           <div className="leading-relaxed">
             <span className="font-semibold text-indigo-100">Migration to another server: </span>
-            The export file contains provider settings and decrypted API keys.
-            When imported on a new server, keys will automatically be re-encrypted with that server's own master key.
+            Downloads an encrypted configuration backup of the selected providers, credentials and optional proxies, protected by your passphrase.
+            On import, secrets are re-encrypted with the destination server's master key.
+            This is not a full SQLite snapshot and does not restore every database table. Module-profile JSON exports are separate server-side files containing unencrypted secrets.
           </div>
         </div>
 
@@ -431,7 +432,7 @@ export const BackupImportModal: React.FC<BackupImportModalProps> = ({
       });
 
       setImportResult(result);
-      onSuccess();
+      if (result.success || result.partial) onSuccess();
     } catch (err: any) {
       setErrorMsg(err.message || "Failed to execute import");
     } finally {
@@ -457,16 +458,18 @@ export const BackupImportModal: React.FC<BackupImportModalProps> = ({
         {/* STEP 3: RESULT REPORT */}
         {importResult ? (
           <div className="space-y-4 py-2">
-            <div className="p-4 bg-emerald-950/40 border border-emerald-800/60 rounded-xl flex items-start gap-3">
-              <div className="w-10 h-10 rounded-full bg-emerald-900/60 border border-emerald-700/60 flex items-center justify-center text-emerald-400 shrink-0 mt-0.5">
-                <CheckCircle2 size={22} />
+            <div role="status" className={`p-4 border rounded-xl flex items-start gap-3 ${importResult.success ? "bg-emerald-950/40 border-emerald-800/60 text-emerald-200" : importResult.partial ? "bg-amber-950/40 border-amber-800/60 text-amber-200" : "bg-rose-950/40 border-rose-800/60 text-rose-200"}`}>
+              <div className="shrink-0 mt-0.5">
+                {importResult.success ? <CheckCircle2 size={22} /> : <AlertTriangle size={22} />}
               </div>
               <div>
-                <h4 className="text-sm font-bold text-emerald-200">
-                  Import Completed Successfully!
+                <h4 className="text-sm font-bold">
+                  {importResult.success ? "Import Completed Successfully!" : importResult.partial ? "Import Completed with Warnings" : "Import Failed"}
                 </h4>
-                <p className="text-xs text-emerald-300/80 mt-0.5">
-                  Configuration has been applied. All keys are encrypted with this server's local master key.
+                <p className="text-xs mt-0.5">
+                  {importResult.success || importResult.partial
+                    ? "Configuration has been applied. All keys are encrypted with this server's local master key."
+                    : "Configuration was not applied. The import was rolled back."}
                 </p>
               </div>
             </div>
@@ -525,7 +528,7 @@ export const BackupImportModal: React.FC<BackupImportModalProps> = ({
                 onClick={onClose}
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
               >
-                Close & Refresh
+                {importResult.success || importResult.partial ? "Close & Refresh" : "Close"}
               </button>
             </div>
           </div>
@@ -555,7 +558,7 @@ export const BackupImportModal: React.FC<BackupImportModalProps> = ({
                       {file ? file.name : "Select or drag & drop backup file"}
                     </div>
                     <div className="text-slate-400 text-xs mt-0.5">
-                      Supports MyAIrouter .json export files
+                      Supports encrypted MyAIrouter configuration backups (.json), not module-profile JSON or full SQLite snapshots
                     </div>
                   </div>
                 </div>

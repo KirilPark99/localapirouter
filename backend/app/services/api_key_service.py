@@ -173,6 +173,20 @@ class ApiKeyService:
                 details['requested_model'] = requested_model
 
     @staticmethod
+    def _restore_credential_rules(rules, existing):
+        from pydantic import TypeAdapter
+        from app.schemas.entities import CredentialQuotaRules
+        validated = TypeAdapter(CredentialQuotaRules).validate_python(rules)
+        known = [r for r in existing if r.get('id')]
+        identity = ('scope', 'model', 'period', 'duration_seconds', 'anchor', 'start', 'end')
+        restored = []
+        for rule in validated:
+            value = rule.model_dump(mode='json')
+            old = next((r for r in known if all(r.get(k) == value.get(k) for k in identity)), None)
+            restored.append(rule.model_copy(update={'id': old['id'] if old else None}))
+        return ApiKeyService._prepare_rules(restored, known)
+
+    @staticmethod
     def _prepare_rules(rules, existing):
         import uuid
         from fastapi import HTTPException

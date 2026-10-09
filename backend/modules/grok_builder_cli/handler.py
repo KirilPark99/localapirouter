@@ -65,6 +65,10 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
         self._token_cache: Dict[str, Dict[str, Any]] = {}
         self._refresh_locks: Dict[str, asyncio.Lock] = {}
 
+    async def close_profile(self, credential_id):
+        # Keep the lock: a concurrent refresh must not acquire a replacement lock.
+        self._token_cache.pop(str(credential_id), None)
+
     def _find_local_auth_file(self) -> Optional[Path]:
         for p in LOCAL_AUTH_PATHS:
             if p.exists() and p.is_file():
@@ -136,6 +140,9 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
                   hashlib.sha256((refresh or access).encode()).hexdigest())
         async with self._refresh_locks.setdefault(key, asyncio.Lock()):
             cached = self._token_cache.get(key) or {}
+            if cached and (refresh or access) not in (cached.get("source_token"), cached.get("refresh_token"), cached.get("access_token")):
+                self._token_cache.pop(key, None)
+                cached = {}
             persist = ctx.extra_config.get("persist_credentials")
             if cached.get("pending_persistence") and persist:
                 await persist(cached["pending_persistence"])
@@ -166,6 +173,7 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
                 if data.get("id_token"):
                     fields["id_token"] = data["id_token"]
                 self._token_cache[key] = {**fields, "email": identity,
+                                          "source_token": raw.get("refresh_token") or raw.get("access_token"),
                                           "expires_at": time.time() + float(data.get("expires_in", 21600))}
                 cached = self._token_cache[key]
                 if not ctx.extra_config.get("credential_id"):
