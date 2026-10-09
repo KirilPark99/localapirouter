@@ -253,6 +253,25 @@ async def list_module_profiles(module_id: str, db: AsyncSession = Depends(get_db
     return output
 
 
+async def _validate_lingling_pool(db: AsyncSession, module_id: str, fields: dict, proxy_id: Optional[int]):
+    if module_id != "lingling":
+        return
+    try:
+        mode, policy = fields.get("transport_mode", "tor"), fields.get("proxy_policy", "balance")
+        if mode not in ("tor", "proxy", "mixed") or policy not in ("balance", "priority"):
+            raise ValueError("Invalid Lingling transport or pool policy")
+        ids = ProxyService.validate_proxy_ids(fields.get("proxy_ids", []))
+        if mode == "tor" and proxy_id is not None:
+            raise ValueError("Select Proxy or Mixed transport to use a profile proxy")
+        if mode != "tor":
+            selected = list(dict.fromkeys(ids + ([proxy_id] if proxy_id is not None else [])))
+            if not selected:
+                raise ValueError("Select at least one proxy for Proxy or Mixed transport")
+            await ProxyService.resolve_proxy_pool(db, selected)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
 @router.post("/{module_id}/profiles", status_code=status.HTTP_201_CREATED)
 async def create_module_profile(
     module_id: str,
@@ -275,6 +294,8 @@ async def create_module_profile(
                 status_code=422,
                 detail=f"Field '{field_spec.label}' ({field_spec.key}) is required by module '{loaded.manifest.name}'",
             )
+
+    await _validate_lingling_pool(db, module_id, data.fields, data.proxy_id)
 
     provider_slug = f"module_{loaded.manifest.id}"
     prov = (await db.execute(select(Provider).where(Provider.slug == provider_slug))).scalar_one_or_none()
@@ -363,7 +384,7 @@ async def update_module_profile(
     changes = data.model_dump(exclude_unset=True, exclude={"fields"})
     if "proxy_id" in changes and data.proxy_id is not None and await db.get(Proxy, data.proxy_id) is None:
         raise HTTPException(404, "Proxy not found")
-    if data.fields is not None:
+    if data.fields is not None or module_id == "lingling" and "proxy_id" in changes:
         try:
             raw = decrypt_secret(cred.encrypted_api_key)
             current_fields = json.loads(raw) if raw.strip().startswith("{") else ({} if raw == "no-key" else {"api_key": raw})
@@ -375,7 +396,7 @@ async def update_module_profile(
         secret_keys = {f.key for f in loaded.manifest.fields if f.type == "password"} if loaded else set()
         secret_keys.update(("auth_json", "access_token", "refresh_token", "id_token", "key", "api_key", "apiKey", "user_token", "cookie", "cookies", "storage_state", "token_v2"))
         original_fields = current_fields.copy()
-        for key, value in data.fields.items():
+        for key, value in (data.fields or {}).items():
             if value is None:
                 continue
             if key in secret_keys:
@@ -384,6 +405,8 @@ async def update_module_profile(
                 if isinstance(value, str) and value and value == mask_secret(value):
                     raise HTTPException(409, "Profile secret changed; reload the form before saving")
             current_fields[key] = value
+        await _validate_lingling_pool(db, module_id, current_fields,
+                                     data.proxy_id if "proxy_id" in changes else cred.proxy_id)
         if current_fields != original_fields:
             changes["api_key"] = json.dumps(current_fields)
     result = await CredentialService.update_credential(db, profile_id, CredentialUpdate(**changes))

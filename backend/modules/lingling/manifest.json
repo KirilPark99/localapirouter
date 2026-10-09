@@ -1,26 +1,50 @@
 {
   "id": "lingling",
-  "name": "Lingling · OpenCode over Tor",
-  "version": "1.1.0",
-  "description": "Real OpenCode through Lingling rotating Tor lanes. Isolated profiles, chat/SSE/reasoning, inline images and client-side agent tool calls. No API key required. No direct fallback or backend tool execution.",
+  "name": "Lingling · OpenCode over Tor / proxies",
+  "version": "1.2.0",
+  "description": "Real OpenCode through Lingling Tor, ordinary proxy pools or mixed lanes. Isolated profiles, chat/SSE/reasoning, inline images and client-side agent tool calls. No API key required. No direct fallback or backend tool execution.",
   "icon": "Network",
   "auth_type": "custom_fields",
   "fields": [
+    {
+      "key": "transport_mode",
+      "label": "Транспорт",
+      "type": "select",
+      "required": true,
+      "default": "tor",
+      "options": [{"label": "Tor", "value": "tor"}, {"label": "Прокси", "value": "proxy"}, {"label": "Tor + прокси", "value": "mixed"}]
+    },
+    {
+      "key": "proxy_policy",
+      "label": "Режим пула",
+      "type": "select",
+      "required": true,
+      "default": "balance",
+      "options": [{"label": "Балансировка", "value": "balance"}, {"label": "По приоритету", "value": "priority"}]
+    },
+    {
+      "key": "proxy_ids",
+      "label": "Ordered proxy pool",
+      "type": "textarea",
+      "required": false,
+      "default": [],
+      "description": "Select enabled saved proxies in priority order. Proxy/mixed mode requires a pool or an ordinary profile proxy."
+    },
     {
       "key": "project_path",
       "label": "Lingling source directory",
       "type": "text",
       "required": true,
       "default": "/home/kiril/PythonProjects/lingling",
-      "description": "Uses the existing, unmodified local Lingling project."
+      "description": "Uses the local Lingling checkout with native proxy-pool support."
     },
     {
       "key": "lanes",
       "label": "Tor lanes",
       "type": "number",
-      "required": true,
+      "required": false,
       "default": 5,
-      "description": "1–16 independent Tor lanes. No direct fallback."
+      "description": "1–16 independent Tor lanes in Tor/mixed mode; ignored in proxy-only mode. No direct fallback."
     },
     {
       "key": "countries",
@@ -28,7 +52,7 @@
       "type": "text",
       "required": false,
       "default": "us,de,nl,fr,ro,gb,ca,se,pl,ch",
-      "description": "Comma-separated two-letter codes. Ordinary profile proxies are not supported: Lingling owns Tor."
+      "description": "Comma-separated two-letter codes for Tor/mixed mode only."
     },
     {
       "key": "fallback_countries",
@@ -50,7 +74,7 @@
       "type": "number",
       "required": true,
       "default": 600,
-      "description": "30–1800 seconds for the first Tor startup; later requests reuse the same kitchen."
+      "description": "30–1800 seconds for transport readiness; later requests reuse the same kitchen."
     },
     {
       "key": "opencode_path",
@@ -97,19 +121,6 @@
       }
     },
     {
-      "id": "muse-spark-1.2-contributor-free",
-      "name": "Muse Spark 1.2 Free",
-      "context_length": 1048576,
-      "max_output_tokens": 131072,
-      "capabilities": {
-        "chat": true,
-        "streaming": true,
-        "tools": true,
-        "vision": true,
-        "reasoning": true
-      }
-    },
-    {
       "id": "nemotron-3.5-lightning-free",
       "name": "Nemotron 3.5 Lightning Free",
       "context_length": 262144,
@@ -119,19 +130,6 @@
         "streaming": true,
         "tools": true,
         "vision": false,
-        "reasoning": true
-      }
-    },
-    {
-      "id": "mimo-v2.5-free",
-      "name": "MiMo V2.5 Free",
-      "context_length": 200000,
-      "max_output_tokens": 32000,
-      "capabilities": {
-        "chat": true,
-        "streaming": true,
-        "tools": true,
-        "vision": true,
         "reasoning": true
       }
     },
@@ -158,6 +156,84 @@
         "streaming": true,
         "tools": true,
         "vision": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "exo-free",
+      "name": "Exo Free",
+      "context_length": 1048576,
+      "max_output_tokens": 131072,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "tools": true,
+        "vision": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "ling-3.1-flash-free",
+      "name": "Ling 3.1 Flash Free",
+      "context_length": 262144,
+      "max_output_tokens": 32768,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "tools": true,
+        "vision": false,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "longcat-2.5-preview-free",
+      "name": "LongCat 2.5 Preview Free",
+      "context_length": 1000000,
+      "max_output_tokens": 131072,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "tools": true,
+        "vision": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "mimo-v2.6-flash-free",
+      "name": "MiMo-V2.6-Flash Free",
+      "context_length": 200000,
+      "max_output_tokens": 32000,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "tools": true,
+        "vision": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "space-bunny-free",
+      "name": "Space Bunny Free",
+      "context_length": 1048576,
+      "max_output_tokens": 524288,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "tools": true,
+        "vision": true,
+        "reasoning": true
+      }
+    },
+    {
+      "id": "step-5-preview-free",
+      "name": "Step 5 Preview Free",
+      "context_length": 1000000,
+      "max_output_tokens": 65536,
+      "capabilities": {
+        "chat": true,
+        "streaming": true,
+        "tools": true,
+        "vision": true,
         "reasoning": true
       }
     }

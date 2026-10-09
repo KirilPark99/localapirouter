@@ -1,21 +1,20 @@
 # Lingling module
 
-Uses the existing local Lingling source and the real OpenCode client through its Tor/MITM relay. It does not copy or modify Lingling.
+Uses the local Lingling source with native proxy-pool support and the real OpenCode client through its MITM relay. The module does not replace native transport with a direct HTTP client.
 
 ## Setup
 
-- Install backend dependencies (`uv sync`). The bridge requires `stem==1.8.2`; cryptography is already a backend dependency.
-- Install the system Tor binary and GeoIP data, and OpenCode. On Linux, Lingling does not download Tor automatically.
-- Open **Modules → Lingling · OpenCode over Tor → Add Profile**.
-- Keep the source directory pointing to the existing Lingling checkout. Configure the number of lanes, country lists and cold-start timeout as needed.
-- Leave the ordinary profile proxy empty. Optional binary paths override PATH detection.
-- **Test** checks the local configuration and OpenCode model catalog without starting Tor. **Sync Models** refreshes the free-model catalog from the installed OpenCode client.
+- Install backend dependencies (`uv sync`) and OpenCode. Keep the source directory pointing to the Lingling checkout with native proxy-pool support.
+- Open **Modules → Lingling → Add Profile**. Transport defaults to **Tor**, preserving existing profiles. Tor and mixed modes require `stem==1.8.2`, the system Tor binary and GeoIP data; proxy-only mode requires none of these. Tor lane count and countries apply only to Tor/mixed mode. Optional binary paths override PATH detection.
+- For **Proxy pool** or **Tor + proxy pool**, select enabled saved HTTP CONNECT, HTTPS-to-proxy or SOCKS5 proxies in order. **Balance** spreads lane use; **Priority order** prefers the first usable lane. Rate-limited lanes cool down without changing or stopping external proxies.
+- An ordinary profile proxy is rejected in Tor mode and appended/deduplicated in proxy/mixed mode. An empty pool or a missing/disabled selected proxy fails before launching anything; mixed mode does not silently discard invalid proxies.
+- **Test** validates configuration and saved proxy references, then checks the OpenCode catalog without starting transport. **Sync Models** refreshes the installed client's free catalog. These checks do not prove proxy generation works.
 
 ## Requests and lifecycle
 
 Use a model from this module through the usual router/playground. DIRECT requests for first-party OpenCode Zen free models present in the Lingling manifest also use an enabled Lingling profile automatically; the requested name and API-key permissions stay unchanged, and logs record the actual Lingling provider/profile. Paid or unlisted Zen models retain their HTTP route. If Lingling is disabled, unavailable or has no healthy profile, free Zen requests return 503 instead of falling back to generic HTTP. Explicit PRIORITY candidates are not rewritten: select the Lingling model in those profiles.
 
-The first generation starts an isolated Tor/OpenCode worker; bootstrap can take several minutes. Later requests reuse it. Each profile owns private runtime directories under `$XDG_STATE_HOME/MyAIrouter/lingling` or `~/.local/state/MyAIrouter/lingling`. Chat-only and client-tool requests use separate owned workers because their native denial policies differ.
+The first generation starts an isolated Lingling/OpenCode worker; Tor bootstrap can take several minutes. Later requests reuse it. Each profile owns private runtime directories under `$XDG_STATE_HOME/MyAIrouter/lingling` or `~/.local/state/MyAIrouter/lingling`. Chat-only and client-tool requests use separate owned workers because their native denial policies differ. Worker identity includes resolved proxy endpoints and credentials, so registry edits cannot reuse stale transport. Decrypted proxy URLs stay in memory and the private worker pipe, not profile metadata or module diagnostics.
 
 Chat completions support non-streaming and SSE, text history, system instructions, reasoning output, inline base64 images where supported, temperature/top_p and an output-token limit. History is passed as a JSON transcript because OpenCode's prompt endpoint accepts user parts, not arbitrary assistant message imports; previous tool/function calls and their results are preserved as context, never replayed. A final `tool` result with its original `tool_call_id` continues the model turn. Reasoning effort must match a variant exposed by the selected OpenCode model.
 
@@ -23,6 +22,6 @@ Client function tools (for example Hermes tools) are exposed through one request
 
 Absent `tool_choice` and `"auto"` allow either a client call or a text answer; `"none"` disables supplied definitions. `"required"` requires a genuine client call. Named function selection exposes only the matching schema. `parallel_tool_calls: false` requires at most one call. If OpenCode ignores these constraints, the bridge reports an upstream error rather than inventing calls or silently changing the request. The client-tool runtime starts with `experimental.continue_loop_on_deny=false`; waiting for a completed tool message and then aborting is not a safe barrier against another upstream request. Chat-only requests retain native rejection plus continuation; bounded explicit continuation after native denial in agent mode also never approves execution. Usage counts completed denied-tool turns once.
 
-Host MCP servers/plugins remain disabled; only the request-owned client schema server is registered. Every native local operation requires approval, and the bridge never approves tools or interactive questions. Remote/file image URLs, image history, multiple completions, stop sequences, seed, structured-output and nonzero penalty options are rejected rather than silently ignored. The bridge has no direct upstream fallback. Cold-start readiness requires an owned live Tor process, complete bootstrap and an upstream probe; a probe alone does not prove model generation succeeds.
+Host MCP servers/plugins remain disabled; only the request-owned client schema server is registered. Every native local operation requires approval, and the bridge never approves tools or interactive questions. Remote/file image URLs, image history, multiple completions, stop sequences, seed, structured-output and nonzero penalty options are rejected rather than silently ignored. There is no direct upstream fallback. Tor readiness requires an owned live process, complete bootstrap and an upstream probe; external proxy readiness uses a usable, non-cooling lane probe without claiming Tor ownership. A probe alone does not prove model generation succeeds.
 
-Changing, disabling or deleting a profile releases its worker. Module reload and application shutdown stop owned processes, including cancellation-safe cleanup. Diagnostics (`worker.log`, `opencode.log`, `proof.log`) stay in the private runtime directory; do not share them blindly because client diagnostics can include conversation data.
+Changing, disabling or deleting a profile releases its worker. Endpoint, authentication or enabled-state edits in the proxy registry, and proxy deletion, close existing Lingling workers before the next request; renaming a proxy does not. Module reload and application shutdown stop owned worker/Tor processes with cancellation-safe cleanup; external proxies are left alone. Diagnostics (`worker.log`, `opencode.log`, `proof.log`) stay in the private runtime directory; do not share them blindly because client diagnostics can include conversation data.

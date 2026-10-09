@@ -39,15 +39,8 @@ class HttpClientManager:
             )
             return transport, None
         else:
-            # HTTP / HTTPS proxy
-            # Normalize scheme to http for standard proxy client
-            if username and password:
-                proxy_str = f"http://{username}:{password}@{host}:{port}"
-            elif username:
-                proxy_str = f"http://{username}@{host}:{port}"
-            else:
-                proxy_str = f"http://{host}:{port}"
-            return None, proxy_str
+            # Keep TLS-to-proxy and percent-encoded credentials intact.
+            return None, clean_url
 
     async def get_client(
         self,

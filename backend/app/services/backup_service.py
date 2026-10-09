@@ -110,6 +110,18 @@ class BackupService:
         canonical = _canonical_secret(raw)
         # ponytail: scan a provider's profiles; index canonical fingerprints if this becomes large.
         decrypted = [(candidate, _canonical_secret(_decrypt(candidate.encrypted_api_key))) for candidate in candidates]
+        if raw.strip().startswith('{') and '"proxy_refs"' in raw:
+            try:
+                fields = json.loads(raw)
+            except ValueError:
+                fields = {}
+            provider = await db.get(Provider, provider_id) if isinstance(fields, dict) and 'proxy_refs' in fields else None
+            if provider and (provider.configuration or {}).get('module_id') == 'lingling':
+                from app.services.proxy_service import ProxyService
+                try:
+                    canonical = _canonical_secret(json.dumps(await ProxyService.import_pool_fields(db, fields)))
+                except ValueError:
+                    return None  # A fresh target has not imported its proxies yet.
         return next((candidate for candidate, secret in decrypted if secret == canonical), None)
 
     @classmethod
@@ -163,6 +175,25 @@ class BackupService:
             if not isinstance(metadata, dict):
                 raise ValueError("Credential metadata must be an object")
             credential['metadata_json'] = _portable_metadata(metadata, credential['api_key'])
+            lingling = credential.get('provider_slug') == 'module_lingling' or any(
+                p['slug'] == credential.get('provider_slug') and p.get('configuration', {}).get('module_id') == 'lingling'
+                for p in data['providers'])
+            if lingling:
+                from app.services.proxy_service import ProxyService
+                try:
+                    fields = json.loads(credential['api_key'])
+                    if not isinstance(fields, dict):
+                        raise ValueError("Invalid Lingling backup fields")
+                    if fields.get('proxy_ids'):
+                        raise ValueError("Lingling backup contains nonportable numeric proxy IDs")
+                    if 'proxy_refs' in fields:
+                        if 'proxy_ids' in fields:
+                            raise ValueError("Ambiguous Lingling proxy references")
+                        for ref in ProxyService.validate_proxy_refs(fields['proxy_refs']):
+                            if sum(_proxy_key(p) == _proxy_key(ref) for p in data['proxies']) != 1:
+                                raise ValueError("Pool proxy is missing or ambiguous in backup")
+                except (TypeError, json.JSONDecodeError):
+                    raise ValueError("Invalid Lingling backup fields") from None
             reference = credential.get('proxy_ref')
             if reference is not None:
                 try:
@@ -211,6 +242,11 @@ class BackupService:
                                 for pref in credential.model_preferences])
                 if include_proxies and credential.proxy:
                     item['proxy_ref'] = {field: getattr(credential.proxy, field) for field in ('name', 'scheme', 'host', 'port')}
+                if (provider.configuration or {}).get('module_id') == 'lingling':
+                    from app.services.proxy_service import ProxyService
+                    fields = json.loads(raw)
+                    if 'proxy_ids' in fields or 'proxy_refs' in fields:
+                        item['api_key'] = json.dumps(await ProxyService.export_pool_fields(db, fields, include_proxies=include_proxies))
                 credentials.append(item)
         if include_proxies:
             for proxy in (await db.scalars(select(Proxy).order_by(Proxy.id))).all():
@@ -325,6 +361,12 @@ class BackupService:
             for item, (raw, encrypted) in zip(data['credentials'], encrypted_keys):
                 provider = await db.scalar(select(Provider).where(Provider.slug == item['provider_slug']
                     if item.get('provider_slug') else Provider.name == item['provider_name']))
+                if (provider.configuration or {}).get('module_id') == 'lingling' and raw.startswith('{'):
+                    from app.services.proxy_service import ProxyService
+                    fields = json.loads(raw)
+                    if 'proxy_refs' in fields:
+                        raw = json.dumps(await ProxyService.import_pool_fields(db, fields))
+                        encrypted = encrypt_secret(raw)
                 keyless = raw == 'no-key'
                 credential = await cls._duplicate(db, provider.id, raw)
                 if credential is not None and skip_duplicate_credentials:

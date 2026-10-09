@@ -270,7 +270,8 @@ def test_profile_runtime_identity_and_settings(monkeypatch, tmp_path):
         (source / name).touch()
     fields = {"project_path": str(source.parent), "opencode_path": "/bin/true", "tor_path": "/bin/true"}
     cfg = adapter._settings(ModuleExecutionContext(credentials=fields))
-    assert cfg["lanes"] == 5
+    assert cfg["lanes"] == 5 and cfg["transport_mode"] == "tor"
+    assert cfg["proxy_policy"] == "balance" and cfg["proxy_ids"] == []
     for update in ({"lanes": 0}, {"lanes": True}, {"startup_timeout": 1}, {"countries": "xyz"}):
         with pytest.raises(RouterException):
             adapter._settings(ModuleExecutionContext(credentials={**fields, **update}))
@@ -520,6 +521,8 @@ async def test_profile_crud_stops_owned_runtime(monkeypatch):
     monkeypatch.setattr(ModuleLoader, "_modules", {"lingling": LoadedModule(manifest=manifest)})
     monkeypatch.setattr(ModuleLoader, "_adapters", {"lingling": adapter})
     monkeypatch.setattr(profile_loader, "sync_profiles_from_disk", AsyncMock(return_value={}))
+    async with AsyncSessionLocal() as db:
+        await ModuleLoader.sync_with_db(db)  # Listing is read-only, so seed the synthetic catalog explicitly.
     app = FastAPI()
     app.include_router(modules.router, prefix="/api/admin")
     app.dependency_overrides[get_current_admin] = lambda: "synthetic-admin"
@@ -536,6 +539,7 @@ async def test_profile_crud_stops_owned_runtime(monkeypatch):
         async with AsyncSessionLocal() as db:
             cred = await db.get(ProviderCredential, cid)
             assert json.loads(decrypt_secret(cred.encrypted_api_key)) == fields and cred.metadata_json == {}
+            provider_id = cred.provider_id
         checked = await client.post(target + "/test")
         assert checked.status_code == 200 and checked.json()["success"]
         synced = await client.post(target + "/sync-models")
@@ -546,6 +550,9 @@ async def test_profile_crud_stops_owned_runtime(monkeypatch):
         deleted = await client.delete(target)
         assert deleted.status_code == 200 and released == [cid, cid]
         assert (await client.get(base)).json() == []
+    from app.services.provider_service import ProviderService
+    async with AsyncSessionLocal() as db:
+        await ProviderService.delete_provider(db, provider_id)
 
 
 @pytest.mark.asyncio
@@ -595,6 +602,136 @@ async def test_cancelled_close_and_failed_rescan_keep_ownership(monkeypatch, tmp
     assert stopped[-1] == "retired" and not adapter._workers
 
 
+@pytest.mark.asyncio
+async def test_transport_fields_and_proxy_only_settings(monkeypatch, tmp_path):
+    from app.modules.base import ModuleManifest
+    manifest = ModuleManifest.model_validate_json((Path(h.__file__).parent / "manifest.json").read_text())
+    fields = {f.key: f for f in manifest.fields}
+    assert fields["transport_mode"].default == "tor"
+    assert fields["proxy_policy"].default == "balance"
+    assert fields["proxy_ids"].type == "textarea" and fields["proxy_ids"].default == []
+    source = tmp_path / "lingling"
+    source.mkdir()
+    for name in ("__init__.py", "lanes.py", "relay.py", "mitm.py"):
+        (source / name).touch()
+    values = {"project_path": str(tmp_path), "opencode_path": "/bin/true", "transport_mode": "proxy",
+              "proxy_ids": [2, 1], "tor_path": "/missing", "lanes": False, "countries": "invalid"}
+    real_which = h.shutil.which
+    monkeypatch.setattr(h.shutil, "which", lambda name: "/bin/true" if name == "tor" else real_which(name))
+    tor_cfg = h.LinglingAdapter()._settings(ModuleExecutionContext(credentials={
+        **values, "transport_mode": "tor", "tor_path": "", "lanes": 1, "countries": "us"}))
+    assert tor_cfg["proxy_ids"] == [], "Dormant pool must be ignored when switching back to Tor"
+    looked_up = []
+    monkeypatch.setattr(h.shutil, "which", lambda name: (looked_up.append(name), real_which(name))[1])
+    cfg = h.LinglingAdapter()._settings(ModuleExecutionContext(credentials=values))
+    assert cfg["lanes"] == 0 and cfg["countries"] == [] and cfg["tor_path"] == ""
+    assert cfg["proxy_ids"] == [2, 1] and looked_up == ["/bin/true"]
+    for update in ({"transport_mode": []}, {"proxy_policy": "random"}, {"proxy_ids": "[1]"},
+                   {"proxy_ids": [True]}, {"proxy_ids": [0]}, {"proxy_ids": ["1"]},
+                   {"proxy_ids": [1, 1]}, {"proxy_ids": list(range(1, 18))}):
+        with pytest.raises(RouterException):
+            h.LinglingAdapter()._settings(ModuleExecutionContext(credentials={**values, **update}))
+    with pytest.raises(RouterException, match="Tor|tor"):
+        h.LinglingAdapter()._settings(ModuleExecutionContext(credentials={**values, "transport_mode": "tor"}, proxy_url="http://fixture:80"))
+    import importlib.util
+    from unittest.mock import AsyncMock
+    adapter = h.LinglingAdapter()
+    monkeypatch.setattr(adapter, "list_models", AsyncMock(return_value=[INFO]))
+    with monkeypatch.context() as no_stem:
+        no_stem.setattr(importlib.util, "find_spec", lambda name: pytest.fail("Proxy mode must not require stem"))
+        success, message, count = await adapter.validate_credentials(ModuleExecutionContext(credentials=values))
+    assert success and count == 1 and "proxy transport" in message
+
+
+@pytest.mark.asyncio
+async def test_resolved_pool_is_ordered_private_and_changes_worker_identity(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    source = tmp_path / "source" / "lingling"
+    source.mkdir(parents=True)
+    for name in ("__init__.py", "lanes.py", "relay.py", "mitm.py"):
+        (source / name).touch()
+    urls = ["socks5://user:secret@fixture:1080", "http://fixture:8080"]
+    resolver = AsyncMock(return_value=urls)
+    monkeypatch.setattr(h, "_resolve_proxy_pool", resolver)
+    ctx = ModuleExecutionContext(credentials={"project_path": str(source.parent), "opencode_path": "/bin/true",
+        "transport_mode": "proxy", "proxy_policy": "priority", "proxy_ids": [2, 1]}, proxy_url=urls[0])
+    adapter = h.LinglingAdapter()
+    cfg = await adapter._configuration(ctx)
+    resolver.assert_awaited_once_with([2, 1])
+    assert cfg["proxy_urls"] == urls and cfg["proxy_policy"] == "priority"
+    ctx.proxy_url = "https://other-fixture"
+    assert (await adapter._configuration(ctx))["proxy_urls"] == [*urls, ctx.proxy_url]
+    ctx.proxy_url = urls[0]
+    one = adapter._root(ctx, cfg)
+    resolver.return_value = [urls[0].replace("secret", "changed"), urls[1]]
+    ctx.proxy_url = None
+    two = adapter._root(ctx, await adapter._configuration(ctx))
+    assert one != two and not list(one.iterdir()) and "proxy_urls" not in ctx.credentials
+    resolver.return_value = [urls[0].replace("fixture", "changed-endpoint"), urls[1]]
+    assert adapter._root(ctx, await adapter._configuration(ctx)) not in (one, two)
+    resolver.side_effect = ValueError("socks5://user:secret@fixture:1080")
+    with pytest.raises(RouterException) as failure:
+        await adapter._configuration(ctx)
+    assert "secret" not in str(failure.value) and "fixture" not in str(failure.value)
+    ctx.credentials["proxy_ids"] = []
+    with pytest.raises(RouterException, match="empty|select"):
+        await adapter._runtime(ctx)
+    with pytest.raises(RouterException):
+        await adapter._configuration(ctx.model_copy(update={"proxy_url": "file:///secret"}))
+
+
+def test_transport_readiness_respects_cooldown_owned_tor_and_no_direct():
+    class Stop:
+        def __init__(self):
+            self.stopped = False
+        def is_set(self):
+            return self.stopped
+        def wait(self, seconds):
+            self.stopped = True
+    external = SimpleNamespace(proxy_url="http://fixture:8080", limited_until=0, healthy=False,
+                               asked=False, probe_code=0)
+    tor = SimpleNamespace(proxy_url="", process=None, healing=False, limited_until=0)
+    probes, launches = [], []
+    manager = SimpleNamespace(lanes=[external], start_lanes=lambda lanes: launches.append(lanes),
+                              lane_usable=lambda lane: lane.healthy and lane.limited_until <= h.time.time(),
+                              lane_bootstrap_pct=lambda lane: pytest.fail("Proxy bootstrap is forbidden"))
+    daemon = SimpleNamespace(reachable=lambda lane, **kw: (probes.append(lane), setattr(lane, "healthy", True), 200)[2],
+                             check_once=lambda: pytest.fail("No Tor maintenance for proxy readiness"),
+                             on_refused=lambda lane, code: setattr(lane, "limited_until", h.time.time() + 60))
+    cfg = {"transport_mode": "proxy", "startup_timeout": 30}
+    assert h._wait_for_transport(manager, daemon, cfg, Stop()) == "proxy"
+    assert probes == [external] and not launches
+    external.limited_until = h.time.time() + 60
+    with pytest.raises(RuntimeError, match="direct traffic is disabled"):
+        h._wait_for_transport(manager, daemon, cfg, Stop())
+    assert probes == [external]
+    external.limited_until = 0
+    reachable = daemon.reachable
+    daemon.reachable = lambda lane, **kw: 429
+    with pytest.raises(RuntimeError, match="direct traffic is disabled"):
+        h._wait_for_transport(manager, daemon, cfg, Stop())
+    assert external.limited_until > h.time.time()
+    daemon.reachable = reachable
+    manager.lanes = [tor]
+    manager.lane_bootstrap_pct = lambda lane: 99
+    daemon.check_once = lambda: None
+    with pytest.raises(RuntimeError):
+        h._wait_for_transport(manager, daemon, {**cfg, "transport_mode": "tor"}, Stop())
+    assert probes == [external], "Foreign listeners cannot satisfy Tor readiness"
+    tor.process = SimpleNamespace(poll=lambda: None)
+    with pytest.raises(RuntimeError):
+        h._wait_for_transport(manager, daemon, {**cfg, "transport_mode": "tor"}, Stop())
+    assert probes == [external], "An owned process still needs complete bootstrap"
+    manager.lane_bootstrap_pct = lambda lane: 100
+    assert h._wait_for_transport(manager, daemon, {**cfg, "transport_mode": "tor"}, Stop()) == "tor"
+    ready = {"url": "http://127.0.0.1:1234", "transport_mode": "proxy", "transport": "proxy", "tor": False}
+    assert h._valid_readiness(ready, cfg)
+    assert not h._valid_readiness({**ready, "tor": True}, cfg)
+    assert not h._valid_readiness({**ready, "transport_mode": "tor"}, cfg)
+    assert not h._valid_readiness({**ready, "transport": "direct"}, cfg)
+
+
 def test_lane_readiness_requires_owned_live_process():
     lane = SimpleNamespace(process=None, socks_port=8007)
     assert not h._owned_lane_running(lane)
@@ -602,6 +739,58 @@ def test_lane_readiness_requires_owned_live_process():
     assert h._owned_lane_running(lane)
     lane.process = SimpleNamespace(poll=lambda: 1)
     assert not h._owned_lane_running(lane)
+
+
+@pytest.mark.asyncio
+async def test_saved_profile_proxy_uses_registry_and_edits_close_workers(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+    from app.core.database import AsyncSessionLocal
+    from app.models.entities import Proxy
+    from app.schemas.entities import ProxyUpdate
+    from app.services.proxy_service import ProxyService
+    source = tmp_path / "source" / "lingling"
+    source.mkdir(parents=True)
+    for name in ("__init__.py", "lanes.py", "relay.py", "mitm.py"):
+        (source / name).touch()
+    closed = AsyncMock()
+    monkeypatch.setattr(ModuleLoader, "_adapters", {"lingling": SimpleNamespace(close=closed)})
+    async with AsyncSessionLocal() as db:
+        proxy = Proxy(name="registry-lingling", scheme="http", host="registry.invalid", port=8080, enabled=True)
+        db.add(proxy)
+        await db.commit()
+        configuration = CredentialService.module_runtime_configuration(
+            SimpleNamespace(adapter_configuration={"module_id": "lingling"}),
+            SimpleNamespace(id=9001, metadata_json={}, proxy_id=proxy.id))
+        assert configuration["profile_proxy_id"] == proxy.id
+        ctx = ModuleExecutionContext(credentials={"project_path": str(source.parent), "opencode_path": "/bin/true",
+            "transport_mode": "proxy"}, extra_config=configuration, proxy_url="http://stale.invalid:80")
+        adapter = h.LinglingAdapter()
+        cfg = await adapter._configuration(ctx)
+        assert cfg["proxy_urls"] == ["http://registry.invalid:8080"]
+        await ProxyService.update_proxy(db, proxy.id, ProxyUpdate(name="renamed"))
+        closed.assert_not_awaited()
+        await ProxyService.update_proxy(db, proxy.id, ProxyUpdate(enabled=False))
+        assert closed.await_count == 1
+        with pytest.raises(RouterException, match="unavailable"):
+            await adapter._configuration(ctx)
+        assert await ProxyService.delete_proxy(db, proxy.id)
+        assert closed.await_count == 2
+        assert await ProxyService.export_pool_fields(db, {"transport_mode": "tor", "proxy_ids": [proxy.id]}) == {
+            "transport_mode": "tor", "proxy_refs": []}
+
+
+def test_all_tor_lanes_retain_owned_process_guard():
+    first = SimpleNamespace(proxy_url="", process=SimpleNamespace(poll=lambda: None), limited_until=0, running=lambda: True)
+    foreign = SimpleNamespace(proxy_url="", process=None, limited_until=0, running=lambda: True)
+    external = SimpleNamespace(proxy_url="http://fixture:80", limited_until=0, running=lambda: True)
+    start = []
+    manager = SimpleNamespace(lanes=[first, foreign, external], start_lanes=lambda lanes: start.extend(lanes),
+        lane_bootstrap_pct=lambda lane: 100, lane_usable=lambda lane: True)
+    daemon = SimpleNamespace(reachable=lambda lane, **kwargs: 200)
+    stop = SimpleNamespace(is_set=lambda: False)
+    assert h._wait_for_transport(manager, daemon, {"startup_timeout": 1}, stop) == "proxy"
+    assert first.running() and not foreign.running() and external.running()
+    assert start == [first]
 
 
 @pytest.mark.asyncio

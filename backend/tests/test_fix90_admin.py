@@ -287,3 +287,143 @@ async def test_file_backed_token_callback_and_all_config_edits_survive_sync(monk
         assert (c.group_name,c.notes)==('new group','new notes')
         from app.services.provider_service import ProviderService
         await ProviderService.delete_provider(db,c.provider_id)
+
+
+@pytest.mark.asyncio
+async def test_lingling_proxy_pool_crud_and_portable_roundtrip(monkeypatch, tmp_path):
+    import json
+    from app.api.admin import modules
+    from app.core.crypto import decrypt_secret
+    from app.modules.base import ModuleManifest
+    from app.modules.loader import ModuleLoader, LoadedModule
+    from app.modules.profile_loader import export_profile_to_file, sync_profiles_from_disk
+    from app.models.entities import Proxy
+    from app.services.backup_service import BackupService, decrypt_payload
+    from app.services.proxy_service import ProxyService
+    from app.services.provider_service import ProviderService
+    manifest = ModuleManifest(id='lingling', name='Lingling fixture', version='1.0')
+    monkeypatch.setattr(ModuleLoader, '_modules', {'lingling': LoadedModule(manifest=manifest)})
+    monkeypatch.setattr(ModuleLoader, '_adapters', {})
+    a = FastAPI(); a.include_router(modules.router, prefix='/api/admin')
+    a.dependency_overrides[get_current_admin] = lambda: 'synthetic-admin'
+    async with AsyncSessionLocal() as db:
+        p = Provider(name='fixture', slug='module_lingling', adapter_type='custom_module',
+                     base_url='module://lingling', configuration={'module_id': 'lingling'})
+        one = Proxy(name='pool-first', scheme='socks5', host='one.invalid', port=1080,
+                    enabled=True, encrypted_username=encrypt_secret('fixture-user'),
+                    encrypted_password=encrypt_secret('fixture-password'))
+        two = Proxy(name='pool-second', scheme='https', host='two.invalid', port=443, enabled=True)
+        off = Proxy(name='pool-disabled', scheme='http', host='off.invalid', port=8080, enabled=False)
+        db.add_all([p, one, two, off]); await db.commit()
+        pid, ids, disabled_id = p.id, [two.id, one.id], off.id
+    base = '/api/admin/modules/lingling/profiles'
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=a), base_url='http://fixture') as client:
+        for invalid in ([True], [0], [99999999], [disabled_id], [ids[0], ids[0]], '1,2'):
+            r = await client.post(base, json={'name':'bad', 'fields':{'transport_mode':'proxy', 'proxy_ids':invalid}})
+            assert r.status_code == 422
+        r = await client.post(base, json={'name':'pool', 'proxy_id':ids[1], 'fields':{
+            'transport_mode':'proxy', 'proxy_policy':'priority', 'proxy_ids':ids}})
+        assert r.status_code == 201
+        cid = r.json()['id']
+        listed = (await client.get(base)).json()[0]
+        assert listed['fields']['proxy_ids'] == ids
+        assert (await client.put(f'{base}/{cid}', json={'fields':{'proxy_ids':[disabled_id]}, 'notes':'must-not-save'})).status_code == 422
+        assert (await client.get(base)).json()[0]['notes'] is None
+        assert (await client.put(f'{base}/{cid}', json={'fields':{'proxy_policy':'balance'}})).status_code == 200
+        assert (await client.get(base)).json()[0]['fields']['proxy_ids'] == ids
+    async with AsyncSessionLocal() as db:
+        urls = await ProxyService.resolve_proxy_pool(db, ids)
+        assert urls[0] == 'https://two.invalid:443' and 'fixture-user:fixture-password@one.invalid:1080' in urls[1]
+        backup = await BackupService.export_data(db, [pid], passphrase='synthetic-pool-backup-password')
+        data = decrypt_payload(backup, 'synthetic-pool-backup-password')
+        exported_fields = json.loads(data['credentials'][0]['api_key'])
+        assert 'proxy_ids' not in exported_fields and len(exported_fields['proxy_refs']) == 2
+        omitted = decrypt_payload(await BackupService.export_data(db, [pid], include_proxies=False,
+            passphrase='synthetic-pool-backup-password'), 'synthetic-pool-backup-password')
+        assert json.loads(omitted['credentials'][0]['api_key'])['proxy_ids'] == []
+        out = await export_profile_to_file(db, cid, 'lingling', target_profiles_dir=tmp_path)
+        document = json.loads(__import__('pathlib').Path(out['file_path']).read_text())
+        assert 'proxy_ids' not in document['fields'] and len(document['fields']['proxy_refs']) == 2
+        assert 'proxy_id' not in document and document['proxy_ref'] == {
+            'scheme':'socks5', 'host':'one.invalid', 'port':1080}
+        assert 'proxy_ref' not in document['fields']
+        # Force different destination IDs without touching production storage.
+        await ProviderService.delete_provider(db, pid)
+        from sqlalchemy import delete
+        await db.execute(delete(Proxy).where(Proxy.id.in_(ids + [disabled_id])))
+        db.add_all([Proxy(id=ident, name=f'collision-{ident}', scheme='http',
+                         host=f'collision-{ident}.invalid', port=8000) for ident in ids])
+        db.add(Proxy(id=10000, name='unrelated', scheme='http', host='unrelated.invalid', port=8000))
+        await db.commit()
+        result = await BackupService.import_data(db, backup, 'synthetic-pool-backup-password', auto_discover_models=False)
+        assert result['success'] and result['imported_credentials'] == 1
+        c = (await db.scalars(select(ProviderCredential).join(Provider).where(Provider.slug=='module_lingling'))).one()
+        fields = json.loads(decrypt_secret(c.encrypted_api_key))
+        assert fields['proxy_ids'] != ids and len(fields['proxy_ids']) == 2 and 'proxy_refs' not in fields
+        assert await ProxyService.resolve_proxy_pool(db, fields['proxy_ids']) == urls
+        # A portable disk export resolves those same endpoints, not old numeric IDs.
+        result = await sync_profiles_from_disk(db, tmp_path)
+        assert not result['errors']
+        await db.refresh(c)
+        assert json.loads(decrypt_secret(c.encrypted_api_key))['proxy_ids'] == fields['proxy_ids']
+        destination_id = fields['proxy_ids'][1]
+        assert c.proxy_id == destination_id and c.proxy_id != ids[1]
+        assert ProxyService.build_proxy_url(await db.get(Proxy, c.proxy_id)) == urls[1]
+        path = __import__('pathlib').Path(out['file_path'])
+        original_secret, original_proxy = c.encrypted_api_key, c.proxy_id
+        count = len((await db.scalars(select(ProviderCredential).where(ProviderCredential.provider_id == c.provider_id))).all())
+        # Source IDs collide with unrelated destination endpoints: reject both
+        # updates and creates without partially saving credentials or controls.
+        for name in ('pool', 'rejected-new'):
+            for numeric in ('proxy_id', 'proxy_ids'):
+                invalid = json.loads(json.dumps(document))
+                invalid.update(name=name, notes='must-not-save', priority=9)
+                if numeric == 'proxy_id':
+                    invalid.pop('proxy_ref')
+                    invalid['proxy_id'] = ids[1]
+                else:
+                    invalid['fields'].pop('proxy_refs')
+                    invalid['fields']['proxy_ids'] = ids
+                path.write_text(json.dumps(invalid))
+                result = await sync_profiles_from_disk(db, tmp_path)
+                assert result['errors'] and result['created'] == result['updated'] == 0
+                await db.refresh(c)
+                assert (c.encrypted_api_key, c.proxy_id, c.notes, c.priority) == (original_secret, original_proxy, None, 1)
+                assert len((await db.scalars(select(ProviderCredential).where(ProviderCredential.provider_id == c.provider_id))).all()) == count
+        invalid = json.loads(json.dumps(document))
+        invalid.update(notes='must-not-save', proxy_ref={'scheme':'http', 'host':'missing.invalid', 'port':8080})
+        path.write_text(json.dumps(invalid))
+        result = await sync_profiles_from_disk(db, tmp_path)
+        assert result['errors'] and result['updated'] == 0
+        await db.refresh(c)
+        assert (c.encrypted_api_key, c.proxy_id, c.notes) == (original_secret, original_proxy, None)
+        # Old Tor files omit proxy controls; omission preserves the DB setting,
+        # while an explicit null clears it (and is exported as null).
+        old = {'module':'lingling', 'name':'pool', 'fields':{'transport_mode':'tor'}}
+        path.write_text(json.dumps(old))
+        result = await sync_profiles_from_disk(db, tmp_path)
+        assert not result['errors']
+        await db.refresh(c)
+        assert c.proxy_id == destination_id
+        old['proxy_ref'] = None
+        path.write_text(json.dumps(old))
+        result = await sync_profiles_from_disk(db, tmp_path)
+        assert not result['errors']
+        await db.refresh(c)
+        assert c.proxy_id is None
+        exported = await export_profile_to_file(db, c.id, 'lingling', target_profiles_dir=tmp_path)
+        cleared = json.loads(__import__('pathlib').Path(exported['file_path']).read_text())
+        assert cleared['proxy_ref'] is None and 'proxy_id' not in cleared
+        (path.parent / 'old-tor.json').write_text(json.dumps({'module':'lingling', 'name':'old-tor', 'fields':{'transport_mode':'tor'}}))
+        result = await sync_profiles_from_disk(db, tmp_path)
+        assert not result['errors'] and result['created'] == 1
+        old_tor = await db.scalar(select(ProviderCredential).where(ProviderCredential.provider_id == c.provider_id, ProviderCredential.name == 'old-tor'))
+        assert old_tor.proxy_id is None
+        old_tor.encrypted_api_key = encrypt_secret(json.dumps({'transport_mode':'tor', 'proxy_ids':[99999999]}))
+        await db.commit()
+        exported = await export_profile_to_file(db, old_tor.id, 'lingling', target_profiles_dir=tmp_path)
+        dormant = json.loads(__import__('pathlib').Path(exported['file_path']).read_text())
+        assert 'proxy_ids' not in dormant['fields'] and dormant['fields']['proxy_refs'] == []
+        assert dormant['proxy_ref'] is None
+        await ProviderService.delete_provider(db, c.provider_id)
+        await db.execute(delete(Proxy).where((Proxy.id >= 10000) | Proxy.id.in_(ids))); await db.commit()

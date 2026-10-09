@@ -990,7 +990,14 @@ export const ModulesPage: React.FC = () => {
                           {/* Proxy info */}
                           <div className="flex items-center gap-2 text-xs text-slate-400 mt-1">
                             <Network size={12} className={p.proxy ? "text-indigo-400" : "text-slate-600"} />
-                            {p.proxy ? (
+                            {p.module_id === "lingling" ? (
+                              <span className="font-mono text-[11px] text-slate-300">
+                                {p.fields.transport_mode === "proxy" ? "Пул прокси" : p.fields.transport_mode === "mixed" ? "Tor + прокси" : "Tor"}
+                                {p.fields.transport_mode !== "tor" && p.fields.transport_mode && Array.isArray(p.fields.proxy_ids) && p.fields.proxy_ids.length > 0 && ` · ${p.fields.proxy_ids.map((id: number) => proxies.find(px => px.id === id)?.name || `#${id} (недоступен)`).join(" → ")}`}
+                                {p.proxy && ` · ${p.proxy.name}`}
+                                {p.fields.transport_mode !== "tor" && p.fields.transport_mode && ` · ${p.fields.proxy_policy === "priority" ? "по приоритету" : "балансировка"}`}
+                              </span>
+                            ) : p.proxy ? (
                               <span className="inline-flex items-center gap-1 font-mono text-[11px] text-slate-300">
                                 <span>{getCountryFlag(p.proxy.country_code || "")}</span>
                                 <span className="uppercase text-indigo-300 font-bold">{p.proxy.scheme}</span>
@@ -1160,21 +1167,21 @@ export const ModulesPage: React.FC = () => {
               <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center justify-between">
                 <span className="flex items-center gap-1.5">
                   <Network size={13} className="text-indigo-400" />
-                  <span>Привязанный прокси</span>
+                  <span>{selectedModule.manifest.id === "lingling" ? "Дополнительный одиночный прокси" : "Привязанный прокси"}</span>
                 </span>
                 <span className="text-[11px] text-slate-500 font-normal">
-                  Все вызовы модуля пойдут через этот прокси
+                  {selectedModule.manifest.id === "lingling" ? "Добавляется после выбранного пула" : "Все вызовы модуля пойдут через этот прокси"}
                 </span>
               </label>
               <select
                 value={formProxyId || ""}
-                disabled={oauthStarting || !!oauthSession || savingProfile}
+                disabled={oauthStarting || !!oauthSession || savingProfile || (selectedModule.manifest.id === "lingling" && (formFields.transport_mode || "tor") === "tor")}
                 onChange={(e) => setFormProxyId(e.target.value ? Number(e.target.value) : undefined)}
                 className="w-full px-3 py-2 bg-slate-950 border border-white/[0.08] focus:border-indigo-500 rounded-xl text-xs text-slate-200 focus:outline-hidden"
               >
-                <option value="">Direct / Без прокси (прямое соединение с сервера)</option>
+                <option value="">{selectedModule.manifest.id === "lingling" ? "Не добавлять (прямого выхода нет)" : "Direct / Без прокси (прямое соединение с сервера)"}</option>
                 {proxies.map((px) => (
-                  <option key={px.id} value={px.id}>
+                  <option key={px.id} value={px.id} disabled={selectedModule.manifest.id === "lingling" && !px.enabled}>
                     {getCountryFlag(px.country_code || "")} [{px.scheme.toUpperCase()}] {px.name} — {px.host}:{px.port} {px.country ? `(${px.country})` : ""}
                   </option>
                 ))}
@@ -1271,10 +1278,13 @@ export const ModulesPage: React.FC = () => {
                   <span>Параметры авторизации модуля</span>
                 </div>
 
-                {selectedModule.manifest.fields.filter((field) => !oauthSession || (field.type !== "password" && !["auth_json", "access_token", "refresh_token", "id_token"].includes(field.key))).map((field) => {
+                {selectedModule.manifest.fields.filter((field) => (!oauthSession || (field.type !== "password" && !["auth_json", "access_token", "refresh_token", "id_token"].includes(field.key))) &&
+                  (selectedModule.manifest.id !== "lingling" || !((formFields.transport_mode || "tor") === "proxy" && ["lanes", "countries", "fallback_countries", "preferred_countries", "tor_path"].includes(field.key))) &&
+                  (selectedModule.manifest.id !== "lingling" || !((formFields.transport_mode || "tor") === "tor" && ["proxy_ids", "proxy_policy"].includes(field.key)))).map((field) => {
                   const isPassword = field.type === "password";
                   const showPass = !!showPasswordFields[field.key];
-                  const rawValue = formFields[field.key];
+                  const rawValue = formFields[field.key] ?? field.default;
+                  const pool = Array.isArray(rawValue) ? rawValue as number[] : [];
                   const value = rawValue === undefined ? "" : typeof rawValue === "string" ? rawValue : JSON.stringify(rawValue);
 
                   return (
@@ -1288,7 +1298,35 @@ export const ModulesPage: React.FC = () => {
                         )}
                       </label>
 
-                      {field.type === "textarea" ? (
+                      {selectedModule.manifest.id === "lingling" && field.key === "proxy_ids" ? (
+                        <fieldset className="space-y-2" aria-label="Пул прокси Lingling">
+                          <legend className="sr-only">Пул прокси Lingling</legend>
+                          <p className="text-xs text-slate-400">Добавьте свой HTTP / HTTPS / SOCKS5-шлюз в разделе «Прокси», затем выберите его здесь. Прямого выхода нет.</p>
+                          {proxies.length === 0 && <p role="status" className="text-xs text-amber-300">Сначала добавьте прокси в разделе «Прокси».</p>}
+                          <div className="space-y-1">
+                            {proxies.map(px => (
+                              <label key={px.id} className="flex items-center gap-2 text-xs text-slate-300">
+                                <input type="checkbox" checked={pool.includes(px.id)} disabled={!px.enabled && !pool.includes(px.id)}
+                                  onChange={e => setFormFields({ ...formFields, proxy_ids: e.target.checked ? [...pool, px.id] : pool.filter(id => id !== px.id) })} />
+                                {px.name} [{px.scheme.toUpperCase()}]{!px.enabled && " (отключён)"}
+                              </label>
+                            ))}
+                          </div>
+                          {pool.map((id, index) => (
+                            <div key={id} className="flex items-center gap-2 text-xs text-slate-300">
+                              <span className="flex-1">{index + 1}. {proxies.find(px => px.id === id)?.name || `#${id} (недоступен)`}</span>
+                              <button type="button" disabled={index === 0} aria-label={`Поднять прокси ${id}`}
+                                onClick={() => { const next = [...pool]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; setFormFields({ ...formFields, proxy_ids: next }); }}
+                                className="px-2 py-1 rounded bg-slate-800 disabled:opacity-30">↑</button>
+                              <button type="button" disabled={index === pool.length - 1} aria-label={`Опустить прокси ${id}`}
+                                onClick={() => { const next = [...pool]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; setFormFields({ ...formFields, proxy_ids: next }); }}
+                                className="px-2 py-1 rounded bg-slate-800 disabled:opacity-30">↓</button>
+                              <button type="button" aria-label={`Убрать прокси ${id}`} onClick={() => setFormFields({ ...formFields, proxy_ids: pool.filter(value => value !== id) })}
+                                className="px-2 py-1 rounded bg-slate-800">×</button>
+                            </div>
+                          ))}
+                        </fieldset>
+                      ) : field.type === "textarea" ? (
                         <textarea
                           rows={3}
                           required={field.required}
@@ -1299,9 +1337,13 @@ export const ModulesPage: React.FC = () => {
                         />
                       ) : field.type === "select" && field.options ? (
                         <select
+                          aria-label={field.label}
                           required={field.required}
                           value={value}
-                          onChange={(e) => setFormFields({ ...formFields, [field.key]: e.target.value })}
+                          onChange={(e) => {
+                            setFormFields({ ...formFields, [field.key]: e.target.value });
+                            if (selectedModule.manifest.id === "lingling" && field.key === "transport_mode" && e.target.value === "tor") setFormProxyId(undefined);
+                          }}
                           className="w-full px-3 py-2 bg-slate-950 border border-white/[0.08] focus:border-indigo-500 rounded-xl text-xs text-slate-200 focus:outline-hidden"
                         >
                           <option value="">Выберите значение...</option>

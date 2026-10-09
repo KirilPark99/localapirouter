@@ -48,10 +48,14 @@ class ProxyService:
     def sanitize_host_and_port(host: str, port: int) -> tuple[str, int]:
         clean_host = (host or "").strip()
         clean_port = port or 8080
-        if "://" in clean_host:
-            clean_host = clean_host.split("://", 1)[1]
+        if "://" in clean_host or clean_host.startswith("["):
+            parsed = urlparse(clean_host if "://" in clean_host else "//" + clean_host)
+            return parsed.hostname or "", parsed.port or clean_port
         if "/" in clean_host:
             clean_host = clean_host.split("/", 1)[0]
+        if clean_host.count(":") > 1:
+            from ipaddress import IPv6Address
+            return str(IPv6Address(clean_host)), clean_port
         if ":" in clean_host:
             h_part, p_part = clean_host.split(":", 1)
             clean_host = h_part
@@ -67,6 +71,7 @@ class ProxyService:
         password = decrypt_secret(proxy.encrypted_password) if proxy.encrypted_password else ""
         scheme = (proxy.scheme or "http").lower().strip()
         host, port = ProxyService.sanitize_host_and_port(proxy.host, proxy.port)
+        host = f"[{host}]" if ":" in host else host
 
         if username and password:
             q_user = quote(username, safe="")
@@ -76,6 +81,87 @@ class ProxyService:
             q_user = quote(username, safe="")
             return f"{scheme}://{q_user}@{host}:{port}"
         return f"{scheme}://{host}:{port}"
+
+    @staticmethod
+    def validate_proxy_ids(ids: Any) -> List[int]:
+        if not isinstance(ids, list) or len(ids) > 16 or any(type(i) is not int or i < 1 for i in ids):
+            raise ValueError("Proxy pool must contain at most 16 positive integer IDs")
+        if len(ids) != len(set(ids)):
+            raise ValueError("Proxy pool contains duplicate IDs")
+        return ids
+
+    @classmethod
+    async def _pool_proxies(cls, db: AsyncSession, ids: List[int]) -> List[Proxy]:
+        cls.validate_proxy_ids(ids)
+        rows = {p.id: p for p in (await db.scalars(select(Proxy).where(Proxy.id.in_(ids)))).all()} if ids else {}
+        if any(i not in rows for i in ids):
+            raise ValueError("A selected pool proxy no longer exists")
+        return [rows[i] for i in ids]
+
+    @classmethod
+    async def resolve_proxy_pool(cls, db: AsyncSession, ids: List[int]) -> List[str]:
+        proxies = await cls._pool_proxies(db, ids)
+        if any(not p.enabled for p in proxies):
+            raise ValueError("A selected pool proxy is disabled")
+        if any(p.scheme not in ("http", "https", "socks5", "socks5h") for p in proxies):
+            raise ValueError("Lingling supports HTTP, HTTPS and SOCKS5 proxies")
+        if any(not p.host or any(ord(c) <= 32 or ord(c) == 127 for c in p.host)
+               or type(p.port) is not int or not 1 <= p.port <= 65535 for p in proxies):
+            raise ValueError("Invalid pool proxy address")
+        return [cls.build_proxy_url(p) for p in proxies]
+
+    @classmethod
+    async def export_pool_fields(cls, db: AsyncSession, fields: dict, *, include_proxies: bool = True) -> dict:
+        """Portable endpoints, not numeric IDs belonging to the source database."""
+        result = dict(fields)
+        ids = result.pop("proxy_ids", [])
+        if result.get("transport_mode", "tor") == "tor":
+            ids = []  # Dormant/deleted proxies cannot block a Tor profile backup.
+            result.pop("proxy_refs", None)
+        if include_proxies:
+            proxies = await cls._pool_proxies(db, ids)
+            result["proxy_refs"] = cls.validate_proxy_refs([{key: getattr(p, key) for key in ("scheme", "host", "port")} for p in proxies])
+        else:
+            result.pop("proxy_refs", None)
+            result["proxy_ids"] = []
+        return result
+
+    @staticmethod
+    def validate_proxy_refs(refs: Any) -> List[dict]:
+        if not isinstance(refs, list) or len(refs) > 16:
+            raise ValueError("Invalid portable proxy pool")
+        seen = set()
+        for ref in refs:
+            if (not isinstance(ref, dict) or set(ref) != {"scheme", "host", "port"}
+                    or ref["scheme"] not in ("http", "https", "socks5", "socks5h")
+                    or not isinstance(ref["host"], str) or not ref["host"].strip()
+                    or type(ref["port"]) is not int or not 1 <= ref["port"] <= 65535):
+                raise ValueError("Invalid portable proxy reference")
+            key = ref["scheme"], ref["host"], ref["port"]
+            if key in seen:
+                raise ValueError("Portable pool contains duplicate endpoints")
+            seen.add(key)
+        return refs
+
+    @classmethod
+    async def import_pool_fields(cls, db: AsyncSession, fields: dict) -> dict:
+        result = dict(fields)
+        if "proxy_refs" not in result:
+            cls.validate_proxy_ids(result.get("proxy_ids", []))
+            return result
+        refs = cls.validate_proxy_refs(result.pop("proxy_refs"))
+        if "proxy_ids" in result:
+            raise ValueError("Invalid portable proxy pool")
+        ids = []
+        for ref in refs:
+            rows = (await db.scalars(select(Proxy).where(Proxy.scheme == ref["scheme"],
+                Proxy.host == ref["host"], Proxy.port == ref["port"]))).all()
+            if len(rows) != 1:
+                raise ValueError("Portable pool proxy is missing or ambiguous; configure matching proxies first")
+            ids.append(rows[0].id)
+        cls.validate_proxy_ids(ids)
+        result["proxy_ids"] = ids
+        return result
 
     @classmethod
     async def get_server_ip(cls) -> str:
@@ -282,6 +368,14 @@ class ProxyService:
             created_at=proxy.created_at,
         )
 
+    @staticmethod
+    async def _close_lingling_workers() -> None:
+        from app.modules.loader import ModuleLoader
+        adapter = ModuleLoader.get_adapter("lingling")
+        if adapter:
+            # ponytail: close all Lingling workers; index dependencies if pool counts grow.
+            await adapter.close()
+
     @classmethod
     async def update_proxy(cls, db: AsyncSession, proxy_id: int, data: ProxyUpdate) -> Optional[ProxyRead]:
         result = await db.execute(
@@ -323,14 +417,15 @@ class ProxyService:
                 proxy.country = c_name
                 proxy.country_code = c_code
 
-        await db.commit()
-        await db.refresh(proxy)
-
         assigned = sorted(list({
             c.provider.name
             for c in proxy.credentials
             if c.provider and c.provider.name
         }))
+        await db.commit()
+        await db.refresh(proxy)
+        if any(getattr(data, key) is not None for key in ("scheme", "host", "port", "username", "password", "enabled")):
+            await cls._close_lingling_workers()
 
         return ProxyRead(
             id=proxy.id,
@@ -357,6 +452,7 @@ class ProxyService:
             return False
         await db.delete(proxy)
         await db.commit()
+        await cls._close_lingling_workers()
         return True
 
     @classmethod

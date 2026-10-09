@@ -249,3 +249,54 @@ backupState.apiRequest = async () => { throw new Error('synthetic transport fail
 const before = refreshes; await backupState.handleExecuteImport();
 assert.equal(refreshes, before); assert.equal(backupState.error, 'synthetic transport failure'); assert.equal(backupState.importing, false);
 console.log('PASS: real backup import handler and render: rollback, partial application, success and transport failure; no false success/refresh and zero network.');
+
+// Lingling pools use the real profile save handler and native registry controls.
+const poolModule = { provider_id: 1, manifest: { id: 'lingling', name: 'Lingling', fields: [
+  { key: 'transport_mode', label: 'Транспорт', type: 'select', default: 'tor', options: [{ value: 'tor', label: 'Tor' }, { value: 'proxy', label: 'Прокси' }, { value: 'mixed', label: 'Tor + прокси' }] },
+  { key: 'proxy_ids', label: 'Прокси', type: 'textarea', default: [] },
+  { key: 'proxy_policy', label: 'Режим пула', type: 'select', default: 'balance', options: [{ value: 'balance', label: 'Балансировка' }, { value: 'priority', label: 'По приоритету' }] },
+  { key: 'lanes', label: 'Tor lanes', type: 'number', default: 5 },
+] } };
+moduleState.selectedModule = poolModule;
+moduleState.apiRequest = async (url, options = {}) => { moduleCalls.push({ url, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : undefined }); return []; };
+moduleState.openCreateModal(poolModule); moduleState.formFields = { transport_mode: 'proxy', proxy_policy: 'priority', proxy_ids: [2, 1] };
+moduleCalls = []; await moduleState.handleSaveProfile({ preventDefault() {} });
+assert.deepEqual(Array.from(moduleCalls[0].body.fields.proxy_ids), [2, 1]);
+assert.equal(moduleCalls[0].body.fields.transport_mode, 'proxy');
+assert.equal(moduleCalls[0].body.fields.proxy_policy, 'priority');
+assert.equal(moduleCalls[0].body.proxy_id, null);
+const poolProfile = { ...moduleProfile, module_id: 'lingling', proxy_id: null, fields: { transport_mode: 'proxy', proxy_policy: 'priority', proxy_ids: [2, 1] } };
+moduleState.openEditModal(poolProfile); await new Promise(resolve => setImmediate(resolve));
+moduleState.formFields = { ...moduleState.formFields, proxy_ids: [1, 2] };
+moduleCalls = []; await moduleState.handleSaveProfile({ preventDefault() {} });
+assert.deepEqual(Array.from(moduleCalls[0].body.fields.proxy_ids), [1, 2]);
+assert.equal('transport_mode' in moduleCalls[0].body.fields, false, 'Unchanged transport is not replayed');
+for (const mode of ['tor', 'proxy', 'mixed']) {
+  const poolScratch = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'lingling-pool-render-'));
+  const poolServer = await createServer({ root, configFile: false, cacheDir: poolScratch, server: { middlewareMode: true }, plugins: [{
+    name: 'lingling-pool-offline-render', enforce: 'pre', transform(code, id) {
+      if (!id.endsWith('/pages/ModulesPage.tsx')) return;
+      const replace = (anchor, value) => { assert.ok(code.includes(anchor), anchor); code = code.replace(anchor, value); };
+      replace('useState<LoadedModule | null>(null)', `useState<LoadedModule | null>(${JSON.stringify(poolModule)})`);
+      replace('const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);', 'const [isProfileModalOpen, setIsProfileModalOpen] = useState(true);');
+      replace('useState<Proxy[]>([])', 'useState<Proxy[]>([{id:1,name:"First",scheme:"socks5",enabled:true},{id:2,name:"Second",scheme:"http",enabled:true},{id:3,name:"Disabled",scheme:"http",enabled:false}])');
+      replace('useState<Record<string, any>>({})', `useState<Record<string, any>>(${JSON.stringify({ transport_mode: mode, proxy_policy: 'priority', proxy_ids: [2, 1], lanes: 5 })})`);
+      return code;
+    },
+  }] });
+  try {
+    const { ModulesPage } = await poolServer.ssrLoadModule('/src/pages/ModulesPage.tsx');
+    const { I18nProvider } = await poolServer.ssrLoadModule('/src/i18n/context.tsx');
+    const html = renderToStaticMarkup(React.createElement(I18nProvider, null, React.createElement(ModulesPage)));
+    assert.ok(html.includes('Прямого выхода нет') || html.includes('прямого выхода нет'));
+    assert.equal(html.includes('aria-label="Пул прокси Lingling"'), mode !== 'tor');
+    assert.equal(html.includes('Tor lanes'), mode !== 'proxy');
+    if (mode !== 'tor') {
+      assert.ok(html.includes('1. Second') && html.includes('2. First'));
+      assert.ok(html.includes('aria-label="Поднять прокси 1"') && html.includes('aria-label="Убрать прокси 2"'));
+      assert.ok(html.includes('type="checkbox" disabled=""'), 'Disabled registry entry cannot be newly selected');
+    }
+    assert.equal(fetches, 0);
+  } finally { await poolServer.close(); fs.rmSync(poolScratch, { recursive: true, force: true }); }
+}
+console.log('PASS: Lingling Tor/proxy/mixed actual modal, ordered registry controls, disabled exits, no Direct label, typed pool create/edit payload; zero network.');

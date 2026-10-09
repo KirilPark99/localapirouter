@@ -42,6 +42,7 @@ class DiskProfileData(BaseModel):
     quota_rules: CredentialQuotaRules = Field(default_factory=list)
     model_preferences: List[str] = Field(default_factory=list)
     proxy_id: Optional[int] = Field(default=None, ge=1)
+    proxy_ref: Optional[Dict[str, Any]] = None
     proxy_name: Optional[str] = None
     proxy_url: Optional[str] = None
     notes: Optional[str] = None
@@ -156,6 +157,8 @@ async def sync_profiles_from_disk(db: AsyncSession, profiles_dir: Optional[Path]
         try:
             # One bad profile must not partially mutate itself or poison the session.
             async with db.begin_nested():
+                if p.module_id == "lingling" and (p.proxy_id is not None or p.fields.get("proxy_ids")):
+                    raise ValueError("Lingling disk profiles require portable proxy references, not numeric IDs")
                 loaded = ModuleLoader.get_module(p.module_id)
                 if not loaded or loaded.status != "ready":
                     raise ValueError(f"Module '{p.module_id}' is not ready")
@@ -180,6 +183,10 @@ async def sync_profiles_from_disk(db: AsyncSession, profiles_dir: Optional[Path]
                         continue
 
                 proxy_id = p.proxy_id
+                if p.module_id == "lingling" and p.proxy_ref is not None:
+                    from app.services.proxy_service import ProxyService
+                    resolved = await ProxyService.import_pool_fields(db, {"proxy_refs": [p.proxy_ref]})
+                    proxy_id = resolved["proxy_ids"][0]
                 if proxy_id is not None and await db.get(Proxy, proxy_id) is None:
                     raise ValueError("Profile proxy not found")
                 if proxy_id is None and (p.proxy_name or p.proxy_url):
@@ -203,8 +210,12 @@ async def sync_profiles_from_disk(db: AsyncSession, profiles_dir: Optional[Path]
                 old_rules = target.quota_rules or [] if target else []
                 prepared = (ApiKeyService._restore_credential_rules(p.quota_rules, old_rules)
                             if "quota_rules" in p.model_fields_set or target is None else old_rules)
-                serialized = json.dumps(p.fields)
-                masked = next((p.fields[k] for k in ("api_key", "token_v2", "user_token", "apiKey", "cookie") if p.fields.get(k)), next(iter(p.fields.values()), None))
+                fields = p.fields
+                if p.module_id == "lingling" and ("proxy_ids" in fields or "proxy_refs" in fields):
+                    from app.services.proxy_service import ProxyService
+                    fields = await ProxyService.import_pool_fields(db, fields)
+                serialized = json.dumps(fields)
+                masked = next((fields[k] for k in ("api_key", "token_v2", "user_token", "apiKey", "cookie") if fields.get(k)), next(iter(fields.values()), None))
                 metadata = _profile_metadata(target, p.fields, p.module_id) if target else {}
                 metadata.update(_source="file", _file_path=p.file_path, _file_profile_key=p.file_key,
                                 _file_hash=p.file_hash, _file_profile_hash=_profile_hash(p),
@@ -218,7 +229,8 @@ async def sync_profiles_from_disk(db: AsyncSession, profiles_dir: Optional[Path]
                 if target:
                     # Old profile files predate these optional controls; absence is not a reset.
                     for key in ("notes", "proxy_id", "group_name", "rpm_limit", "tpm_limit", "max_concurrency"):
-                        if key not in p.model_fields_set and not (key == "proxy_id" and (p.proxy_name or p.proxy_url)):
+                        if key not in p.model_fields_set and not (key == "proxy_id" and
+                                ((p.module_id == "lingling" and "proxy_ref" in p.model_fields_set) or p.proxy_name or p.proxy_url)):
                             values.pop(key)
                     for key, value in values.items():
                         setattr(target, key, value)
@@ -280,6 +292,9 @@ async def export_profile_to_file(db: AsyncSession, credential_id: int, module_id
     fields = json.loads(decrypted) if decrypted.strip().startswith(("{", "[")) else {"api_key": decrypted}
     if not isinstance(fields, dict):
         raise ValueError("Profile credentials must be an object")
+    if module_id == "lingling" and ("proxy_ids" in fields or "proxy_refs" in fields):
+        from app.services.proxy_service import ProxyService
+        fields = await ProxyService.export_pool_fields(db, fields)
     prefs = (await db.execute(select(DiscoveredModel.canonical_slug).join(CredentialModelPreference,
         CredentialModelPreference.model_id == DiscoveredModel.id).where(CredentialModelPreference.credential_id == cred.id)
         .order_by(CredentialModelPreference.priority_order, CredentialModelPreference.id))).scalars().all()
@@ -287,6 +302,11 @@ async def export_profile_to_file(db: AsyncSession, credential_id: int, module_id
     for key in ("name", "enabled", "priority", "weight", "notes", "proxy_id", "group_name",
                 "rpm_limit", "tpm_limit", "max_concurrency", "quota_rules"):
         payload[key] = getattr(cred, key)
+    if module_id == "lingling":
+        from app.services.proxy_service import ProxyService
+        proxy_id = payload.pop("proxy_id")
+        refs = await ProxyService.export_pool_fields(db, {"transport_mode": "proxy", "proxy_ids": [proxy_id] if proxy_id is not None else []})
+        payload["proxy_ref"] = refs["proxy_refs"][0] if refs["proxy_refs"] else None
     # Validate the complete payload before publishing anything.
     profile = _parse_profile_dict(payload, module_id, cred.name, "")
     base_dir = target_profiles_dir if target_profiles_dir is not None else get_profiles_dir()

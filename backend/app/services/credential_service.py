@@ -19,6 +19,8 @@ class CredentialService:
         configuration = {**provider.adapter_configuration,
             "credential_metadata": getattr(credential, "metadata_json", {}) or {}}
         configuration["credential_id"] = credential.id
+        if configuration.get("module_id") == "lingling":
+            configuration["profile_proxy_id"] = getattr(credential, "proxy_id", None)
         if configuration.get("module_id") not in ("codex_cli", "grok_builder_cli"):
             return configuration
 

@@ -1,4 +1,4 @@
-"""MyAIrouter bridge to unmodified Lingling and the real OpenCode client."""
+"""MyAIrouter bridge to Lingling's Tor/proxy relay and the real OpenCode client."""
 from __future__ import annotations
 
 import asyncio
@@ -90,6 +90,51 @@ def _owned_lane_running(lane) -> bool:
     return lane.process is not None and lane.process.poll() is None
 
 
+def _wait_for_transport(manager, daemon, cfg, stop) -> str:
+    tor_lanes = [lane for lane in manager.lanes if not lane.proxy_url]
+    # Keep ownership checks for later launches/healing, not only first readiness.
+    for lane in tor_lanes:
+        lane.running = lambda lane=lane: _owned_lane_running(lane)
+    if tor_lanes:
+        manager.start_lanes(tor_lanes[:1])
+    candidates = [lane for lane in manager.lanes if lane.proxy_url] + tor_lanes[:1]
+    deadline = time.monotonic() + cfg["startup_timeout"]
+    while not stop.is_set() and time.monotonic() < deadline:
+        for lane in candidates:
+            if lane.limited_until > time.time():
+                continue
+            if not lane.proxy_url:
+                # Foreign listeners and a probe alone never prove Tor ownership/bootstrap.
+                if not _owned_lane_running(lane):
+                    if not lane.healing:
+                        daemon.check_once()
+                    continue
+                if manager.lane_bootstrap_pct(lane) < 100:
+                    continue
+            code = daemon.reachable(lane, probe_timeout=8)
+            if lane.proxy_url:
+                if 200 <= code < 400 and manager.lane_usable(lane):
+                    return "proxy"
+            elif code in (200, 403):
+                lane.healthy, lane.asked, lane.probe_code = True, True, code
+                if manager.lane_usable(lane):
+                    return "tor"
+            if code == 429:
+                daemon.on_refused(lane, code)
+        stop.wait(1)
+    raise RuntimeError("Lingling transport startup timed out or was cancelled; direct traffic is disabled")
+
+
+def _valid_readiness(ready, cfg) -> bool:
+    transport = ready.get("transport")
+    return (ready.get("transport_mode") == cfg["transport_mode"] and
+            transport in ("tor", "proxy") and
+            (cfg["transport_mode"] == "mixed" or transport == cfg["transport_mode"]) and
+            ready.get("tor") is (transport == "tor") and
+            isinstance(ready.get("url"), str) and
+            re.fullmatch(r"http://127\.0\.0\.1:[0-9]+", ready["url"]) is not None)
+
+
 def _worker() -> None:
     """Own all blocking Lingling threads and child processes outside Uvicorn."""
     import fcntl
@@ -115,45 +160,29 @@ def _worker() -> None:
     try:
         tools = root / "tools"
         tools.mkdir(exist_ok=True, mode=0o700)
-        for name in ("geoip", "geoip6"):
+        for name in (("geoip", "geoip6") if cfg["transport_mode"] != "proxy" else ()):
             src = Path("/usr/share/tor") / name
             if src.is_file() and not (tools / name).exists():
                 shutil.copyfile(src, tools / name)
-        manager = TorManager(root, count=cfg["lanes"], tor_exe=cfg["tor_path"],
+        manager = TorManager(root, count=cfg["lanes"] if cfg["transport_mode"] != "proxy" else 0,
+            proxy_urls=cfg["proxy_urls"], selection_policy=cfg["proxy_policy"], tor_exe=cfg["tor_path"],
             exit_countries=cfg["countries"], fallback_countries=cfg["fallback_countries"],
             preferred_countries=cfg["preferred_countries"], boot_timeout=30, prune_orphans=False)
-        # The original library also accepts foreign SOCKS listeners as "running".
-        for lane in manager.lanes:
-            lane.running = lambda lane=lane: _owned_lane_running(lane)
-        if manager._geoip_path() is None:
+        if cfg["transport_mode"] != "proxy" and manager._geoip_path() is None:
             raise RuntimeError("Tor GeoIP database is missing; install the system Tor data files")
         error = manager.setup_lanes()
         if error:
             raise RuntimeError(error)
         daemon = HealthDaemon(manager, event=emitter)
-        first = manager.lanes[0]
-        manager.start_lanes([first])
-        deadline = time.monotonic() + cfg["startup_timeout"]
-        # A listening SOCKS port is NOT bootstrap readiness. Never go direct.
-        while not stop.is_set() and time.monotonic() < deadline:
-            if not first.running() and not first.healing:
-                daemon.check_once()
-            if manager.lane_bootstrap_pct(first) >= 100:
-                code = daemon.reachable(first, probe_timeout=8)
-                if code in (200, 403):
-                    first.healthy, first.asked, first.probe_code = True, True, code
-                    break
-                if code == 429:
-                    daemon.on_refused(first, code)
-            stop.wait(1)
-        else:
-            raise RuntimeError("Lingling Tor startup timed out or was cancelled; direct traffic is disabled")
+        transport = _wait_for_transport(manager, daemon, cfg, stop)
         daemon.start()
         relay = Relay(manager, event=emitter)
         relay.cert_shop = CertShop(root / "mitm")
         relay.tunnels = TunnelPool()
         port = relay.start()
-        threading.Thread(target=manager.start_lanes, args=(manager.lanes[1:],), daemon=True).start()
+        remaining = [lane for lane in manager.lanes if not lane.proxy_url][1:]
+        if remaining:
+            threading.Thread(target=manager.start_lanes, args=(remaining,), daemon=True).start()
         env = _client_env(root, cfg.get("continue_on_deny", True))
         for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
             env[var] = f"http://127.0.0.1:{port}"
@@ -175,7 +204,8 @@ def _worker() -> None:
                     req = urllib.request.Request(url + "/global/health", headers={"Authorization": "Basic " + auth})
                     with urllib.request.urlopen(req, timeout=2) as resp:
                         if json.load(resp).get("healthy") is True:
-                            print(json.dumps({"url": url, "tor": True}), flush=True)
+                            print(json.dumps({"url": url, "transport_mode": cfg["transport_mode"],
+                                              "transport": transport, "tor": transport == "tor"}), flush=True)
                             break
                 except (OSError, ValueError):
                     pass
@@ -185,9 +215,9 @@ def _worker() -> None:
         while not stop.wait(.5):
             if client.poll() is not None:
                 raise RuntimeError("OpenCode server exited")
-    except Exception as exc:
-        print(json.dumps({"error": str(exc)}), flush=True)
-        raise
+    except Exception:
+        # Native connector exceptions can contain decrypted proxy credentials.
+        print(json.dumps({"error": "Lingling worker failed; direct traffic is disabled"}), flush=True)
     finally:
         if client is not None and client.poll() is None:
             client.terminate()
@@ -220,6 +250,25 @@ from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, collect_
 from app.modules.loader import ModuleLoader
 from app.schemas.chat import ChatCompletionRequest
 import httpx
+
+
+async def _resolve_proxy_pool(ids) -> list[str]:
+    from app.core.database import AsyncSessionLocal
+    from app.services.proxy_service import ProxyService
+    async with AsyncSessionLocal() as db:
+        return await ProxyService.resolve_proxy_pool(db, ids)
+
+
+def _validate_proxy_url(value) -> None:
+    from urllib.parse import urlsplit
+    try:
+        parsed = urlsplit(value)
+        if (not isinstance(value, str) or parsed.scheme not in ("http", "https", "socks5", "socks5h") or
+                not parsed.hostname or (parsed.port is not None and parsed.port < 1) or parsed.path not in ("", "/") or
+                parsed.query or parsed.fragment or any(c.isspace() or ord(c) < 32 for c in value)):
+            raise ValueError()
+    except (ValueError, TypeError, AttributeError):
+        raise RouterException("Invalid Lingling proxy endpoint", ErrorCategory.INVALID_REQUEST) from None
 
 
 async def _stop_process(proc) -> None:
@@ -268,32 +317,79 @@ class LinglingAdapter(BaseModuleAdapter):
     def _settings(self, ctx: ModuleExecutionContext) -> dict:
         if os.name != "posix":
             raise RouterException("Lingling host integration currently requires POSIX process ownership", ErrorCategory.INVALID_REQUEST)
-        if ctx.proxy_url:
-            raise RouterException("Lingling manages Tor itself; remove the ordinary profile proxy", ErrorCategory.INVALID_REQUEST)
         fields = ctx.credentials
+        mode = fields.get("transport_mode", "tor")
+        policy = fields.get("proxy_policy", "balance")
+        ids = fields.get("proxy_ids", [])
+        if mode not in ("tor", "proxy", "mixed") or policy not in ("balance", "priority"):
+            raise RouterException("Invalid Lingling transport_mode or proxy_policy", ErrorCategory.INVALID_REQUEST)
+        from app.services.proxy_service import ProxyService
+        try:
+            ProxyService.validate_proxy_ids(ids)
+        except ValueError:
+            raise RouterException("proxy_ids must be an ordered list of at most 16 unique positive integers",
+                                  ErrorCategory.INVALID_REQUEST) from None
+        if mode == "tor" and ctx.proxy_url:
+            raise RouterException("Tor mode cannot use a profile proxy; select proxy or mixed transport", ErrorCategory.INVALID_REQUEST)
+        if ctx.proxy_url:
+            _validate_proxy_url(ctx.proxy_url)
         source = Path(str(fields.get("project_path") or Path.home() / "PythonProjects" / "lingling")).expanduser().resolve()
         if not all((source / "lingling" / name).is_file() for name in ("__init__.py", "lanes.py", "relay.py", "mitm.py")):
             raise RouterException("Lingling source directory is missing or incomplete", ErrorCategory.INVALID_REQUEST)
-        result = {"project_path": str(source)}
-        for key, binary in (("opencode_path", "opencode"), ("tor_path", "tor")):
+        result = {"project_path": str(source), "transport_mode": mode, "proxy_policy": policy,
+                  "proxy_ids": list(ids) if mode != "tor" else [], "tor_path": "", "lanes": 0,
+                  "countries": [], "fallback_countries": [], "preferred_countries": []}
+        binaries = [("opencode_path", "opencode")]
+        if mode != "proxy":
+            binaries.append(("tor_path", "tor"))
+        for key, binary in binaries:
             value = str(fields.get(key) or "").strip()
             found = shutil.which(value or binary)
             if not found or not os.access(found, os.X_OK):
                 raise RouterException(f"{binary} executable not found; configure {key}", ErrorCategory.INVALID_REQUEST)
             result[key] = str(Path(found).resolve())
         for key, default, lower, upper in (("lanes", 5, 1, 16), ("startup_timeout", 600, 30, 1800)):
+            if key == "lanes" and mode == "proxy":
+                continue
             raw = fields.get(key)
             raw = default if raw is None or raw == "" else raw
             if isinstance(raw, bool) or not re.fullmatch(r"[0-9]+", str(raw)) or not lower <= int(raw) <= upper:
                 raise RouterException(f"{key} must be an integer from {lower} to {upper}", ErrorCategory.INVALID_REQUEST)
             result[key] = int(raw)
         for key, default in (("countries", "us,de,nl,fr,ro,gb,ca,se,pl,ch"), ("fallback_countries", ""), ("preferred_countries", "")):
+            if mode == "proxy":
+                continue
             value = str(fields.get(key) or default).strip()
             countries = [x.strip().lower() for x in value.split(",") if x.strip()]
             if any(not re.fullmatch(r"[a-z]{2}", x) for x in countries):
                 raise RouterException(f"{key} requires comma-separated two-letter country codes", ErrorCategory.INVALID_REQUEST)
             result[key] = list(dict.fromkeys(countries))
         return result
+
+    async def _configuration(self, ctx) -> dict:
+        cfg = self._settings(ctx)
+        ids = list(cfg.get("proxy_ids", []))
+        saved_proxy = "profile_proxy_id" in ctx.extra_config
+        profile_id = ctx.extra_config.get("profile_proxy_id")
+        if cfg.get("transport_mode", "tor") == "tor" and profile_id is not None:
+            raise RouterException("Tor mode cannot use a profile proxy; select proxy or mixed transport", ErrorCategory.INVALID_REQUEST)
+        if saved_proxy and profile_id is not None and profile_id not in ids:
+            ids.append(profile_id)
+        try:
+            urls = list(await _resolve_proxy_pool(ids)) if ids else []
+        except Exception:
+            raise RouterException("Selected proxy pool is unavailable (missing, disabled or invalid proxy)",
+                                  ErrorCategory.INVALID_REQUEST) from None
+        if ctx.proxy_url and not saved_proxy:
+            if "credential_id" in ctx.extra_config:
+                raise RouterException("Saved Lingling profiles require a registry proxy ID", ErrorCategory.INVALID_REQUEST)
+            urls.append(ctx.proxy_url)
+        for url in urls:
+            _validate_proxy_url(url)
+        cfg["proxy_urls"] = list(dict.fromkeys(urls))
+        if cfg.get("transport_mode") in ("proxy", "mixed") and not cfg["proxy_urls"]:
+            raise RouterException("Lingling proxy pool is empty; select an enabled proxy", ErrorCategory.INVALID_REQUEST)
+        return cfg
 
     def _root(self, ctx, cfg) -> Path:
         identity = str(ctx.extra_config.get("credential_id") or "local")
@@ -307,7 +403,7 @@ class LinglingAdapter(BaseModuleAdapter):
         return root
 
     async def list_models(self, ctx):
-        cfg = self._settings(ctx)
+        cfg = await self._configuration(ctx)
         root = self._root(ctx, cfg)
         workspace = root / "workspace"
         workspace.mkdir(exist_ok=True, mode=0o700)
@@ -329,15 +425,18 @@ class LinglingAdapter(BaseModuleAdapter):
     async def validate_credentials(self, ctx):
         try:
             import importlib.util
-            if importlib.util.find_spec("stem") is None:
+            cfg = self._settings(ctx)
+            if cfg["transport_mode"] != "proxy" and importlib.util.find_spec("stem") is None:
                 return False, "Install the required stem==1.8.2 dependency in the backend environment", 0
             models = await self.list_models(ctx)
-            return True, "Lingling/OpenCode configured; Tor connects on the first generation (no direct fallback)", len(models)
-        except Exception as exc:
-            return False, str(exc), 0
+            return True, f"Lingling/OpenCode configured; {cfg['transport_mode']} transport connects on the first generation (no direct fallback)", len(models)
+        except RouterException as exc:
+            return False, exc.message, 0
+        except Exception:
+            return False, "Lingling configuration/model discovery failed", 0
 
     async def _runtime(self, ctx, client_tools=False):
-        cfg = self._settings(ctx)
+        cfg = await self._configuration(ctx)
         # A separate owned runtime prevents agent denial from racing a second model turn.
         if client_tools:
             cfg["continue_on_deny"] = False
@@ -362,8 +461,8 @@ class LinglingAdapter(BaseModuleAdapter):
                 await proc.stdin.drain()
                 ready = json.loads(await asyncio.wait_for(proc.stdout.readline(), cfg["startup_timeout"] + 35))
                 if ready.get("error"):
-                    raise RouterException(ready["error"], ErrorCategory.NETWORK_ERROR)
-                if ready.get("tor") is not True or not re.fullmatch(r"http://127\.0\.0\.1:[0-9]+", ready.get("url", "")):
+                    raise RouterException("Lingling worker failed; direct traffic is disabled", ErrorCategory.NETWORK_ERROR)
+                if not _valid_readiness(ready, cfg):
                     raise RouterException("Lingling worker failed readiness validation", ErrorCategory.NETWORK_ERROR)
                 current = {"process": proc, "url": ready["url"], "password": password, "lock": asyncio.Lock(),
                            "credential_id": ctx.extra_config.get("credential_id"), "root": root}
