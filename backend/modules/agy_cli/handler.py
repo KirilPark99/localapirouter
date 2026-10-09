@@ -312,6 +312,10 @@ class AgyCliAdapter(BaseModuleAdapter):
         call_names: Dict[str, str] = {}
 
         for m in messages:
+            if (m.cache_control is not None
+                    or isinstance(m.content, list) and any(p.get("cache_control") is not None for p in m.content)
+                    or any((c.extra_content or {}).get("anthropic", {}).get("cache_control") is not None for c in m.tool_calls or [])):
+                raise RouterException("AGY cannot preserve explicit cache metadata", ErrorCategory.INVALID_REQUEST)
             role = (m.role or "user").lower()
             text = ("".join(p.get("text", "") for p in m.content if p.get("type") in ("text", "input_text", "output_text"))
                     if isinstance(m.content, list) else str(m.content or ""))
@@ -402,6 +406,8 @@ class AgyCliAdapter(BaseModuleAdapter):
         if request.tools:
             declarations = []
             for tool in request.tools:
+                if tool.get("cache_control") is not None:
+                    raise RouterException("AGY cannot preserve explicit cache metadata", ErrorCategory.INVALID_REQUEST)
                 function = tool.get("function", {})
                 if tool.get("type") != "function" or not isinstance(function, dict) or not function.get("name"):
                     raise RouterException("AGY supports named function tools only", ErrorCategory.INVALID_REQUEST)
@@ -438,6 +444,9 @@ class AgyCliAdapter(BaseModuleAdapter):
         request: ChatCompletionRequest,
         ctx: ModuleExecutionContext,
     ) -> AsyncGenerator[str, None]:
+        model = (request.model or ctx.model_id or "gemini-3.8-flash-low").removeprefix("agy_cli/")
+        # Validate the native payload before auth or local credential discovery.
+        envelope = self._build_cloudcode_envelope(request, "", model)
         try:
             access_token, project_id = await self._get_valid_access_token(ctx)
             if not project_id:
@@ -448,9 +457,8 @@ class AgyCliAdapter(BaseModuleAdapter):
             raise RouterException(str(exc), ErrorCategory.AUTH_ERROR) from exc
         except Exception as exc:
             raise normalize_upstream_error(exception=exc) from exc
-        model = (request.model or ctx.model_id or "gemini-3.8-flash-low").removeprefix("agy_cli/")
         headers = self._build_cloudcode_headers(access_token)
-        envelope = self._build_cloudcode_envelope(request, project_id, model)
+        envelope["project"] = project_id
         chunk_id = f"chatcmpl-agy-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         call_count = 0
@@ -519,6 +527,13 @@ class AgyCliAdapter(BaseModuleAdapter):
                                 usage = {"prompt_tokens": metadata.get("promptTokenCount", 0),
                                          "completion_tokens": metadata.get("candidatesTokenCount", 0),
                                          "total_tokens": metadata.get("totalTokenCount", 0)}
+                                for native, detail, key in (
+                                    ("cachedContentTokenCount", "prompt_tokens_details", "cached_tokens"),
+                                    ("thoughtsTokenCount", "completion_tokens_details", "reasoning_tokens"),
+                                ):
+                                    value = metadata.get(native)
+                                    if type(value) is int and value >= 0:
+                                        usage[detail] = {key: value}
                             candidates = payload.get("candidates", [])
                             if not candidates:
                                 continue

@@ -55,7 +55,8 @@
         "streaming": true,
         "vision": "unknown",
         "tools": true,
-        "reasoning": "unknown"
+        "reasoning": "unknown",
+        "prompt_caching": true
       }
     },
     {
@@ -68,7 +69,8 @@
         "streaming": true,
         "vision": "unknown",
         "tools": true,
-        "reasoning": "unknown"
+        "reasoning": "unknown",
+        "prompt_caching": true
       }
     },
     {
@@ -81,7 +83,8 @@
         "streaming": true,
         "vision": "unknown",
         "tools": true,
-        "reasoning": "unknown"
+        "reasoning": "unknown",
+        "prompt_caching": true
       }
     },
     {
@@ -94,7 +97,8 @@
         "streaming": true,
         "vision": "unknown",
         "tools": true,
-        "reasoning": "unknown"
+        "reasoning": "unknown",
+        "prompt_caching": true
       }
     }
   ]

@@ -19,9 +19,13 @@ CACHING_PROVIDERS: Set[str] = {
     "mimo",
     "kimi",
     "moonshot",
+    "grok",
+    "grok_builder_cli",
+    "xai",
 }
 
 CACHING_MODEL_PREFIXES = (
+    "grok",
     "claude",
     "gpt-4o",
     "gpt-4.5",

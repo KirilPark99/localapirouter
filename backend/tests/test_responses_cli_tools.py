@@ -227,6 +227,159 @@ async def test_codex_cache_affinity_is_stable_scoped_and_preserves_usage(monkeyp
     assert original.model_dump() == snapshot
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("cached", [4096, 0, None])
+async def test_grok_cache_affinity_headers_usage_and_scopes(monkeypatch, stream, cached):
+    adapter = GrokBuilderCliAdapter()
+    account = ["synthetic-account"]
+    captured = []
+
+    async def synthetic_token(ctx):
+        return "synthetic", account[0]
+
+    def upstream(wire_request):
+        body = json.loads(wire_request.content)
+        headers = wire_request.headers
+        assert headers["authorization"] == "Bearer synthetic"
+        assert headers["x-grok-client-identifier"] == "grok-shell"
+        assert headers["x-grok-conv-id"] and headers["x-grok-session-id"]
+        assert body["input"] == messages_to_input(current[0].messages)
+        assert current[0].tools is not None
+        assert body["tools"] == [{"type": "function", **current[0].tools[0]["function"]}]
+        assert body["store"] is False and body["stream"] is True
+        captured.append((headers["x-grok-conv-id"], headers["x-grok-session-id"], body["prompt_cache_key"]))
+        usage: dict[str, Any] = {"input_tokens": 10000, "output_tokens": 4, "total_tokens": 10004}
+        if cached is not None:
+            usage["input_tokens_details"] = {"cached_tokens": cached}
+        event = {"type": "response.completed", "response": {"output": [], "usage": usage}}
+        return httpx.Response(200, text="data: " + json.dumps(event) + "\n\n",
+                              headers={"content-type": "text/event-stream"})
+
+    monkeypatch.setattr(adapter, "_get_valid_access_token", synthetic_token)
+    monkeypatch.setattr(adapter, "create_http_client", lambda *a, **kw: httpx.AsyncClient(transport=httpx.MockTransport(upstream)))
+    monkeypatch.setattr(ModuleLoader, "get_adapter", lambda mid: adapter)
+    bridge = CustomModuleAdapter()
+    original = ChatCompletionRequest(model="grok_builder_cli/synthetic", stream=stream,
+        messages=[ChatMessage(role="system", content="Stable system"), *history()],
+        tools=[{"type": "function", "function": FUNCTION}])
+    current = [original]
+
+    async def invoke(request=original, credential=80, extras=None):
+        current[0] = request
+        before = request.model_dump()
+        configuration = {"module_id": "grok_builder_cli", "credential_id": credential}
+        kwargs: dict[str, Any] = dict(base_url="", api_key=json.dumps({"auto_detect_local": False}), model_id=request.model,
+            request=request, extra_headers=extras or {}, configuration=configuration)
+        response = (await collect_chat_completion(bridge.stream_chat(**kwargs), request.model) if stream
+                    else await bridge.chat_completions(**kwargs))
+        assert response.usage is not None
+        assert response.usage.prompt_tokens_details == ({"cached_tokens": cached} if cached is not None else None)
+        assert response.usage.prompt_tokens == 10000 and response.usage.total_tokens == 10004
+        assert request.model_dump() == before
+        assert configuration == {"module_id": "grok_builder_cli", "credential_id": credential}
+        return captured[-1]
+
+    baseline = await invoke()
+    assert baseline[0] == baseline[1] == baseline[2]
+    assert len(baseline[0]) == 64 and set(baseline[0]) <= set("0123456789abcdef")
+    assert await invoke() == baseline
+    assert await invoke(original.model_copy(update={"model": "synthetic"})) == baseline
+    grown = original.model_copy(update={"messages": [*original.messages,
+        ChatMessage(role="assistant", content="More history"), ChatMessage(role="user", content="Next turn")]})
+    assert await invoke(grown) == baseline
+    for index in (0, 1):
+        changed = original.model_copy(deep=True)
+        changed.messages[index].content = "Different start"
+        assert (await invoke(changed))[0] != baseline[0]
+    changed = original.model_copy(deep=True)
+    assert changed.tools is not None
+    changed.tools[0]["function"]["description"] = "Different schema"
+    assert (await invoke(changed))[0] != baseline[0]
+    assert (await invoke(original.model_copy(update={"model": "other-model"})))[0] != baseline[0]
+    assert (await invoke(credential=81))[0] != baseline[0]
+    account[0] = "another-account"
+    assert (await invoke())[0] != baseline[0]
+    account[0] = "synthetic-account"
+    user_first = original.model_copy(update={"messages": history()})
+    key = await invoke(user_first)
+    assert await invoke(user_first.model_copy(update={"messages": [*history(), ChatMessage(role="user", content="Next")]})) == key
+    for explicit in ("client-explicit", "", "unicode-ключ\nbody-only"):
+        request = original.model_copy(update={"prompt_cache_key": explicit})
+        key = await invoke(request)
+        assert key[2] == explicit and key[0] == key[1]
+        assert await invoke(grown.model_copy(update={"prompt_cache_key": explicit})) == key
+        assert (await invoke(request, credential=81))[0] != key[0]
+    extras = {"X-Grok-Conv-ID": "native-conversation", "x-grok-session-id": "native-session"}
+    assert await invoke(extras=extras) == ("native-conversation", "native-session", "native-conversation")
+    assert await invoke(grown, extras=extras) == ("native-conversation", "native-session", "native-conversation")
+    assert await invoke(original.model_copy(update={"prompt_cache_key": ""}), extras=extras) == ("native-conversation", "native-session", "")
+    assert extras == {"X-Grok-Conv-ID": "native-conversation", "x-grok-session-id": "native-session"}
+    assert (await invoke(extras={"x-grok-conv-id": "native-only"}))[0:3:2] == ("native-only", "native-only")
+    assert await invoke(extras={"x-grok-session-id": "session-only"}) == (baseline[0], "session-only", baseline[2])
+    calls = len(captured)
+    for invalid in ({"Authorization": "unsafe"}, {"user-agent": "unsafe"}, {"x-grok-client-mode": "unsafe"},
+                    {"X-Unknown": "discarded"}, {"x-grok-conv-id": "bad\nheader"},
+                    {"x-grok-session-id": "unicode-ключ"}, {"x-grok-conv-id": ""},
+                    {"x-grok-conv-id": "bad\x7fheader"}, {"x-grok-session-id": 123},
+                    {"x-grok-conv-id": " spaced "}, {"x-grok-conv-id": "one", "X-Grok-Conv-ID": "two"}):
+        with pytest.raises(RouterException, match="header") as caught:
+            await invoke(extras=invalid)
+        assert caught.value.status_code == 400
+    assert len(captured) == calls
+
+
+@pytest.mark.asyncio
+async def test_module_bridge_passes_fresh_extra_headers_context(monkeypatch):
+    contexts = []
+    class SyntheticModule:
+        async def list_models(self, ctx):
+            contexts.append(ctx)
+            ctx.extra_config["extra_headers"]["x-test"] = "mutated"
+            ctx.extra_config["new"] = True
+            return []
+        async def validate_credentials(self, ctx):
+            contexts.append(ctx)
+            return True, "synthetic", 0
+    monkeypatch.setattr(ModuleLoader, "get_adapter", lambda mid: SyntheticModule())
+    bridge = CustomModuleAdapter()
+    configuration = {"module_id": "synthetic", "extra_headers": {"old": "config"}}
+    extras = {"x-test": "caller"}
+    await bridge.list_models("", "", extras, configuration)
+    await bridge.validate_credentials("", "", extras, configuration)
+    assert configuration == {"module_id": "synthetic", "extra_headers": {"old": "config"}}
+    assert extras == {"x-test": "caller"}
+    assert contexts[1].extra_config["extra_headers"] == extras
+    assert contexts[0].extra_config is not contexts[1].extra_config
+    _, ctx = bridge._resolve_context("", configuration)
+    assert ctx.extra_config["extra_headers"] == configuration["extra_headers"]
+    ctx.extra_config["extra_headers"]["old"] = "changed"
+    assert configuration["extra_headers"] == {"old": "config"}
+
+
+@pytest.mark.asyncio
+async def test_grok_discovery_and_compression_cache_capability(monkeypatch):
+    from app.compression.caching_aware import is_prompt_caching_supported, should_preserve_system_prompt
+    from app.modules.base import ModuleExecutionContext
+    adapter = GrokBuilderCliAdapter()
+    async def synthetic_token(ctx):
+        return "synthetic", "synthetic-account"
+    monkeypatch.setattr(adapter, "_get_valid_access_token", synthetic_token)
+    for dynamic in (True, False):
+        def upstream(request):
+            return httpx.Response(200 if dynamic else 503, json={"data": [{"id": "grok-test"}]})
+        monkeypatch.setattr(adapter, "create_http_client", lambda *a, **kw: httpx.AsyncClient(transport=httpx.MockTransport(upstream)))
+        models = await adapter.list_models(ModuleExecutionContext(credentials={"auto_detect_local": False}))
+        assert models and all(model.capabilities["prompt_caching"] is True for model in models)
+    for model, provider in (("grok-4.7", None), ("grok_builder_cli/grok-4.7", None),
+                            ("xai/grok-4.7", None), ("synthetic", "xAI"), ("synthetic", "grok_builder_cli")):
+        assert is_prompt_caching_supported(model, provider)
+        assert should_preserve_system_prompt("when_caching", model, provider_name=provider)
+        assert not should_preserve_system_prompt("never", model, provider_name=provider)
+    assert not is_prompt_caching_supported("unrelated", "unrelated")
+    assert not should_preserve_system_prompt("when_caching", "grok-4.7", supports_prompt_cache=False)
+
+
 def test_cli_reasoning_defaults_preserve_strict_client_validation():
     original = ChatCompletionRequest(model="synthetic", messages=history())
     before = original.model_dump()

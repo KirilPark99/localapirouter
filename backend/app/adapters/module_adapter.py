@@ -21,6 +21,7 @@ class CustomModuleAdapter(BaseProviderAdapter):
         proxy_url: Optional[str] = None,
         timeout: float = 60.0,
         model_id: str = "",
+        extra_headers: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Any, ModuleExecutionContext]:
         module_id = configuration.get("module_id")
         if not module_id:
@@ -57,7 +58,8 @@ class CustomModuleAdapter(BaseProviderAdapter):
             proxy_url=proxy_url,
             model_id=model_id,
             timeout=timeout,
-            extra_config=configuration,
+            extra_config={**configuration, "extra_headers": dict(
+                extra_headers if extra_headers is not None else configuration.get("extra_headers") or {})},
         )
         return adapter, ctx
 
@@ -70,7 +72,7 @@ class CustomModuleAdapter(BaseProviderAdapter):
         proxy_url: Optional[str] = None,
         timeout: float = 30.0,
     ) -> List[DiscoveredModelData]:
-        adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout)
+        adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout, extra_headers=extra_headers)
         return await adapter.list_models(ctx)
 
     async def get_subscription_limits(
@@ -99,7 +101,7 @@ class CustomModuleAdapter(BaseProviderAdapter):
         proxy_url: Optional[str] = None,
         timeout: float = 15.0,
     ) -> Tuple[bool, str, int]:
-        adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout)
+        adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout, extra_headers=extra_headers)
         return await adapter.validate_credentials(ctx)
 
     async def chat_completions(
@@ -113,7 +115,7 @@ class CustomModuleAdapter(BaseProviderAdapter):
         proxy_url: Optional[str] = None,
         timeout: float = 60.0,
     ) -> ChatCompletionResponse:
-        adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout, model_id)
+        adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout, model_id, extra_headers)
         return await adapter.chat_completions(request, ctx)
 
     async def stream_chat(
@@ -127,7 +129,7 @@ class CustomModuleAdapter(BaseProviderAdapter):
         proxy_url: Optional[str] = None,
         timeout: float = 60.0,
     ) -> AsyncGenerator[str, None]:
-        adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout, model_id)
+        adapter, ctx = self._resolve_context(api_key, configuration, proxy_url, timeout, model_id, extra_headers)
         async with aclosing(adapter.stream_chat(request, ctx)) as source:
             async for chunk in source:
                 yield chunk

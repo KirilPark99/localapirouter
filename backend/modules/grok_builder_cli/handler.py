@@ -13,13 +13,14 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 import httpx
 from app.modules.base import BaseModuleAdapter, ModuleExecutionContext, SubscriptionLimit, SubscriptionLimits, collect_chat_completion
 from app.modules.responses import messages_to_input, tool_options, responses_to_chat
+from app.routing.cache_affinity import PrefixAnalyzer
 from app.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatMessage,
 )
 from app.adapters.base import DiscoveredModelData
-from app.core.errors import normalize_upstream_error
+from app.core.errors import ErrorCategory, RouterException, normalize_upstream_error
 
 logger = logging.getLogger("app.modules.grok_builder_cli")
 
@@ -328,6 +329,7 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
                                         "vision": True,
                                         "tools": True,
                                         "reasoning": True,
+                                        "prompt_caching": True,
                                     },
                                     context_length=ctx_win,
                                     max_output_tokens=128000,
@@ -352,6 +354,19 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
             for model in catalog
         ]
 
+    def _cache_session_id(
+        self, request: ChatCompletionRequest, ctx: ModuleExecutionContext, model: str, account_id: str,
+    ) -> str:
+        key: Any = request.prompt_cache_key
+        if key is None:
+            first_user = next((i for i, msg in enumerate(request.messages) if msg.role == "user"), len(request.messages) - 1)
+            # ponytail: identical starts share a cache bucket, never resumable conversation state.
+            key = [[(msg.role, PrefixAnalyzer.normalize_content(msg.content))
+                    for msg in request.messages[:first_user + 1]], request.tools]
+        scope = [ctx.extra_config.get("credential_id"), account_id, model, key]
+        return hashlib.sha256(json.dumps(scope, ensure_ascii=False, sort_keys=True,
+                                        separators=(",", ":")).encode("utf-8")).hexdigest()
+
     def _convert_messages_to_responses_input(self, messages: List[ChatMessage]) -> List[Dict[str, Any]]:
         return messages_to_input(messages)
 
@@ -370,12 +385,23 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
         ctx: ModuleExecutionContext,
     ) -> AsyncGenerator[str, None]:
         options = tool_options(request)
-        access_token, _ = await self._get_valid_access_token(ctx)
+        affinity_headers = {}
+        for name, value in (ctx.extra_config.get("extra_headers") or {}).items():
+            if (not isinstance(name, str) or name.lower() not in ("x-grok-conv-id", "x-grok-session-id")
+                    or not isinstance(value, str) or not value or value != value.strip()
+                    or any(not 32 <= ord(char) < 127 for char in value)):
+                raise RouterException("Unsupported or invalid Grok affinity header", ErrorCategory.INVALID_REQUEST, status_code=400)
+            if name.lower() in affinity_headers:
+                raise RouterException("Duplicate Grok affinity header", ErrorCategory.INVALID_REQUEST, status_code=400)
+            affinity_headers[name.lower()] = value
+        access_token, account_id = await self._get_valid_access_token(ctx)
         model = request.model or ctx.model_id or "grok-4.7"
         if model.startswith("grok_builder_cli/"):
             model = model[17:]
 
         headers = self._build_headers(access_token)
+        session_id = self._cache_session_id(request, ctx, model, account_id)
+        headers.update({"x-grok-conv-id": session_id, "x-grok-session-id": session_id, **affinity_headers})
         input_items = self._convert_messages_to_responses_input(request.messages)
 
         body = {
@@ -387,6 +413,8 @@ class GrokBuilderCliAdapter(BaseModuleAdapter):
         }
 
         body.update(options)
+        # Native Responses precedence: explicit body key, otherwise the conversation header.
+        body.setdefault("prompt_cache_key", headers["x-grok-conv-id"])
 
         async with self.create_http_client(ctx) as client:
             async with client.stream(

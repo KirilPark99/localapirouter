@@ -18,7 +18,7 @@ class AgyToolsTest(unittest.IsolatedAsyncioTestCase):
         self.request = ChatCompletionRequest(model="agy_cli/gemini-test", messages=[{"role": "user", "content": "weather"}], tools=[{"type": "function", "function": {"name": "weather", "description": "Weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}])
 
     def offline(self, transport):
-        return patch.object(self.adapter, "create_http_client", side_effect=lambda *a, **k: httpx.AsyncClient(transport=httpx.MockTransport(transport)))
+        return patch.object(self.adapter, "create_http_client", side_effect=lambda *a, **k: httpx.AsyncClient(transport=httpx.MockTransport(transport), trust_env=False))
 
     def test_history_and_config(self):
         self.request.messages = ChatCompletionRequest(model="x", messages=[
@@ -72,6 +72,68 @@ class AgyToolsTest(unittest.IsolatedAsyncioTestCase):
             native = self.adapter._build_cloudcode_envelope(followup, "synthetic-project", followup.model)["request"]
             self.assertEqual([p["functionResponse"]["id"] for p in native["contents"][-1]["parts"]], [c.id for c in response.choices[0].message.tool_calls])
             self.assertEqual(native["contents"][-2]["parts"][1]["thoughtSignature"], "synthetic-signature")
+
+    async def test_usage_details_stream_and_collected(self):
+        missing = object()
+        cases = [(80, 7), (0, 0), (missing, missing), (80, missing), (missing, 7),
+                 (80, None), (None, 7), *[(value, value) for value in
+                 (True, False, 0.0, 7.0, 1.5, -1, None, "7", {}, [])]]
+        for model in ("agy_cli/gemini-test", "agy_cli/claude-test"):
+            request = self.request.model_copy(update={"model": model})
+            for cached, reasoning in cases:
+                metadata = {"promptTokenCount": 100, "candidatesTokenCount": 5, "totalTokenCount": 112}
+                expected: dict = {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 112}
+                for native, detail, key, value in (
+                    ("cachedContentTokenCount", "prompt_tokens_details", "cached_tokens", cached),
+                    ("thoughtsTokenCount", "completion_tokens_details", "reasoning_tokens", reasoning),
+                ):
+                    if value is not missing:
+                        metadata[native] = value
+                    if type(value) is int and value >= 0:
+                        expected[detail] = {key: value}
+                payloads = [{"candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}]},
+                            {"response": {"usageMetadata": metadata}}]
+                def transport(req):
+                    self.assertEqual(json.loads(req.content)["model"], model.removeprefix("agy_cli/"))
+                    return httpx.Response(200, text="".join("data: " + json.dumps(p) + "\n\n" for p in payloads))
+                with self.subTest(model=model, cached=cached, reasoning=reasoning), patch.object(
+                    self.adapter, "_get_valid_access_token", AsyncMock(return_value=("synthetic-token", "synthetic-project"))
+                ), self.offline(transport):
+                    chunks = [c async for c in self.adapter.stream_chat(request, self.ctx)]
+                    self.assertEqual(chunks[-1], "data: [DONE]\n\n")
+                    self.assertEqual(json.loads(chunks[-2][5:])["usage"], expected)
+                    response = await self.adapter.chat_completions(request, self.ctx)
+                    assert response.usage is not None
+                    self.assertEqual(response.usage.model_dump(exclude_none=True), expected)
+
+    async def test_explicit_cache_metadata_fails_before_auth(self):
+        for marker in ({"type": "ephemeral"}, {}):
+            variants = [
+                {"messages": [{"role": "system", "content": "rules", "cache_control": marker}]},
+                {"messages": [{"role": "user", "content": [{"type": "text", "text": "hello", "cache_control": marker}]}]},
+                {"messages": [{"role": "assistant", "tool_calls": [{"id": "x", "function": {"name": "weather", "arguments": "{}"},
+                    "extra_content": {"anthropic": {"cache_control": marker}}}]}]},
+                {"tools": [{"type": "function", "function": {"name": "weather"}, "cache_control": marker}]},
+            ]
+            for model in ("agy_cli/gemini-test", "agy_cli/claude-test"):
+                for variant in variants:
+                    request = ChatCompletionRequest.model_validate({**self.request.model_dump(), "model": model, **variant})
+                    with self.subTest(model=model, variant=variant), patch.object(
+                        self.adapter, "_get_valid_access_token", AsyncMock(side_effect=AssertionError("must not authenticate"))
+                    ) as auth, patch.object(self.adapter, "create_http_client", side_effect=AssertionError("must not connect")) as client:
+                        with self.assertRaises(RouterException) as caught:
+                            self.adapter._build_cloudcode_envelope(request, "p", model)
+                        self.assertEqual(caught.exception.category, ErrorCategory.INVALID_REQUEST)
+                        for collected in (False, True):
+                            with self.assertRaises(RouterException) as caught:
+                                if collected:
+                                    await self.adapter.chat_completions(request, self.ctx)
+                                else:
+                                    _ = [c async for c in self.adapter.stream_chat(request, self.ctx)]
+                            self.assertEqual(caught.exception.category, ErrorCategory.INVALID_REQUEST)
+                            self.assertEqual(caught.exception.status_code, 400)
+                        auth.assert_not_awaited()
+                        client.assert_not_called()
 
     async def test_normalized_http_and_transport_errors(self):
         for status, category in [(401, ErrorCategory.AUTH_ERROR), (429, ErrorCategory.RATE_LIMIT), (503, ErrorCategory.UPSTREAM_5XX)]:
