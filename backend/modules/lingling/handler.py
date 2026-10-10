@@ -96,8 +96,8 @@ def _wait_for_transport(manager, daemon, cfg, stop) -> str:
     for lane in tor_lanes:
         lane.running = lambda lane=lane: _owned_lane_running(lane)
     if tor_lanes:
-        manager.start_lanes(tor_lanes[:1])
-    candidates = [lane for lane in manager.lanes if lane.proxy_url] + tor_lanes[:1]
+        manager.start_lanes(tor_lanes)
+    candidates = [lane for lane in manager.lanes if lane.proxy_url] + tor_lanes
     deadline = time.monotonic() + cfg["startup_timeout"]
     while not stop.is_set() and time.monotonic() < deadline:
         for lane in candidates:
@@ -180,9 +180,6 @@ def _worker() -> None:
         relay.cert_shop = CertShop(root / "mitm")
         relay.tunnels = TunnelPool()
         port = relay.start()
-        remaining = [lane for lane in manager.lanes if not lane.proxy_url][1:]
-        if remaining:
-            threading.Thread(target=manager.start_lanes, args=(remaining,), daemon=True).start()
         env = _client_env(root, cfg.get("continue_on_deny", True))
         for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
             env[var] = f"http://127.0.0.1:{port}"
@@ -540,26 +537,46 @@ class LinglingAdapter(BaseModuleAdapter):
                 "never execute native OpenCode tools or interactive questions. Commands, file access and delegation "
                 "must be requested through client function calls, not performed locally. "
                 "The API client performs each requested action and supplies its real result on the next turn. "
-                "Do not claim an action was executed before the client result. MCP alias to client function: "
+                "Do not claim an action was executed before the client result. "
+                "The OpenCode environment and working directory belong to the relay, not the API client. "
+                "Use only client paths supplied in the conversation or actual client tool results; "
+                "never infer client paths from the relay environment. "
+                "For every function call, use the exact MCP alias on the LEFT below as its name, "
+                "not the original client name on the right or a functions/default namespace. "
+                "Original names in the conversation/history are references, not callable names here. "
+                "MCP alias to client function: "
                 + json.dumps({alias: fn["name"] for alias, fn in tools.items()}, ensure_ascii=False))
             if request.tool_choice == "required" or isinstance(request.tool_choice, dict):
                 policy += " You must request an available client tool in this response, not finish with text alone."
             if request.parallel_tool_calls is False:
                 policy += " Request at most one client tool in this response."
         system = "\n\n".join(filter(None, (system, policy)))
+        aliases = {fn["name"]: alias for alias, fn in tools.items()}
+        def transcript(message):
+            item = message.model_dump(exclude_none=True)
+            # Old callable names teach the model unavailable tools in the new MCP scope.
+            for call in item.get("tool_calls", []):
+                fn = call["function"]
+                fn["name"] = aliases.get(fn["name"], fn["name"])
+            if item["role"] in ("tool", "function") and "name" in item:
+                item["name"] = aliases.get(item["name"], item["name"])
+            return item
         parts = []
         if len(turns) > 1:
             # ponytail: OpenCode SDK accepts user parts only; JSON transcript keeps history without replaying model calls.
-            history = [m.model_dump(exclude_none=True) for m in turns[:-1]]
+            history = [transcript(m) for m in turns[:-1]]
             if any(not isinstance(m.content, (str, type(None))) for m in turns[:-1]):
                 raise RouterException("Images in previous turns are not supported by the OpenCode chat bridge", ErrorCategory.INVALID_REQUEST)
             parts.append({"type": "text", "text": "Previous conversation (JSON):\n" + json.dumps(history, ensure_ascii=False)})
+        if tools:
+            # Keep the current callable scope beside the next turn, after imported history.
+            parts.append({"type": "text", "text": policy})
         content = turns[-1].content
         if turns[-1].role in ("tool", "function"):
             last = turns[-1]
             if not isinstance(content, str) or (last.role == "tool" and not last.tool_call_id) or (last.role == "function" and not last.name):
                 raise RouterException("Client tool results require text and a call ID or legacy function name", ErrorCategory.INVALID_REQUEST)
-            parts.append({"type": "text", "text": "Continue after this client tool result (JSON):\n" + json.dumps(last.model_dump(exclude_none=True), ensure_ascii=False)})
+            parts.append({"type": "text", "text": "Continue after this client tool result (JSON):\n" + json.dumps(transcript(last), ensure_ascii=False)})
             content = None
         blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content or []
         for block in blocks:
@@ -629,7 +646,9 @@ class LinglingAdapter(BaseModuleAdapter):
                     if variant not in info.get("variants", {}):
                         raise RouterException("Requested reasoning variant is not supported by this OpenCode model", ErrorCategory.INVALID_REQUEST)
                     prompt["variant"] = variant
-                session = await call("POST", "/session", json={"title": "MyAIrouter", "permission": [{"permission": "*", "pattern": "*", "action": "ask"}]})
+                # Keep genuine OpenCode schemas; every permission is rejected below.
+                session = await call("POST", "/session", json={"title": "MyAIrouter", "permission": [
+                    {"permission": "*", "pattern": "*", "action": "ask"}]})
                 sid = session["id"]
                 cid, created = "chatcmpl-" + uuid.uuid4().hex, int(time.time())
                 def chunk(delta=None, finish=None, usage=None):
@@ -688,6 +707,11 @@ class LinglingAdapter(BaseModuleAdapter):
                                     reply = await client.post(f"/permission/{request_id}/reply", json=denial)
                                     if reply.is_error and not (external and reply.status_code == 404):
                                         raise normalize_upstream_error(status_code=reply.status_code, response_body=reply.text)
+                                    if props.get("permission") == "doom_loop":
+                                        raise RouterException(
+                                            "OpenCode stopped repeated invalid/unavailable tool calls (doom_loop). "
+                                            "Use only the advertised client MCP aliases; no relay tool was approved.",
+                                            ErrorCategory.INVALID_REQUEST, status_code=422, replay_safe=False)
                                 else:
                                     await call("POST", f"/question/{request_id}/reject")
                                 continue

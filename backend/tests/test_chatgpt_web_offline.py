@@ -42,7 +42,7 @@ def test_offline_contract_and_browser_lifecycle():
         with patch.dict(os.environ, env), patch.object(BaseSettings, "__init__", isolated_init), \
              patch.object(socket.socket, "connect", blocked), patch.object(socket, "create_connection", blocked):
             from app.core.config import settings  # Bootstrap before later bridge imports.
-            assert "offline-" in settings.DATABASE_URL or "synthetic.db" in settings.DATABASE_URL
+            assert settings.DATABASE_URL == "sqlite+aiosqlite:///:memory:" or "offline-" in settings.DATABASE_URL or "synthetic.db" in settings.DATABASE_URL
             h = load_handler()
             asyncio.run(check_contract(h))
         assert not Path(temp, "synthetic.db").exists()
@@ -62,7 +62,8 @@ const asset = 'https://chatgpt.com/cdn/assets/synthetic.js';
 global.location = {origin:'https://chatgpt.com'};
 global.performance = {getEntriesByType: () => [{name:asset}]};
 global.document = {querySelectorAll: () => []};
-global.window = {};
+let events = [], sessionPayload = {user:{id:'synthetic-user'},accessToken:'synthetic-browser-only'}, sessionType = 'application/json';
+global.window = {__myairouterChatGPTEvent:async event => {events.push(event);}};
 let variant = 'legacy', expected, calls = 0;
 const legacySource = 'function finalize(e=!1,t=`none`){return helper(`finalized`,e,t)}' +
  'Promise.all([proof.getEnforcementToken(t,{forceSync:!0}),turnstile.getEnforcementToken(t)])' +
@@ -76,11 +77,15 @@ function conversation(options) {
  assert.equal(body.supports_buffering,true); assert.deepEqual(body.supported_encodings,['v1']);
  assert.equal(body.history_and_training_disabled,true); assert.equal(body.parent_message_id,'client-created-root');
  assert.equal(body.messages[0].content.parts[0],'hello'); calls++;
- return new Response(sse);
+ assert.equal(events.at(-1).type,'send_activated');
+ return new Response(sse,{headers:{'content-type':'text/event-stream'}});
 }
 global.fetch = async (url, options={}) => {
  if(url === asset) return new Response(variant === 'legacy' ? legacySource : resolverSource);
- if(variant === 'resolver' && url === '/api/auth/session') return new Response(JSON.stringify({accessToken:'synthetic-browser-only'}));
+ if(url === '/api/auth/session') {
+   assert.equal(options.redirect,'error'); assert.equal(options.cache,'no-store');
+   return new Response(JSON.stringify(sessionPayload),{headers:{'content-type':sessionType}});
+ }
  if(variant === 'resolver' && url === '/backend-api/sentinel/chat-requirements/prepare') {
    assert.equal(options.headers.get('Authorization'),'Bearer synthetic-browser-only');
    assert.deepEqual(JSON.parse(options.body),{p:'synthetic-proof'});
@@ -113,11 +118,25 @@ const turn = eval('(' + source.replaceAll('await import(', 'await fakeImport(') 
      [{kind:'picker',modelLabel:'GPT-5.6 Sol',effortIndex:4},'gpt-5-6-pro',false],
      [{kind:'free',thinkEnabled:true},'auto',true]]) {
        expected = {model,reason};
-       assert.equal((await turn({prompt:'hello',selection})).sse,sse);
+       events = [];
+       assert.equal((await turn({prompt:'hello',selection})).finished,true);
+       assert.deepEqual(events.slice(0,2).map(e=>e.type),['send_activated','accepted']);
+       assert.equal(events.filter(e=>e.type==='chunk').map(e=>e.text).join(''),sse);
        assert.equal(window.__myairouterChatGPTAbort,undefined);
    }
  }
- assert.equal(calls,8); console.log('Embedded JS: 8 synthetic legacy/resolver turns passed');
+ assert.equal(calls,8);
+ for(variant of ['legacy','resolver']) {
+   for(sessionPayload of [{}, {user:{}}, {user:{id:'fake'},error:'expired'},
+       {user:{id:'fake'},expires:'invalid'}, {user:{id:'fake'},expires:'2000-01-01T00:00:00Z'}]) {
+     events=[]; assert.equal((await turn({prompt:'hello',selection:{kind:'free'}})).status,401);
+     assert.equal(events.length,0); assert.equal(calls,8);
+   }
+   sessionType='text/html'; events=[];
+   await assert.rejects(()=>turn({prompt:'hello',selection:{kind:'free'}}),/invalid session/);
+   assert.equal(events.length,0); assert.equal(calls,8); sessionType='application/json';
+ }
+ console.log('Embedded JS: 8 synthetic legacy/resolver turns and auth/send guards passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 '''
     script = script.replace("SOURCE", json.dumps(h.BROWSER_TURN)).replace("SSE", json.dumps(sse))
@@ -181,9 +200,22 @@ async def check_contract(h):
         def __init__(self):
             self.closed = False
         async def close(self):
-            self.closed = True
+            try:
+                if getattr(self, "blocked", False):
+                    entered.set()
+                    await asyncio.Future()
+            finally:
+                self.closed = True
 
     class Page:
+        main_frame = object()
+        async def expose_binding(self, name, callback):
+            assert name == '__myairouterChatGPTEvent'
+            async def invoke(*args):
+                task = asyncio.create_task(callback(*args))
+                binding_tasks.append(task)
+                return await asyncio.shield(task)  # Mirrors Playwright's independent binding tasks.
+            self.callback = invoke
         async def goto(self, url, **kwargs):
             assert url == h.PAGE_URL
         @property
@@ -192,12 +224,36 @@ async def check_contract(h):
         async def evaluate(self, script, arg=None):
             assert script == h.BROWSER_TURN
             assert arg["prompt"] == "hello"
+            source = {'page':self,'frame':self.main_frame}
+            if mode[0] == 'early':
+                return {'status':401}
+            await self.callback(source, {'type':'send_activated'})
             if mode[0] == "wait":
                 entered.set()
                 await asyncio.Future()
             if mode[0] == "error":
                 return {"status": 429}
-            return {"sse": sse}
+            source = {'page':self,'frame':self.main_frame}
+            await self.callback(source, {'type':'accepted'})
+            if mode[0] in ('live','partial_failure','flood'):
+                partial = {'message': {**doc['message'], 'id':'owned-stream', 'status':'in_progress', 'end_turn':False}}
+                if mode[0] == 'flood':
+                    for i in range(100):
+                        partial['message']['content'] = {'content_type':'text','parts':['a'*(i+1)]}
+                        await self.callback(source, {'type':'chunk','text':event('message',partial)})
+                        if i == 16:
+                            flood_ready.set()
+                else:
+                    await self.callback(source, {'type':'chunk','text':event('message',partial)})
+                    entered.set()
+                    await release.wait()
+                    if mode[0] == 'partial_failure':
+                        return {'finished':True}
+                    partial['message'].update(status='finished_successfully',end_turn=True)
+                    await self.callback(source, {'type':'chunk','text':event('message',partial)})
+            else:
+                await self.callback(source, {'type':'chunk','text':sse})
+            return {'finished':True}
 
     class Context(Resource):
         async def new_page(self):
@@ -229,7 +285,7 @@ async def check_contract(h):
     from app.modules.base import ModuleManifest
     manifest = ModuleManifest.model_validate_json(Path(h.__file__).with_name("manifest.json").read_text())
     assert all(field.type == "password" for field in manifest.fields if field.key in ("cookie", "storage_state"))
-    mode, entered = ["ok"], asyncio.Event()
+    mode, entered, binding_tasks = ["ok"], asyncio.Event(), []
     manager, browser, context = Manager(), Browser(), Context()
     with patch.object(h, "_playwright", side_effect=lambda: manager):
         result = await adapter.chat_completions(request, ctx)
@@ -239,7 +295,7 @@ async def check_contract(h):
         mode[0] = "error"
         with pytest.raises(h.RouterException) as error:
             await adapter.chat_completions(request, ctx)
-        assert error.value.category == h.ErrorCategory.RATE_LIMIT
+        assert error.value.category == h.ErrorCategory.RATE_LIMIT and error.value.replay_safe is False
         assert manager.closed and browser.closed and context.closed
         manager, browser, context = Manager(), Browser(), Context()
         mode[0] = "wait"
@@ -252,8 +308,64 @@ async def check_contract(h):
         manager, browser, context = Manager(), Browser(), Context()
         with pytest.raises(h.RouterException) as error:
             await adapter.chat_completions(request, ctx.model_copy(update={"timeout": 0.01}))
-        assert error.value.category == h.ErrorCategory.TIMEOUT
+        assert error.value.category == h.ErrorCategory.TIMEOUT and error.value.replay_safe is False
         assert manager.closed and browser.closed and context.closed
+        mode[0] = 'early'
+        manager, browser, context = Manager(), Browser(), Context()
+        fresh = h.ChatCompletionRequest(model=request.model, messages=request.messages)
+        with pytest.raises(h.RouterException) as error:
+            await adapter.chat_completions(fresh, ctx)
+        assert error.value.category == h.ErrorCategory.AUTH_ERROR
+        assert not getattr(fresh, '_upstream_submission_started', False)
+        assert manager.closed and browser.closed and context.closed
+
+        # First disconnect can arrive while an ordinary auth error is tearing down.
+        mode[0], entered = 'early', asyncio.Event()
+        manager, browser, context = Manager(), Browser(), Context()
+        context.blocked = True
+        fresh = h.ChatCompletionRequest(model=request.model, messages=request.messages)
+        source = adapter.stream_chat(fresh, ctx)
+        consumer = asyncio.create_task(anext(source))
+        await asyncio.wait_for(entered.wait(), 1)
+        consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+        await source.aclose()
+        assert manager.closed and browser.closed and context.closed
+
+        for scenario in ('live','partial_failure','flood'):
+            mode[0] = scenario
+            entered, release, flood_ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            manager, browser, context = Manager(), Browser(), Context()
+            fresh = h.ChatCompletionRequest(model=request.model, messages=request.messages)
+            source = adapter.stream_chat(fresh, ctx)
+            frames = [await anext(source)]
+            assert 'assistant' in frames[0] and fresh._upstream_submission_started
+            assert '_upstream_submission_started' not in fresh.model_dump()
+            assert not manager.closed  # First chunk is available before browser completion.
+            if scenario == 'flood':
+                await asyncio.wait_for(flood_ready.wait(), 1)
+                await asyncio.wait_for(source.aclose(), 1)  # Full queue must not hang cleanup.
+            else:
+                frames.append(await anext(source))
+                assert json.loads(frames[-1][6:])['choices'][0]['delta']['content'] == 'answer'
+                await entered.wait()
+                assert not release.is_set()
+                release.set()
+                if scenario == 'partial_failure':
+                    with pytest.raises(h.RouterException) as error:
+                        async for frame in source:
+                            frames.append(frame)
+                    assert error.value.replay_safe is False
+                    assert all('[DONE]' not in f and '"finish_reason": "stop"' not in f for f in frames)
+                else:
+                    frames.extend([frame async for frame in source])
+                    accumulator = h.ChatStreamAccumulator()
+                    for frame in frames:
+                        accumulator.feed(frame)
+                    assert accumulator.response(request.model, require_complete=True).choices[0].message.content == 'answer'
+            assert manager.closed and browser.closed and context.closed
+            assert all(task.done() for task in binding_tasks)
 
 
 def test_loader_bridge_and_routed_effort_without_profiles():
@@ -265,7 +377,7 @@ def test_loader_bridge_and_routed_effort_without_profiles():
     from curl_cffi.requests import AsyncSession
     from contextlib import asynccontextmanager
     assert isinstance(RealPage.url, property)
-    assert "offline-" in settings.DATABASE_URL or "synthetic.db" in settings.DATABASE_URL
+    assert settings.DATABASE_URL == "sqlite+aiosqlite:///:memory:" or "offline-" in settings.DATABASE_URL or "synthetic.db" in settings.DATABASE_URL
     def blocked(*args, **kwargs):
         raise AssertionError("Network/browser prohibited during bridge regression")
     with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"), prefix="web-loader-offline-") as temp:
@@ -284,10 +396,12 @@ def test_loader_bridge_and_routed_effort_without_profiles():
                 from app.schemas.chat import ChatCompletionRequest
                 from app.modules.base import ChatStreamAccumulator
                 bridge, seen = CustomModuleAdapter(), []
-                async def turn(prompt, selection, state, ctx):
+                async def turn(prompt, selection, state, ctx, *, on_text, on_send):
                     seen.append(ctx)
                     assert selection["effortIndex"] == 2
-                    return "synthetic answer"
+                    on_send()
+                    await on_text('synthetic answer')
+                    return 'synthetic answer'
                 @asynccontextmanager
                 async def direct(ctx, method, url, headers, payload=None):
                     seen.append(ctx)
@@ -325,3 +439,50 @@ def test_loader_bridge_and_routed_effort_without_profiles():
                                     and c.credentials["marker"] is True for c in seen)
                 await loader.ModuleLoader.close_all()
             asyncio.run(run())
+
+
+def test_incremental_decoder_and_no_false_completion():
+    h = load_handler()
+    decoder = h.ChatGPTResponseDecoder()
+    document = {"message": {"id": "owned-answer", "author": {"role": "assistant"},
+        "content": {"content_type": "text", "parts": ["Привет"]},
+        "status": "in_progress", "end_turn": False}}
+    frame = "data: " + json.dumps(document, ensure_ascii=False) + "\r\n\r\n"
+    deltas = []
+    for char in frame:
+        deltas.extend(decoder.feed(char))
+    assert deltas == ["Привет"] and not decoder.complete
+    with pytest.raises(h.RouterException):
+        decoder.finish()  # Partial text must not masquerade as success.
+    document["message"]["content"]["parts"] = ["Привет мир"]
+    document["message"].update(status="finished_successfully", end_turn=True)
+    assert decoder.feed("data: " + json.dumps(document) + "\n\n") == [" мир"]
+    assert decoder.finish() == "Привет мир" and decoder.complete
+    with pytest.raises(h.RouterException):
+        decoder.feed('data: {"error":{"message":"provider failed"}}\n\n')
+    for mutation in ({"id": "different-answer"}, {"content": {"content_type": "text", "parts": ["rewrite"]}}):
+        other = h.ChatGPTResponseDecoder()
+        other.feed(frame)
+        changed = {"message": {**document["message"], **mutation}}
+        with pytest.raises(h.RouterException):
+            other.feed("data: " + json.dumps(changed) + "\n\n")
+    assert not other.complete
+    hidden = h.ChatGPTResponseDecoder()
+    analysis = {"message": {**document["message"], "channel": "analysis"}}
+    assert hidden.feed("data: " + json.dumps(analysis) + "\n\n") == []
+    assert hidden.feed("data: " + json.dumps(document) + "\n\n") == ["Привет мир"]
+    assert hidden.finish() == "Привет мир"
+    with pytest.raises(h.RouterException):
+        hidden.feed('event: delta\ndata: {"p":"","o":"replace","v":null}\n\n')
+    assert not hidden.complete
+    for mutation in ({"channel": "analysis"}, {"author": {"role": "user"}},
+                     {"content": {"content_type": "code", "text": "unsupported"}}):
+        other = h.ChatGPTResponseDecoder()
+        other.feed("data: " + json.dumps(document) + "\n\n")
+        changed = {"message": {**document["message"], **mutation,
+                              "status": "in_progress", "end_turn": False}}
+        with pytest.raises(h.RouterException):
+            other.feed("data: " + json.dumps(changed) + "\n\n")
+        assert not other.complete
+        with pytest.raises(h.RouterException):
+            other.finish()

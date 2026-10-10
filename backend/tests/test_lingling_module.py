@@ -155,6 +155,10 @@ async def test_client_tools_actual_ids_arguments_nonstream_and_sse(monkeypatch, 
     assert sum(len(c["choices"][0]["delta"].get("tool_calls", [])) for c in decoded) == count
     assert all(stream.closed for stream in streams) and not (tmp_path / "client-tools.json").exists()
     assert sum(path == "/mcp/client/disconnect" for _, path, _ in calls) == 2
+    sessions = [body for method, path, body in calls if method == "POST" and path == "/session"]
+    assert len(sessions) == 2 and all(body["permission"] == [
+        {"permission": "*", "pattern": "*", "action": "ask"},
+    ] for body in sessions), "Keep genuine OpenCode schemas, without approving their execution"
     replies = [b for _, path, b in calls if path.startswith("/permission/")]
     assert len(replies) == count * 2 and all(b == {"reply": "reject"} for b in replies)
     assert not any("tools/call" in path for _, path, _ in calls)
@@ -360,6 +364,10 @@ def test_agent_prompt_accepts_client_tools_without_enabling_native_execution(cho
     prompt = h.LinglingAdapter()._prompt(req)
     assert "fixture_lookup" in prompt["system"]
     assert "client" in prompt["system"] and "native" in prompt["system"]
+    assert "OpenCode environment and working directory belong to the relay, not the API client" in prompt["system"]
+    assert "never infer client paths from the relay environment" in prompt["system"]
+    assert "exact MCP alias on the LEFT" in prompt["system"]
+    assert "functions/default namespace" in prompt["system"]
     assert "tools" not in prompt
 
 
@@ -373,6 +381,38 @@ def test_agent_prompt_continues_after_actual_client_tool_result():
     assert prompt["system"].startswith("Keep literal caller instructions")
     assert '"tool_call_id": "call_actual"' in prompt["parts"][-1]["text"]
     assert "42 from the real client" in prompt["parts"][-1]["text"]
+
+
+def test_agent_prompt_maps_historical_functions_to_current_aliases_without_mutation():
+    for names in (("fixture_other", "fixture_lookup"), ("fixture_lookup", "fixture_other")):
+        req = ChatCompletionRequest(model=MODEL,
+            tools=[{"type": "function", "function": {"name": name}} for name in names],
+            messages=[{"role": "user", "content": "literal fixture_lookup"},
+                {"role": "assistant", "tool_calls": [
+                    {"id": "call_actual", "type": "function", "function": {
+                        "name": "fixture_lookup", "arguments": '{"literal": "fixture_lookup", "unicode": "✓"}'}},
+                    {"id": "call_retired", "type": "function", "function": {
+                        "name": "retired_lookup", "arguments": "{}"}}]},
+                {"role": "tool", "name": "fixture_lookup", "tool_call_id": "call_actual", "content": "literal fixture_lookup ✓"},
+                {"role": "function", "name": "fixture_lookup", "content": "legacy fixture_lookup"}])
+        before = req.model_dump()
+        prompt = h.LinglingAdapter()._prompt(req)
+        history = json.loads(prompt["parts"][0]["text"].split("\n", 1)[1])
+        expected = [call.model_dump(exclude_none=True) for call in req.messages[1].tool_calls or []]
+        alias = f"client_t{names.index('fixture_lookup')}"
+        assert "exact MCP alias on the LEFT" in prompt["parts"][-2]["text"]
+        assert json.dumps({f"client_t{i}": name for i, name in enumerate(names)}) in prompt["parts"][-2]["text"]
+        expected[0]["function"]["name"] = alias
+        assert history[1]["tool_calls"] == expected
+        assert history[0]["content"] == "literal fixture_lookup"
+        assert history[2] == {"role": "tool", "name": alias, "tool_call_id": "call_actual", "content": "literal fixture_lookup ✓"}
+        last = json.loads(prompt["parts"][-1]["text"].split("\n", 1)[1])
+        assert last == {"role": "function", "name": alias, "content": "legacy fixture_lookup"}
+        assert req.model_dump() == before
+        req.tool_choice = "none"
+        disabled = h.LinglingAdapter()._prompt(req)
+        unchanged = json.loads(disabled["parts"][0]["text"].split("\n", 1)[1])
+        assert unchanged[1]["tool_calls"][0]["function"]["name"] == "fixture_lookup"
 
 
 @pytest.mark.asyncio
@@ -507,13 +547,14 @@ async def test_profile_crud_stops_owned_runtime(monkeypatch):
 
     assert Path(engine.url.database).name.startswith("myairouter_test_")
     manifest = ModuleManifest.model_validate_json((Path(h.__file__).parent / "manifest.json").read_text())
+    model_count = len(manifest.default_models)
     adapter = h.LinglingAdapter()
     assert callable(getattr(adapter, "close_profile", None)), "Profile deletion must release its worker"
     released = []
     async def close_profile(cid):
         released.append(cid)
     monkeypatch.setattr(adapter, "close_profile", close_profile)
-    monkeypatch.setattr(adapter, "validate_credentials", AsyncMock(return_value=(True, "synthetic", 7)))
+    monkeypatch.setattr(adapter, "validate_credentials", AsyncMock(return_value=(True, "synthetic", model_count)))
     monkeypatch.setattr(adapter, "list_models", AsyncMock(return_value=[
         h.DiscoveredModelData(provider_model_id=m.id, display_name=m.name, context_length=m.context_length,
                              max_output_tokens=m.max_output_tokens, capabilities=m.capabilities)
@@ -529,7 +570,7 @@ async def test_profile_crud_stops_owned_runtime(monkeypatch):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
         base = "/api/admin/modules/lingling/profiles"
         listed = await client.get("/api/admin/modules")
-        assert listed.json()[0]["status"] == "ready" and listed.json()[0]["models_count"] == 7
+        assert listed.json()[0]["status"] == "ready" and listed.json()[0]["models_count"] == model_count
         fields = {f.key: f.default for f in manifest.fields}
         created = await client.post(base, json={"name": "lingling-fixture", "fields": fields})
         assert created.status_code == 201, created.text
@@ -543,7 +584,7 @@ async def test_profile_crud_stops_owned_runtime(monkeypatch):
         checked = await client.post(target + "/test")
         assert checked.status_code == 200 and checked.json()["success"]
         synced = await client.post(target + "/sync-models")
-        assert synced.status_code == 200 and synced.json() == {"success": True, "models_discovered": 7}
+        assert synced.status_code == 200 and synced.json() == {"success": True, "models_discovered": model_count}
         saved = await client.put(target, json={"fields": {"lanes": "2"}})
         assert saved.status_code == 200 and released == [cid]
         assert (await client.get(base)).json()[0]["fields"]["lanes"] == "2"
@@ -790,7 +831,20 @@ def test_all_tor_lanes_retain_owned_process_guard():
     stop = SimpleNamespace(is_set=lambda: False)
     assert h._wait_for_transport(manager, daemon, {"startup_timeout": 1}, stop) == "proxy"
     assert first.running() and not foreign.running() and external.running()
-    assert start == [first]
+    assert start == [first, foreign]
+
+
+def test_tor_readiness_uses_another_owned_lane_when_first_is_stalled():
+    first = SimpleNamespace(proxy_url="", process=None, healing=True, limited_until=0)
+    ready = SimpleNamespace(proxy_url="", process=SimpleNamespace(poll=lambda: None), healing=False, limited_until=0)
+    started, probes = [], []
+    manager = SimpleNamespace(lanes=[first, ready], start_lanes=lambda lanes: started.extend(lanes),
+        lane_bootstrap_pct=lambda lane: 100, lane_usable=lambda lane: True)
+    daemon = SimpleNamespace(reachable=lambda lane, **kw: (probes.append(lane), 200)[1],
+        check_once=lambda: None)
+    stop = SimpleNamespace(is_set=lambda: False, wait=lambda _: pytest.fail("An owned ready lane must avoid waiting"))
+    assert h._wait_for_transport(manager, daemon, {"startup_timeout": 1}, stop) == "tor"
+    assert started == [first, ready] and probes == [ready]
 
 
 @pytest.mark.asyncio
@@ -829,6 +883,36 @@ async def test_internal_requests_are_rejected_then_chat_continues(monkeypatch, s
     config = next(b for method, target, b in calls if target == "/config")
     assert config["experimental"]["continue_loop_on_deny"] is True
     assert ("POST", "/session/ses_fixture/abort", None) in calls and streams[0].closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_tools", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_doom_loop_is_rejected_without_blame_or_retry(monkeypatch, tmp_path, client_tools, streaming):
+    events = [("permission.asked", {"sessionID": "ses_fixture", "id": "per_doom",
+        "permission": "doom_loop", "patterns": ["invalid"]}),
+        ("session.error", {"sessionID": "ses_fixture", "error": {"name": "UnknownError",
+            "data": {"message": "The user rejected permission to use this specific tool call."}}})]
+    adapter, calls, streams = install(monkeypatch, events, root=tmp_path)
+    definitions = [{"type": "function", "function": {"name": "fixture"}}] if client_tools else None
+    req = request(tools=definitions, stream=streaming)
+    ctx = ModuleExecutionContext(model_id=MODEL, timeout=5)
+    with pytest.raises(RouterException, match="doom_loop") as error:
+        if streaming:
+            async for _ in adapter.stream_chat(req, ctx):
+                pass
+        else:
+            await adapter.chat_completions(req, ctx)
+    assert error.value.status_code == 422
+    assert not error.value.is_retryable and not error.value.is_fallback_eligible
+    assert "user rejected" not in error.value.message
+    replies = [body for _, path, body in calls if path.startswith("/permission/")]
+    assert len(replies) == 1 and replies[0]["reply"] == "reject"
+    assert sum(path.endswith("/prompt_async") for _, path, _ in calls) == 1
+    assert streams[0].closed and ("DELETE", "/session/ses_fixture", None) in calls
+    assert not (tmp_path / "client-tools.json").exists()
+    if client_tools:
+        assert any(path == "/mcp/client/disconnect" for _, path, _ in calls)
 
 
 @pytest.mark.asyncio

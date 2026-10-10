@@ -177,6 +177,11 @@ console.log('PASS: module-profile actual create/edit/OAuth/export handlers, shar
 
 const moduleScratch = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'module-profile-render-'));
 let renderedOAuth = null;
+const renderedGrouping = { groups: ['OAuth', 'Empty'], assignments: { codex_cli: 'OAuth' }, revision: 3 };
+const renderedModules = [
+  { ...module, status: 'ready', profiles_count: 1, models_count: 2 },
+  { manifest: { id: 'grok_builder_cli', name: 'Grok', fields: [] }, status: 'error', profiles_count: 0, models_count: 1 },
+];
 const moduleServer = await createServer({ root, configFile: false, cacheDir: moduleScratch, server: { middlewareMode: true }, plugins: [{
   name: 'module-profile-offline-render', enforce: 'pre', transform(code, id) {
     if (!id.endsWith('/pages/ModulesPage.tsx')) return;
@@ -188,6 +193,10 @@ const moduleServer = await createServer({ root, configFile: false, cacheDir: mod
     replace('useState<DiscoveredModel[]>([])', `useState<DiscoveredModel[]>(${JSON.stringify(models)})`);
     replace('useState<Record<string, any>>({})', `useState<Record<string, any>>(${JSON.stringify(moduleProfile.fields)})`);
     replace('useState<OAuthSession | null>(null)', `useState<OAuthSession | null>(${JSON.stringify(renderedOAuth)})`);
+    replace('useState<LoadedModule[]>([])', `useState<LoadedModule[]>(${JSON.stringify(renderedModules)})`);
+    replace('const [loading, setLoading] = useState(true);', 'const [loading, setLoading] = useState(false);');
+    replace('useState<ModuleGrouping>({ groups: [], assignments: {}, revision: 0 })', `useState<ModuleGrouping>(${JSON.stringify(renderedGrouping)})`);
+    replace('const [groupingLoaded, setGroupingLoaded] = useState(false);', 'const [groupingLoaded, setGroupingLoaded] = useState(true);');
     return code;
   },
 }] });
@@ -202,6 +211,11 @@ try {
   assert.equal((catalog.match(/<option/g) || []).length, 1); assert.ok(!catalog.includes('other/model'));
   assert.ok(!html.includes('quota-profile-options')); assert.equal(fetches, 0);
   console.log('PASS: real module modal renders shared quotas, scoped model catalog, group/rate controls, JSON fields and masked password; zero network.');
+  for (const name of ['OAuth', 'Empty', 'Без группы']) assert.ok(html.includes(`aria-label="Группа модулей: ${name}"`));
+  assert.ok(html.includes('Действия модуля Codex') && html.includes('Действия модуля Grok'));
+  assert.ok(html.includes('Действия группы OAuth') && html.includes('Действия группы Empty'));
+  assert.ok(html.includes('Группа модуля') && html.includes('В группе пока нет модулей.'));
+  console.log('PASS: actual module cards render named/empty/default groups and entity-local menus; zero network.');
   renderedOAuth = { ...session, status: 'pending', auth_url: 'https://unit.invalid/authorize?state=synthetic', loopback: false };
   moduleServer.moduleGraph.invalidateAll();
   const { ModulesPage: OAuthPage } = await moduleServer.ssrLoadModule('/src/pages/ModulesPage.tsx');
@@ -349,3 +363,63 @@ for (const moduleId of ['codex_cli', 'grok_builder_cli', 'agy_cli']) {
 }
 assert.equal(fetches, 0);
 console.log('PASS: actual Codex/Grok/Antigravity OAuth start handlers return URLs with unchanged proxy binding and zero browser opens; zero network.');
+
+// Exercise the real module grouping handlers without touching module profiles or real APIs.
+let groupStore = structuredClone(renderedGrouping), groupCalls = [], groupFailure = false, groupConfirmed = true;
+const grouping = {
+  Object, Set, JSON, modules: renderedModules, moduleGrouping: structuredClone(groupStore),
+  groupingLoaded: true, groupingSaving: false, groupingError: null, groupEditor: null, moduleGroupName: '',
+  window: { confirm(message) { assert.ok(message.includes('профили не удаляются')); return groupConfirmed; } },
+};
+for (const name of ['moduleGrouping', 'groupingLoaded', 'groupingSaving', 'groupingError', 'groupEditor', 'moduleGroupName'])
+  grouping['set' + name[0].toUpperCase() + name.slice(1)] = value => { grouping[name] = value; };
+grouping.apiRequest = async (url, options = {}) => {
+  assert.equal(url, '/api/admin/modules/groups', 'Grouping must not call any credential/profile/provider write API');
+  groupCalls.push({ method: options.method || 'GET', body: options.body && JSON.parse(options.body) });
+  if (groupFailure) throw new Error('synthetic grouping failure');
+  if (options.method === 'PUT') {
+    const body = JSON.parse(options.body);
+    assert.equal(body.revision, groupStore.revision);
+    groupStore = { ...body, revision: body.revision + 1 };
+  }
+  return structuredClone(groupStore);
+};
+vm.createContext(grouping);
+vm.runInContext(extract('pages/ModulesPage.tsx', ['fetchModuleGroups', 'saveModuleGrouping', 'openModuleGroupEditor', 'handleSaveModuleGroup', 'handleDeleteModuleGroup', 'handleMoveModuleGroup']), grouping);
+const groupEvent = { preventDefault() {} };
+await grouping.fetchModuleGroups();
+grouping.openModuleGroupEditor(null); grouping.moduleGroupName = ' Web ';
+await grouping.handleSaveModuleGroup(groupEvent);
+assert.ok(groupStore.groups.includes('Web')); assert.equal(grouping.groupEditor, null);
+assert.equal(groupStore.assignments.codex_cli, 'OAuth');
+await grouping.handleMoveModuleGroup('codex_cli', 'Web');
+assert.equal(groupStore.assignments.codex_cli, 'Web');
+grouping.openModuleGroupEditor(null, 'grok_builder_cli'); grouping.moduleGroupName = 'Custom';
+await grouping.handleSaveModuleGroup(groupEvent);
+assert.equal(groupStore.assignments.grok_builder_cli, 'Custom');
+grouping.openModuleGroupEditor('Custom'); grouping.moduleGroupName = 'Renamed';
+await grouping.handleSaveModuleGroup(groupEvent);
+assert.equal(groupStore.assignments.grok_builder_cli, 'Renamed'); assert.ok(!groupStore.groups.includes('Custom'));
+groupConfirmed = false; let groupBefore = groupCalls.length; await grouping.handleDeleteModuleGroup('Renamed'); assert.equal(groupCalls.length, groupBefore);
+groupConfirmed = true; await grouping.handleDeleteModuleGroup('Renamed');
+assert.equal(groupStore.assignments.grok_builder_cli, undefined); assert.ok(!groupStore.groups.includes('Renamed'));
+await grouping.handleMoveModuleGroup('codex_cli', ''); assert.equal(groupStore.assignments.codex_cli, undefined);
+for (const name of ['', '  ', 'Empty', 'Без группы', 'x'.repeat(101)]) {
+  grouping.openModuleGroupEditor(null); grouping.moduleGroupName = name;
+  groupBefore = groupCalls.length; await grouping.handleSaveModuleGroup(groupEvent);
+  assert.equal(groupCalls.length, groupBefore); assert.ok(grouping.groupingError);
+}
+groupFailure = true; grouping.openModuleGroupEditor(null); grouping.moduleGroupName = 'Uncommitted';
+const beforeFailure = structuredClone(groupStore);
+await grouping.handleSaveModuleGroup(groupEvent);
+assert.deepEqual(groupStore, beforeFailure); assert.ok(grouping.groupEditor); assert.equal(grouping.groupingError, 'synthetic grouping failure');
+assert.equal(grouping.groupingSaving, false);
+await grouping.fetchModuleGroups(); assert.equal(grouping.groupingLoaded, false);
+groupBefore = groupCalls.length; await grouping.handleMoveModuleGroup('codex_cli', 'Web'); assert.equal(groupCalls.length, groupBefore);
+groupFailure = false; await grouping.fetchModuleGroups(); assert.equal(grouping.groupingLoaded, true);
+vm.runInContext(extract('pages/ModulesPage.tsx', ['moduleGroups']), grouping);
+assert.equal(grouping.moduleGroups.find(group => group.name === 'Empty').modules.length, 0);
+assert.equal(grouping.moduleGroups.find(group => group.name === '').modules.length, renderedModules.length);
+assert.equal(grouping.moduleGroups.reduce((sum, group) => sum + group.modules.length, 0), renderedModules.length);
+assert.equal(fetches, 0);
+console.log('PASS: actual module group create/assign/move/unassign/rename/delete/validation/error/reload handlers, atomic payloads, empty/default groups and no profile writes; zero network.');

@@ -196,6 +196,7 @@ class JudgeEngine:
         """
         t0 = time.perf_counter()
         evaluation_usage = UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+        judge_req = None
 
         if len(active_candidates) <= 1:
             latency = round((time.perf_counter() - t0) * 1000, 2)
@@ -419,6 +420,11 @@ class JudgeEngine:
             return cand_idx, meta, lat, "SUCCESS", None
 
         except Exception as e:
+            if getattr(judge_req, '_upstream_submission_started', False):
+                e = e if isinstance(e, RouterException) else RouterException(str(e), ErrorCategory.UPSTREAM_5XX)
+                e.replay_safe = False
+            if isinstance(e, RouterException) and not e.replay_safe:
+                raise e
             lat = round((time.perf_counter() - t0) * 1000, 2)
             err_str = str(e)
 
@@ -497,7 +503,7 @@ class JudgeEngine:
                         return
                     except RouterException as error:
                         last_error = error
-                        if started or not error.category.is_fallback_eligible:
+                        if started or not error.is_fallback_eligible:
                             raise
                 raise last_error
             return winner_stream()
@@ -507,7 +513,7 @@ class JudgeEngine:
                 return await RoutingEngine._dispatch_chat(adapter, cred, provider, model, **kwargs(cred))
             except RouterException as error:
                 last_error = error
-                if not error.category.is_fallback_eligible:
+                if not error.is_fallback_eligible:
                     raise
         raise last_error
 

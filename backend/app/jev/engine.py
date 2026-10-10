@@ -238,6 +238,8 @@ class JevEngine:
                     "latency_ms": cand_latency,
                 })
                 last_exception = e
+                if isinstance(e, RouterException) and not e.replay_safe:
+                    break
 
         total_latency = round((time.perf_counter() - t0) * 1000, 2)
         if record_log:
@@ -292,7 +294,7 @@ class JevEngine:
         last_exception = None
 
         for attempt_idx, cand in enumerate(active_cands, start=1):
-            if isinstance(last_exception, RouterException) and (not last_exception.category.is_fallback_eligible or
+            if isinstance(last_exception, RouterException) and (not last_exception.is_fallback_eligible or
                     (profile.fallback_conditions is not None and last_exception.category.value not in profile.fallback_conditions)):
                 break
             model_obj = cand.model
@@ -388,7 +390,7 @@ class JevEngine:
                         "latency_ms": cand_latency,
                     })
                     last_exception = e
-                    if isinstance(e, RouterException) and (not e.category.is_fallback_eligible or
+                    if isinstance(e, RouterException) and (not e.is_fallback_eligible or
                             (profile.fallback_conditions is not None and e.category.value not in profile.fallback_conditions)):
                         break
 
@@ -463,7 +465,7 @@ class JevEngine:
             except Exception as exc:
                 LogService.finish_dispatch(dispatch, 'FAILED', (time.perf_counter() - started) * 1000)
                 error = exc if isinstance(exc, RouterException) else normalize_upstream_error(exception=exc)
-                if attempt >= retry_count or not error.category.is_retryable or error.category == ErrorCategory.RATE_LIMIT:
+                if attempt >= retry_count or not error.is_retryable or error.category == ErrorCategory.RATE_LIMIT:
                     circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
                     raise error
             finally:
@@ -805,8 +807,13 @@ class JevEngine:
             if not isinstance(parsed, dict) or parsed.get('error'):
                 raise ValueError('Invalid JEV response object')
             answers = cls._validate_answers(parsed.get('answers'), request.questions)
-        except (ValueError, TypeError) as exc:
-            raise RouterException('Invalid JEV decision JSON', ErrorCategory.UPSTREAM_5XX) from exc
+        except (ValueError, TypeError, RouterException) as exc:
+            error = exc if isinstance(exc, RouterException) else RouterException('Invalid JEV decision JSON', ErrorCategory.UPSTREAM_5XX)
+            if getattr(chat_req, '_upstream_submission_started', False):
+                error.replay_safe = False
+            if error is exc:
+                raise
+            raise error from exc
 
         usage_dict = {
             "input_tokens": resp.usage.prompt_tokens if resp.usage else 0,

@@ -69,6 +69,7 @@ class RouterException(Exception):
         retry_after: Optional[float] = None,
         raw_error: Optional[Any] = None,
         request_id: Optional[str] = None,
+        replay_safe: bool = True,
     ):
         super().__init__(message)
         self.message = message
@@ -78,6 +79,15 @@ class RouterException(Exception):
         self.retry_after = retry_after
         self.raw_error = raw_error
         self.request_id = request_id
+        self.replay_safe = replay_safe
+
+    @property
+    def is_retryable(self) -> bool:
+        return self.replay_safe and self.category.is_retryable
+
+    @property
+    def is_fallback_eligible(self) -> bool:
+        return self.replay_safe and self.category.is_fallback_eligible
 
     def to_openai_dict(self, request_id: Optional[str] = None) -> dict:
         req_id = request_id or self.request_id or "req_unknown"

@@ -660,17 +660,15 @@ class FusionEngine:
                 api_key = decrypt_secret(cred.encrypted_api_key)
                 proxy_url = ProxyService.build_proxy_url(cred.proxy) if cred.proxy else None
 
-                resp = await asyncio.wait_for(
-                    RoutingEngine._dispatch_chat(adapter, cred, provider, model_obj,
-                        base_url=provider.base_url,
-                        api_key=api_key,
-                        model_id=model_obj.provider_model_id,
-                        request=part_req,
-                        extra_headers=provider.extra_headers,
-                        configuration=provider.adapter_configuration,
-                        proxy_url=proxy_url,
-                        timeout=timeout_seconds,
-                    ),
+                # Shared dispatch owns the deadline and post-Send error fence.
+                resp = await RoutingEngine._dispatch_chat(adapter, cred, provider, model_obj,
+                    base_url=provider.base_url,
+                    api_key=api_key,
+                    model_id=model_obj.provider_model_id,
+                    request=part_req,
+                    extra_headers=provider.extra_headers,
+                    configuration=provider.adapter_configuration,
+                    proxy_url=proxy_url,
                     timeout=timeout_seconds,
                 )
                 latency = round((time.perf_counter() - p_t0) * 1000, 2)
@@ -693,8 +691,12 @@ class FusionEngine:
                 }
             except Exception as e:
                 re = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
+                if getattr(part_req, '_upstream_submission_started', False):
+                    re.replay_safe = False
                 last_err = re.message
                 last_status_code = re.status_code
+                if not re.replay_safe:
+                    break
 
 
         latency = round((time.perf_counter() - p_t0) * 1000, 2)

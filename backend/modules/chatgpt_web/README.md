@@ -7,6 +7,9 @@ Reference: `chatgpt-web.ts`, `chatgptWebExecutorAdapter.ts`,
 `chatgptWebDeltaV1.ts`, `chatgptWebTransport.ts`, `chatgptWebAttachments.ts`,
 and the common provider registry. This is **not** the Codex variant.
 The reference's `CHATGPT_WEB.md` retirement notice does not describe this executor.
+Session verification and submission guards selectively adapt the behavior of
+`codex-chatgpt-web` v6.1.7 / `f9ad4ae` (MIT notice also preserved in `LICENSE`);
+its Codex/Electron/MCP runtime is not imported.
 
 ## Credentials and runtime
 
@@ -30,6 +33,16 @@ Router `ctx.timeout` bounds the whole turn (plus bounded resource cleanup).
 explicitly says login/model access were not checked. Model discovery returns the
 reference's static eight routes, not a claim that an account can access them.
 There are no automatic login, captcha-solving, quota, or subscription-reset calls.
+An actual completion verifies `/api/auth/session` inside its assigned browser/proxy
+before sending: redirects, non-JSON, empty user, session errors and expired sessions
+fail closed. This does not check model entitlement and does not open a login URL.
+
+The browser awaits a request-bound Send fence before `/f/conversation`. From that
+point, errors and dispatch timeouts disable automatic retry and fallback, even
+before any client chunk appears. A successful HTTP response is acceptance evidence,
+not completion; ambiguous failures are deliberately not resent. Explicit new user
+requests remain possible. Disconnect/cancellation closes only the owned request's
+browser/context and cancels blocked binding tasks; server-side stopping is not guaranteed.
 
 ## Intentional limitations
 
@@ -38,11 +51,17 @@ There are no automatic login, captcha-solving, quota, or subscription-reset call
   system messages are not native privileged instructions. Tools, tool history,
   reasoning history, attachments/images/files/audio, structured output, sampling,
   token limits, and multiple choices are rejected explicitly, not silently dropped.
-* Buffered SSE, not token-live streaming. The terminal assistant document must
-  contain text, `status=finished_successfully`, and `end_turn=true` before returning
-  any OpenAI chunks. `[DONE]` alone is not success. Usage is unknown, never guessed.
-  Buffered OpenAI output also respects the shared collector's 8 MiB assembly limit.
-* Direct buffered snapshots and `delta_encoding: v1` are supported. WebSocket-only
+* Incremental SSE: browser chunks cross an awaited Playwright binding into a
+  bounded queue, with stable assistant-text prefixes emitted during generation.
+  Assistant identity changes, text rewrites and explicit stream errors fail closed;
+  explicit analysis-channel text is ignored before final-answer binding; later
+  reclassification fails. Legacy channel-less snapshots retain their existing
+  final-text interpretation; streamed prefixes cannot be retracted. Success requires
+  `status=finished_successfully` and `end_turn=true`; `[DONE]` alone is not success.
+  A failure after partial text never emits a successful finish. Usage is unknown
+  in this module (the outer router may estimate it). Upstream response is bounded
+  to 16 MiB and assembled OpenAI output to the shared collector's 8 MiB limit.
+* Direct snapshots and `delta_encoding: v1` are supported. WebSocket-only
   handoff, tool-result rendered-text fallback, and unknown encodings fail closed.
 * Exact common model selection mappings are retained, including Free Luna Think,
   GPT-5.6 Sol/GPT-5.5 Instant/Thinking/Pro, aliases and effort indexes. Pro is not
@@ -67,7 +86,9 @@ storage state and a fake Playwright runtime, blocks socket connections, disables
 repo dotenv, isolates required Settings, and uses a unique synthetic DB path
 without creating a database. It covers selection/history, credential/proxy
 validation, terminal snapshot/delta decoding, shared completion collection,
-provider rejection, timeout, cancellation and browser cleanup. With Node available,
+provider rejection, timeout, cancellation, full-queue cleanup, live delivery before
+completion, fragmented CRLF/Unicode, rewrite/identity errors and browser cleanup.
+With Node available,
 it also compiles the unchanged embedded JavaScript and executes eight synthetic
 legacy/integrity-resolver turns against fake page resources, module imports and
 fetch; no browser or real network participates.

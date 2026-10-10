@@ -1,9 +1,10 @@
+import asyncio
 import json
 import uuid
 from typing import Annotated, Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -11,7 +12,7 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.api.deps import get_current_admin
 from app.modules.loader import ModuleLoader, LoadedModule
-from app.models.entities import Provider, ProviderCredential, Proxy, DiscoveredModel
+from app.models.entities import AppSetting, Provider, ProviderCredential, Proxy, DiscoveredModel
 from app.core.crypto import encrypt_secret, decrypt_secret, compute_fingerprint, mask_secret
 from app.services.credential_service import CredentialService
 from app.services.model_discovery_service import ModelDiscoveryService
@@ -98,6 +99,65 @@ async def reload_modules(db: AsyncSession = Depends(get_db)):
     """
     result = await ModuleLoader.reload_and_sync(db)
     return result
+
+
+# ponytail: one API worker; use database write coordination before adding workers.
+_module_groups_lock = asyncio.Lock()
+
+
+class ModuleGroups(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    groups: List[str]
+    assignments: Dict[str, str]
+    revision: int = Field(ge=0)
+
+    @field_validator("groups", "assignments")
+    @classmethod
+    def clean_names(cls, value):
+        names = value if isinstance(value, list) else value.values()
+        cleaned = [name.strip() for name in names]
+        if any(not name or len(name) > 100 or name.casefold() == "без группы" for name in cleaned):
+            raise ValueError("Group names must be nonblank, at most 100 characters, and not 'Без группы'")
+        if isinstance(value, list):
+            if len(set(cleaned)) != len(cleaned):
+                raise ValueError("Duplicate group names")
+            return cleaned
+        return dict(zip(value, cleaned))
+
+    @model_validator(mode="after")
+    def validate_targets(self):
+        if any(name not in self.groups for name in self.assignments.values()):
+            raise ValueError("Assignments must reference an existing group")
+        return self
+
+
+@router.get("/groups", response_model=ModuleGroups)
+async def get_module_groups(db: AsyncSession = Depends(get_db)):
+    saved = await db.scalar(select(AppSetting).where(AppSetting.key == "module_groups"))
+    return saved.value_json if saved else {"groups": [], "assignments": {}, "revision": 0}
+
+
+@router.put("/groups", response_model=ModuleGroups)
+async def update_module_groups(data: ModuleGroups, db: AsyncSession = Depends(get_db)):
+    async with _module_groups_lock:
+        saved = await db.scalar(select(AppSetting).where(AppSetting.key == "module_groups")
+                                .execution_options(populate_existing=True))
+        current = saved.value_json if saved else {"groups": [], "assignments": {}, "revision": 0}
+        if data.revision != current["revision"]:
+            raise HTTPException(409, "Module groups changed; reload before saving")
+        if any(ModuleLoader.get_module(module_id) is None and module_id not in current["assignments"]
+               for module_id in data.assignments):
+            raise HTTPException(422, "Unknown module in assignments")
+        state = {**data.model_dump(), "revision": current["revision"] + 1}
+        if saved is None:
+            saved = AppSetting(key="module_groups", value_json=state)
+            db.add(saved)
+        else:
+            saved.value_json = state
+        await db.commit()
+        await db.refresh(saved)
+        return saved.value_json
 
 
 @router.get("/{module_id}", response_model=Dict[str, Any])

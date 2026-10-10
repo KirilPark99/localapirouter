@@ -18,6 +18,7 @@ import {
   HelpCircle,
   RotateCcw,
   StickyNote,
+  MoreHorizontal,
 } from "lucide-react";
 import { apiRequest } from "../api/client";
 import { Proxy, PeriodQuotaRule, PeriodQuotaUsage, DiscoveredModel } from "../types";
@@ -70,6 +71,12 @@ interface LoadedModule {
   models_count: number;
   provider_id?: number;
   notes?: string | null;
+}
+
+interface ModuleGrouping {
+  groups: string[];
+  assignments: Record<string, string>;
+  revision: number;
 }
 
 interface ModuleProfile {
@@ -128,6 +135,13 @@ export const ModulesPage: React.FC = () => {
   const [proxies, setProxies] = useState<Proxy[]>([]);
   const [loading, setLoading] = useState(true);
   const [rescanning, setRescanning] = useState(false);
+  const [moduleGrouping, setModuleGrouping] = useState<ModuleGrouping>({ groups: [], assignments: {}, revision: 0 });
+  const [groupingLoaded, setGroupingLoaded] = useState(false);
+  const [groupingSaving, setGroupingSaving] = useState(false);
+  const [groupingError, setGroupingError] = useState<string | null>(null);
+  const [collapsedModuleGroups, setCollapsedModuleGroups] = useState<Set<string>>(new Set());
+  const [groupEditor, setGroupEditor] = useState<{ originalName: string | null; moduleId?: string } | null>(null);
+  const [moduleGroupName, setModuleGroupName] = useState("");
 
   // Active module selected for profile management
   const [selectedModule, setSelectedModule] = useState<LoadedModule | null>(null);
@@ -406,6 +420,77 @@ export const ModulesPage: React.FC = () => {
     }
   };
 
+  const fetchModuleGroups = async () => {
+    try {
+      setModuleGrouping(await apiRequest<ModuleGrouping>("/api/admin/modules/groups"));
+      setGroupingLoaded(true);
+      setGroupingError(null);
+    } catch (err: any) {
+      setGroupingLoaded(false);
+      setGroupingError(err.message || "Не удалось загрузить группы модулей");
+    }
+  };
+
+  const saveModuleGrouping = async (next: ModuleGrouping) => {
+    if (!groupingLoaded || groupingSaving) return false;
+    setGroupingSaving(true);
+    setGroupingError(null);
+    try {
+      const saved = await apiRequest<ModuleGrouping>("/api/admin/modules/groups", {
+        method: "PUT", body: JSON.stringify(next),
+      });
+      setModuleGrouping(saved);
+      return true;
+    } catch (err: any) {
+      setGroupingError(err.message || "Не удалось сохранить группы модулей");
+      return false;
+    } finally {
+      setGroupingSaving(false);
+    }
+  };
+
+  const openModuleGroupEditor = (originalName: string | null, moduleId?: string) => {
+    setModuleGroupName(originalName || "");
+    setGroupEditor({ originalName, moduleId });
+    setGroupingError(null);
+  };
+
+  const handleSaveModuleGroup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!groupEditor || !groupingLoaded || groupingSaving) return;
+    if (groupEditor.originalName !== null && !moduleGrouping.groups.includes(groupEditor.originalName)) {
+      setGroupingError("Группа уже изменена или удалена. Закройте окно и выберите группу заново.");
+      return;
+    }
+    const name = moduleGroupName.trim();
+    if (!name || name.length > 100 || name.toLocaleLowerCase() === "без группы" ||
+        moduleGrouping.groups.some(group => group === name && group !== groupEditor.originalName)) {
+      setGroupingError("Укажите уникальное название группы (1–100 символов), кроме «Без группы».");
+      return;
+    }
+    const assignments = Object.fromEntries(Object.entries(moduleGrouping.assignments).map(([id, group]) =>
+      [id, groupEditor.originalName !== null && group === groupEditor.originalName ? name : group]));
+    if (groupEditor.moduleId) assignments[groupEditor.moduleId] = name;
+    const groups = groupEditor.originalName === null ? [...moduleGrouping.groups, name] :
+      moduleGrouping.groups.map(group => group === groupEditor.originalName ? name : group);
+    if (await saveModuleGrouping({ ...moduleGrouping, groups, assignments })) setGroupEditor(null);
+  };
+
+  const handleDeleteModuleGroup = async (name: string) => {
+    if (!groupingLoaded || groupingSaving || !window.confirm(`Удалить группу «${name}»? Модули перейдут в «Без группы»; сами модули и их профили не удаляются.`)) return;
+    await saveModuleGrouping({ ...moduleGrouping,
+      groups: moduleGrouping.groups.filter(group => group !== name),
+      assignments: Object.fromEntries(Object.entries(moduleGrouping.assignments).filter(([, group]) => group !== name)),
+    });
+  };
+
+  const handleMoveModuleGroup = async (moduleId: string, name: string) => {
+    const assignments = { ...moduleGrouping.assignments };
+    if (name) assignments[moduleId] = name;
+    else delete assignments[moduleId];
+    await saveModuleGrouping({ ...moduleGrouping, assignments });
+  };
+
   const fetchModules = async () => {
     try {
       const data = await apiRequest<LoadedModule[]>("/api/admin/modules");
@@ -443,7 +528,7 @@ export const ModulesPage: React.FC = () => {
   useEffect(() => {
     const init = async () => {
       setLoading(true);
-      await Promise.all([fetchModules(), fetchProxies()]);
+      await Promise.all([fetchModules(), fetchProxies(), fetchModuleGroups()]);
       setLoading(false);
     };
     init();
@@ -453,7 +538,7 @@ export const ModulesPage: React.FC = () => {
     setRescanning(true);
     try {
       await apiRequest("/api/admin/modules/reload", { method: "POST" });
-      await fetchModules();
+      await Promise.all([fetchModules(), fetchModuleGroups()]);
       if (selectedModule) {
         await fetchProfiles(selectedModule.manifest.id);
       }
@@ -698,6 +783,11 @@ export const ModulesPage: React.FC = () => {
     }
   };
 
+  const moduleGroups = [...moduleGrouping.groups].sort((a, b) => a.localeCompare(b)).concat("").map(name => ({
+    name,
+    modules: modules.filter(mod => (Object.hasOwn(moduleGrouping.assignments, mod.manifest.id) ? moduleGrouping.assignments[mod.manifest.id] : "") === name),
+  }));
+
   return (
     <div className="space-y-6">
       {/* Top Header */}
@@ -721,7 +811,11 @@ export const ModulesPage: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <button type="button" onClick={() => openModuleGroupEditor(null)} disabled={!groupingLoaded || groupingSaving}
+            className="btn-press flex items-center gap-1.5 px-3 py-2 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 rounded-xl text-xs disabled:opacity-50">
+            <Plus size={13} /> Создать группу
+          </button>
           <button
             onClick={handleRescan}
             disabled={rescanning}
@@ -733,10 +827,17 @@ export const ModulesPage: React.FC = () => {
         </div>
       </div>
 
+      {groupingError && !groupEditor && (
+        <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-rose-300">
+          {groupingError}
+          <button type="button" onClick={fetchModuleGroups} disabled={groupingSaving} className="underline disabled:opacity-50">Загрузить группы заново</button>
+        </div>
+      )}
+
       {/* Main Content Area */}
       {loading ? (
         <div className="p-12 text-center text-slate-500 text-xs">Загрузка установленных модулей...</div>
-      ) : modules.length === 0 ? (
+      ) : modules.length === 0 && moduleGrouping.groups.length === 0 ? (
         /* Empty State */
         <div className="bg-slate-900/40 border border-white/[0.06] rounded-2xl p-8 text-center max-w-2xl mx-auto shadow-xl">
           <div className="w-14 h-14 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mx-auto mb-4">
@@ -771,9 +872,31 @@ export const ModulesPage: React.FC = () => {
           </div>
         </div>
       ) : (
-        /* Modules Grid */
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {modules.map((mod) => (
+        <div className="space-y-4">
+          {moduleGroups.map(group => (
+            <section key={group.name} aria-label={`Группа модулей: ${group.name || "Без группы"}`} className="bg-slate-900/20 border border-white/[0.06] rounded-2xl p-3 space-y-3">
+              <div className="flex items-center gap-2">
+                <button type="button" aria-expanded={!collapsedModuleGroups.has(group.name)}
+                  onClick={() => setCollapsedModuleGroups(prev => { const next = new Set(prev); if (next.has(group.name)) next.delete(group.name); else next.add(group.name); return next; })}
+                  className="flex-1 min-w-0 flex items-center gap-2 text-left text-sm font-semibold text-slate-200">
+                  <ChevronRight size={14} className={`shrink-0 ${collapsedModuleGroups.has(group.name) ? "" : "rotate-90"}`} />
+                  <FolderCode size={16} className="shrink-0 text-indigo-400" />
+                  <span className="truncate" title={group.name || "Без группы"}>{group.name || "Без группы"}</span>
+                  <span className="text-xs text-slate-500">({group.modules.length})</span>
+                </button>
+                {group.name && (
+                  <details className="relative">
+                    <summary aria-label={`Действия группы ${group.name}`} className="list-none cursor-pointer p-2 rounded-lg hover:bg-slate-800 text-slate-400"><MoreHorizontal size={16} /></summary>
+                    <div className="absolute right-0 top-full z-20 w-48 bg-slate-900 border border-white/10 rounded-xl p-1 shadow-xl text-xs">
+                      <button type="button" disabled={!groupingLoaded || groupingSaving} onClick={() => openModuleGroupEditor(group.name)} className="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-800 disabled:opacity-50">Переименовать группу</button>
+                      <button type="button" disabled={!groupingLoaded || groupingSaving} onClick={() => handleDeleteModuleGroup(group.name)} className="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-800 text-rose-300 disabled:opacity-50">Удалить группу</button>
+                    </div>
+                  </details>
+                )}
+              </div>
+              {!collapsedModuleGroups.has(group.name) && (group.modules.length === 0 ? <p className="text-xs text-slate-500">В группе пока нет модулей.</p> : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {group.modules.map((mod) => (
             <div
               key={mod.manifest.id}
               className="bg-slate-900/50 backdrop-blur-md border border-white/[0.08] hover:border-indigo-500/30 rounded-2xl p-5 flex flex-col justify-between transition-all group shadow-sm hover:shadow-indigo-500/5"
@@ -801,6 +924,19 @@ export const ModulesPage: React.FC = () => {
                     </div>
                   </div>
 
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <details className="relative">
+                      <summary aria-label={`Действия модуля ${mod.manifest.name}`} className="list-none cursor-pointer p-1.5 rounded-lg hover:bg-slate-800 text-slate-400"><MoreHorizontal size={16} /></summary>
+                      <div className="absolute right-0 top-full z-20 w-56 max-w-[80vw] bg-slate-900 border border-white/10 rounded-xl p-3 shadow-xl text-xs space-y-2">
+                        <label htmlFor={`module-group-${mod.manifest.id}`} className="block text-slate-300">Группа модуля</label>
+                        <select id={`module-group-${mod.manifest.id}`} value={group.name} disabled={!groupingLoaded || groupingSaving}
+                          onChange={e => handleMoveModuleGroup(mod.manifest.id, e.target.value)} className="w-full min-w-0 px-2 py-1.5 rounded-lg bg-slate-950 border border-white/10 text-slate-200">
+                          <option value="">Без группы</option>
+                          {moduleGrouping.groups.map(name => <option key={name} value={name}>{name}</option>)}
+                        </select>
+                        <button type="button" onClick={() => openModuleGroupEditor(null, mod.manifest.id)} disabled={!groupingLoaded || groupingSaving} className="text-indigo-300 underline disabled:opacity-50">Создать новую группу</button>
+                      </div>
+                    </details>
                   {mod.status === "ready" ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -812,6 +948,7 @@ export const ModulesPage: React.FC = () => {
                       Ошибка
                     </span>
                   )}
+                  </div>
                 </div>
 
                 <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed mb-3">
@@ -887,8 +1024,26 @@ export const ModulesPage: React.FC = () => {
               </div>
             </div>
           ))}
+                </div>
+              ))}
+            </section>
+          ))}
         </div>
       )}
+
+      <Modal isOpen={!!groupEditor} onClose={() => { if (!groupingSaving) setGroupEditor(null); }} title={groupEditor?.originalName === null ? "Создать группу модулей" : "Переименовать группу модулей"} maxWidth="sm">
+        <form onSubmit={handleSaveModuleGroup} className="space-y-3">
+          <p className="text-xs text-slate-400">Группа объединяет сами модули, не их профили.</p>
+          <label htmlFor="module-group-name" className="block text-xs text-slate-300">Название группы</label>
+          <input id="module-group-name" type="text" required maxLength={100} autoFocus value={moduleGroupName} onChange={e => setModuleGroupName(e.target.value)} disabled={groupingSaving}
+            placeholder="Например, Web или OAuth" className="w-full px-3 py-2 bg-slate-950 border border-white/10 rounded-xl text-sm text-slate-200" />
+          {groupingError && <div role="alert" className="text-xs text-rose-300">{groupingError} <button type="button" onClick={fetchModuleGroups} disabled={groupingSaving} className="underline">Загрузить группы заново</button></div>}
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => setGroupEditor(null)} disabled={groupingSaving} className="px-3 py-2 rounded-xl bg-slate-800 text-xs disabled:opacity-50">Отмена</button>
+            <button type="submit" disabled={!groupingLoaded || groupingSaving} className="px-3 py-2 rounded-xl bg-indigo-600 text-xs text-white disabled:opacity-50">{groupingSaving ? "Сохранение…" : "Сохранить"}</button>
+          </div>
+        </form>
+      </Modal>
 
       {/* Profiles Drawer Modal */}
       {selectedModule && (

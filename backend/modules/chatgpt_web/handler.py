@@ -147,23 +147,28 @@ def prepare_request(request, model):
     return prompt, selection
 
 
-def parse_response(sse):
-    """Snapshot/delta_v1 decoder; success requires terminal assistant text, not [DONE]."""
-    if not isinstance(sse, str) or not sse.strip() or len(sse.encode()) > MAX_RESPONSE_BYTES:
-        raise RouterException("ChatGPT Web response is empty or oversized", ErrorCategory.UPSTREAM_5XX)
-    document, latest, last_path, last_op = None, None, None, None
+class ChatGPTResponseDecoder:
+    """Bounded snapshot/delta decoder shared by buffered and live SSE paths."""
+    def __init__(self):
+        self.document = self.last_path = self.last_op = self.message_id = None
+        self.buffer, self.event, self.data = "", "message", []
+        self.text, self.latest, self.size = "", None, 0
 
-    def safe(value):
+    @property
+    def complete(self):
+        return self.latest is not None
+
+    def _safe(self, value):
         if isinstance(value, dict):
             for key, item in value.items():
                 if key in ("__proto__", "constructor", "prototype"):
                     raise ValueError()
-                safe(item)
+                self._safe(item)
         elif isinstance(value, list):
             for item in value:
-                safe(item)
+                self._safe(item)
 
-    def append(current, value):
+    def _append(self, current, value):
         if current is None:
             return value
         if isinstance(current, str) and isinstance(value, str):
@@ -174,9 +179,8 @@ def parse_response(sse):
             return {**current, **value}
         raise ValueError()
 
-    def apply(path, op, value):
-        nonlocal document
-        safe(value)
+    def _apply(self, path, op, value):
+        self._safe(value)
         if not isinstance(path, str) or op not in ("add", "replace", "append", "patch"):
             raise ValueError()
         if path == "":
@@ -184,33 +188,33 @@ def parse_response(sse):
                 if not isinstance(value, list):
                     raise ValueError()
                 for entry in value:
-                    apply(entry["p"], entry["o"], entry.get("v"))
+                    self._apply(entry["p"], entry["o"], entry.get("v"))
             else:
-                document = append(document, value) if op == "append" else value
+                self.document = self._append(self.document, value) if op == "append" else value
             return
         if not path.startswith("/") or op == "patch":
             raise ValueError()
         parts = [p.replace("~1", "/").replace("~0", "~") for p in path[1:].split("/")]
         if any(p in ("__proto__", "constructor", "prototype") for p in parts):
             raise ValueError()
-        parent = document
+        parent = self.document
         for part in parts[:-1]:
-            parent = parent[array_index(part, len(parent), False)] if isinstance(parent, list) else parent[part]
+            parent = parent[self._array_index(part, len(parent), False)] if isinstance(parent, list) else parent[part]
         key = parts[-1]
         if isinstance(parent, list):
-            index = array_index(key, len(parent), op == "add")
+            index = self._array_index(key, len(parent), op == "add")
             if op == "add":
                 parent.insert(index, value)
             else:
-                parent[index] = append(parent[index], value) if op == "append" else value
+                parent[index] = self._append(parent[index], value) if op == "append" else value
         elif isinstance(parent, dict):
             if op != "add" and key not in parent:
                 raise ValueError()
-            parent[key] = append(parent[key], value) if op == "append" else value
+            parent[key] = self._append(parent[key], value) if op == "append" else value
         else:
             raise ValueError()
 
-    def array_index(part, length, allow_end):
+    def _array_index(self, part, length, allow_end):
         if part == "-" and allow_end:
             return length
         if not re.fullmatch(r"0|[1-9]\d*", part):
@@ -220,48 +224,99 @@ def parse_response(sse):
             raise ValueError()
         return index
 
-    try:
-        event, data = "message", []
-        for line in sse.replace("\r\n", "\n").replace("\r", "\n").split("\n") + [""]:
-            if line:
+    def _observe(self):
+        bound = self.message_id is not None or bool(self.text) or self.complete
+        message = self.document.get("message") if isinstance(self.document, dict) else None
+        if not isinstance(message, dict):
+            if bound:
+                raise ValueError("Assistant document was removed")
+            return ""
+        content = message.get("content") or {}
+        # ponytail: legacy snapshots omit channel; reject later reclassification.
+        channel = message.get("channel") or (message.get("metadata") or {}).get("channel")
+        if (message.get("author", {}).get("role") != "assistant"
+                or content.get("content_type") != "text" or channel not in (None, "final")):
+            if bound:
+                raise ValueError("Assistant eligibility changed")
+            return ""
+        parts = content.get("parts")
+        if not isinstance(parts, list) or any(not isinstance(p, str) for p in parts):
+            raise ValueError()
+        identity = message.get("id")
+        if self.message_id is not None and identity != self.message_id:
+            raise ValueError("Assistant identity changed")
+        if identity is not None:
+            self.message_id = identity
+        text = "".join(parts)
+        if not text.startswith(self.text) or self.complete and text != self.latest:
+            raise ValueError("Assistant text was rewritten")
+        delta, self.text = text[len(self.text):], text
+        if message.get("status") == "finished_successfully" and message.get("end_turn") is True:
+            self.latest = text
+        elif self.complete:
+            raise ValueError("Assistant completion was revoked")
+        return delta
+
+    def _event(self):
+        raw, event = "\n".join(self.data), self.event
+        self.data, self.event = [], "message"
+        if not raw or raw == "[DONE]":
+            return ""
+        value = json.loads(raw)
+        if isinstance(value, dict) and value.get("error"):
+            raise ValueError("Upstream stream error")
+        if event == "delta_encoding":
+            if value != "v1" or self.text:
+                raise ValueError()
+            self.document, self.last_path, self.last_op = None, None, None
+        elif event == "delta":
+            self.last_path = value.get("p", self.last_path)
+            self.last_op = value.get("o", self.last_op)
+            self._apply(self.last_path, self.last_op, value.get("v"))
+        elif isinstance(value, dict) and "message" in value:
+            self._safe(value)
+            self.document = value
+        return self._observe()
+
+    def feed(self, chunk):
+        if not isinstance(chunk, str):
+            raise RouterException("ChatGPT Web stream chunk is invalid", ErrorCategory.UPSTREAM_5XX)
+        self.size += len(chunk.encode())
+        if self.size > MAX_RESPONSE_BYTES:
+            raise RouterException("ChatGPT Web response is oversized", ErrorCategory.UPSTREAM_5XX)
+        self.buffer += chunk
+        deltas = []
+        try:
+            # Keep a trailing CR until the next chunk to handle fragmented CRLF.
+            while match := re.search(r"\r\n|\r(?!$)|\n", self.buffer):
+                line, self.buffer = self.buffer[:match.start()], self.buffer[match.end():]
+                if not line:
+                    delta = self._event()
+                    if delta:
+                        deltas.append(delta)
+                    continue
                 key, _, value = line.partition(":")
                 value = value[1:] if value.startswith(" ") else value
                 if key == "event":
-                    event = value or "message"
+                    self.event = value or "message"
                 elif key == "data":
-                    data.append(value)
-                continue
-            if not data:
-                event = "message"
-                continue
-            raw = "\n".join(data)
-            data = []
-            if raw != "[DONE]":
-                value = json.loads(raw)
-                if event == "delta_encoding":
-                    if value != "v1":
-                        raise ValueError()
-                    document, last_path, last_op = None, None, None
-                elif event == "delta":
-                    last_path, last_op = value.get("p", last_path), value.get("o", last_op)
-                    apply(last_path, last_op, value.get("v"))
-                elif isinstance(value, dict) and "message" in value:
-                    safe(value)
-                    document = value
-                if isinstance(document, dict) and isinstance(document.get("message"), dict):
-                    m = document["message"]
-                    content = m.get("content") or {}
-                    parts = content.get("parts")
-                    if (m.get("author", {}).get("role") == "assistant" and content.get("content_type") == "text"
-                            and isinstance(parts, list) and all(isinstance(p, str) for p in parts)
-                            and m.get("status") == "finished_successfully" and m.get("end_turn") is True):
-                        latest = "".join(parts)
-            event = "message"
-        if latest is not None:
-            return latest
-    except (ValueError, KeyError, TypeError, IndexError, AttributeError, RecursionError):
-        pass
-    raise RouterException("ChatGPT Web assistant document is incomplete or unsupported", ErrorCategory.UPSTREAM_5XX)
+                    self.data.append(value)
+            return deltas
+        except (ValueError, KeyError, TypeError, IndexError, AttributeError, RecursionError):
+            self.latest = None
+            raise RouterException("ChatGPT Web assistant stream is inconsistent or unsupported", ErrorCategory.UPSTREAM_5XX) from None
+
+    def finish(self):
+        self.feed("\n\n")
+        if not self.complete:
+            raise RouterException("ChatGPT Web assistant document is incomplete or unsupported", ErrorCategory.UPSTREAM_5XX)
+        return self.latest
+
+
+def parse_response(sse):
+    decoder = ChatGPTResponseDecoder()
+    decoder.feed(sse)
+    return decoder.finish()
 
 
 # Derived from chatgptWebFirstParty.ts at 61e07fb7e0d4e1e76111495d3718c9e4d06d2a62.
@@ -313,6 +368,18 @@ BROWSER_TURN = r'''async ({prompt, selection}) => {
   const controller = new AbortController();
   window.__myairouterChatGPTAbort = controller;
   try {
+    // Server evidence, not cookie/composer presence; never follow an auth redirect.
+    const sessionResponse = await fetch('/api/auth/session', {credentials:'include',cache:'no-store',redirect:'error',
+      headers:{Accept:'application/json'},signal:controller.signal});
+    if (!sessionResponse.ok) {await sessionResponse.body?.cancel(); return {status:sessionResponse.status};}
+    if (!sessionResponse.headers.get('content-type')?.includes('application/json')) throw new Error('invalid session response');
+    const session = await sessionResponse.json();
+    const user = session?.user;
+    if (!user || typeof user !== 'object' || Array.isArray(user) || !Object.keys(user).length ||
+        ![undefined,null,''].includes(session.error) ||
+        session.expires != null && (typeof session.expires !== 'string' || !Number.isFinite(Date.parse(session.expires)) || Date.parse(session.expires) <= Date.now())) {
+      return {status:401};
+    }
     if (resolver) {
       const upstream = await import(resolver.url), exports = {};
       const factory = upstream.__webpack_modules__?.[resolver.id];
@@ -320,9 +387,6 @@ BROWSER_TURN = r'''async ({prompt, selection}) => {
       const requireShim = id => { if (id === 'TI') return {a: () => crypto.randomUUID()}; throw new Error('unsupported integrity dependency'); };
       requireShim.d = (target, definitions) => {for (const [name, getter] of Object.entries(definitions)) Object.defineProperty(target, name, {enumerable:true, get:getter});};
       factory({}, exports, requireShim);
-      const sessionResponse = await fetch('/api/auth/session', {credentials:'include', signal:controller.signal});
-      if (!sessionResponse.ok) return {status:sessionResponse.status};
-      const session = await sessionResponse.json();
       client = {safePost: async (path, options={}) => {
         const headers = new Headers(options.additionalHeaders || {});
         if (typeof session?.accessToken === 'string' && session.accessToken) headers.set('Authorization','Bearer ' + session.accessToken);
@@ -352,6 +416,8 @@ BROWSER_TURN = r'''async ({prompt, selection}) => {
     const base = selection.kind === 'free' ? 'auto' : selection.modelLabel === 'GPT-5.6 Sol' ? 'gpt-5-6' : 'gpt-5-5';
     const model = selection.kind === 'picker' && selection.effortIndex === 4 ? base + '-pro' : base;
     const reason = selection.kind === 'free' ? selection.thinkEnabled : selection.effortIndex > 0 && selection.effortIndex !== 4;
+    // Await the request owner's fence BEFORE touching the physical Send path.
+    await window.__myairouterChatGPTEvent({type:'send_activated'});
     const response = await client.safePost('/f/conversation', {
       requestBody: {action:'next',messages:[{id:crypto.randomUUID(),author:{role:'user'},create_time:Date.now()/1000,
         content:{content_type:'text',parts:[prompt]},metadata:{...(reason ? {system_hints:['reason']} : {}),serialization_metadata:{custom_symbol_offsets:[]}}}],
@@ -361,16 +427,19 @@ BROWSER_TURN = r'''async ({prompt, selection}) => {
     });
     if (!(response instanceof Response)) throw new Error('invalid conversation response');
     if (!response.ok) {await response.body?.cancel(); return {status:response.status};}
+    if (!response.headers.get('content-type')?.includes('text/event-stream')) throw new Error('unsupported conversation transport');
+    await window.__myairouterChatGPTEvent({type:'accepted'});
     const reader = response.body?.getReader();
     if (!reader) throw new Error('empty conversation response');
-    const decoder = new TextDecoder(), chunks = []; let total = 0;
+    const decoder = new TextDecoder(); let total = 0;
     try {
       for (;;) {const {done,value} = await reader.read(); if(done) break; if(!value) continue;
         total += value.byteLength; if(total > 16*1024*1024) {await reader.cancel(); throw new Error('response size limit');}
-        chunks.push(decoder.decode(value,{stream:true}));}
-      chunks.push(decoder.decode());
+        await window.__myairouterChatGPTEvent({type:'chunk',text:decoder.decode(value,{stream:true})});}
+      const tail = decoder.decode();
+      if (tail) await window.__myairouterChatGPTEvent({type:'chunk',text:tail});
     } finally {reader.releaseLock();}
-    return {sse:chunks.join('')};
+    return {finished:true};
   } finally {delete window.__myairouterChatGPTAbort;}
 }'''
 
@@ -394,8 +463,22 @@ class ChatGPTWebAdapter(BaseModuleAdapter):
         return [DiscoveredModelData(provider_model_id=m["id"], display_name=m["name"], capabilities=m["capabilities"])
                 for m in manifest["default_models"]]
 
-    async def _turn(self, prompt, selection, state, ctx):
+    async def _turn(self, prompt, selection, state, ctx, *, on_text=None, on_send=None):
         manager, browser, context = None, None, None
+        decoder, sent, accepted = ChatGPTResponseDecoder(), False, False
+        bindings, closing = set(), False
+
+        async def deliver(text):
+            if on_text:
+                for offset in range(0, len(text), 4096):
+                    await on_text(text[offset:offset + 4096])
+
+        def fenced(error):
+            if sent:
+                error.replay_safe = False
+                error.message += "; automatic resend is disabled because the prompt may already have been accepted"
+            return error
+
         try:
             async with asyncio.timeout(ctx.timeout):
                 manager = await _playwright().start()
@@ -409,32 +492,67 @@ class ChatGPTWebAdapter(BaseModuleAdapter):
                 context = await browser.new_context(storage_state=state, locale=ctx.credentials.get("locale") or "en-US",
                                                     timezone_id=ctx.credentials.get("timezone") or "America/New_York")
                 page = await context.new_page()
+
+                async def event(source, payload):
+                    nonlocal sent, accepted
+                    task = asyncio.current_task()
+                    bindings.add(task)
+                    try:
+                        if closing or source["page"] is not page or source["frame"] is not page.main_frame:
+                            raise invalid("foreign or closed browser event")
+                        kind = payload.get("type") if isinstance(payload, dict) else None
+                        if kind == "send_activated" and not sent:
+                            sent = True
+                            if on_send:
+                                on_send()
+                        elif kind == "accepted" and sent and not accepted:
+                            accepted = True
+                        elif kind == "chunk" and accepted:
+                            for delta in decoder.feed(payload.get("text")):
+                                await deliver(delta)
+                        else:
+                            raise invalid("unexpected browser event")
+                    finally:
+                        bindings.discard(task)
+
+                await page.expose_binding("__myairouterChatGPTEvent", event)
                 await page.goto(PAGE_URL, wait_until="domcontentloaded", timeout=min(ctx.timeout * 1000, 30000))
                 if urlsplit(page.url).scheme != "https" or urlsplit(page.url).netloc != "chatgpt.com":
                     raise RouterException("ChatGPT Web browser is not logged in at the first-party origin", ErrorCategory.AUTH_ERROR)
                 result = await page.evaluate(BROWSER_TURN, {"prompt": prompt, "selection": selection})
                 if result.get("status"):
-                    raise normalize_upstream_error(status_code=result["status"], response_body={"message": "ChatGPT Web conversation rejected"})
-                return parse_response(result.get("sse"))
-        except RouterException:
-            raise
+                    raise normalize_upstream_error(status_code=result["status"], response_body={"message": "ChatGPT Web conversation or session rejected"})
+                if not accepted or result.get("finished") is not True:
+                    raise RouterException("ChatGPT Web browser stream did not finish", ErrorCategory.UPSTREAM_5XX)
+                before = decoder.text
+                text = decoder.finish()
+                await deliver(text[len(before):])
+                return text
+        except RouterException as error:
+            raise fenced(error)
         except TimeoutError as error:
-            raise normalize_upstream_error(exception=error) from None
+            raise fenced(normalize_upstream_error(exception=error)) from None
         except Exception as error:
             # Classify only safe signals; never expose auth-bearing browser diagnostics.
             if type(error).__name__ == "TimeoutError":
-                raise normalize_upstream_error(exception=TimeoutError()) from None
+                raise fenced(normalize_upstream_error(exception=TimeoutError())) from None
             detail = str(error)
             status = re.search(r"\b(?:status|HTTP)[_\s-]*(401|403|429|5\d\d)\b", detail, re.I)
             if status or re.search(r"rate[-_\s]?limit|quota\s+(?:exhausted|reached|exceeded)", detail, re.I):
-                raise normalize_upstream_error(status_code=int(status[1]) if status else 429,
-                                               response_body={"message": "ChatGPT Web first-party request rejected"}) from None
-            raise RouterException("ChatGPT Web browser execution failed; check browser installation, display, login, and first-party module compatibility", ErrorCategory.UPSTREAM_5XX) from None
+                raise fenced(normalize_upstream_error(status_code=int(status[1]) if status else 429,
+                                               response_body={"message": "ChatGPT Web first-party request rejected"})) from None
+            raise fenced(RouterException("ChatGPT Web browser execution failed; check browser installation, display, login, and first-party module compatibility", ErrorCategory.UPSTREAM_5XX)) from None
         finally:
+            closing = True
+            # Playwright bindings run in separate tasks; a full queue must not orphan them.
+            for task in tuple(bindings):
+                task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await task
             # Close the context to abort in-page requests even if evaluate was cancelled.
             for resource, method in ((context, "close"), (browser, "close"), (manager, "stop")):
                 if resource is not None:
-                    with suppress(Exception):
+                    with suppress(asyncio.CancelledError, Exception):
                         await asyncio.wait_for(getattr(resource, method)(), 5)
 
     async def stream_chat(self, request: ChatCompletionRequest, ctx: ModuleExecutionContext):
@@ -443,15 +561,53 @@ class ChatGPTWebAdapter(BaseModuleAdapter):
         state = read_storage_state(ctx.credentials)
         if not math.isfinite(ctx.timeout) or ctx.timeout <= 0:
             raise invalid("timeout must be finite and positive")
-        text = await self._turn(prompt, selection, state, ctx)
+        queue = asyncio.Queue(maxsize=16)
+        def on_send():
+            # Dispatch deadline can cancel the task before this adapter emits text.
+            object.__setattr__(request, "_upstream_submission_started", True)
+        producer = asyncio.create_task(self._turn(prompt, selection, state, ctx, on_text=queue.put, on_send=on_send))
         metadata = {"id": "chatcmpl-" + uuid.uuid4().hex, "object": "chat.completion.chunk", "created": int(time.time()), "model": model}
-        chunks = ["data: " + json.dumps({**metadata, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}, ensure_ascii=False) + "\n\n"
-                  for delta, finish in (({"role": "assistant"}, None), ({"content": text}, None), ({}, "stop"))]
-        chunks.append("data: [DONE]\n\n")
-        if sum(len(chunk.encode()) for chunk in chunks) > ChatStreamAccumulator.MAX_BYTES:
-            raise RouterException("ChatGPT Web buffered completion exceeds the shared assembly limit", ErrorCategory.UPSTREAM_5XX)
-        for chunk in chunks:
-            yield chunk
+        size, started, pending = 0, False, None
+        def frame(delta, finish=None):
+            nonlocal size
+            chunk = "data: " + json.dumps({**metadata, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}, ensure_ascii=False) + "\n\n"
+            size += len(chunk.encode())
+            if size + len("data: [DONE]\n\n") > ChatStreamAccumulator.MAX_BYTES:
+                raise RouterException("ChatGPT Web completion exceeds the shared assembly limit", ErrorCategory.UPSTREAM_5XX)
+            return chunk
+        try:
+            while True:
+                pending = asyncio.create_task(queue.get())
+                done, _ = await asyncio.wait((pending, producer), return_when=asyncio.FIRST_COMPLETED)
+                if pending in done:
+                    text = pending.result()
+                else:
+                    pending.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await pending
+                    if queue.empty():
+                        break
+                    text = queue.get_nowait()
+                if not started:
+                    yield frame({"role": "assistant"})
+                    started = True
+                yield frame({"content": text})
+            await producer  # Propagate producer errors; never emit a false terminal.
+            if not started:
+                yield frame({"role": "assistant"})
+            yield frame({}, "stop")
+            yield "data: [DONE]\n\n"
+        except RouterException as error:
+            if getattr(request, "_upstream_submission_started", False):
+                error.replay_safe = False
+            raise
+        finally:
+            for task in (pending, producer):
+                if task is not None:
+                    if not task.done():
+                        task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await task
 
     async def chat_completions(self, request, ctx):
         return await collect_chat_completion(self.stream_chat(request, ctx), ctx.model_id or request.model, require_complete=True)

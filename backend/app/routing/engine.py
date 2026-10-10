@@ -139,6 +139,7 @@ class RoutingEngine:
         if not isinstance(retry_count, int) or isinstance(retry_count, bool) or not 0 <= retry_count <= 10:
             raise RouterException('retry_count must be between 0 and 10', ErrorCategory.INVALID_REQUEST)
         deadline = cls._dispatch_deadline(kwargs.get('timeout'))
+        request = kwargs['request']
         for attempt in range(retry_count + 1):
             if not cls._eligible(provider, model_obj, cred):
                 raise RouterException('Credential/provider/model unavailable', ErrorCategory.MODEL_NOT_FOUND, status_code=503)
@@ -150,6 +151,9 @@ class RoutingEngine:
                 async with asyncio.timeout(max(0, deadline - time.monotonic())):
                     dispatched = True
                     response = await adapter.chat_completions(**kwargs)
+                if getattr(kwargs['request'], '_upstream_submission_started', False):
+                    # Preserve acceptance through quota/TPM copies for caller-side parsing.
+                    object.__setattr__(request, '_upstream_submission_started', True)
                 actual_usage = response.usage.model_dump(exclude_unset=True) if response.usage else None
                 LogService.dispatch_usage(dispatch, actual_usage)
                 LogService.finish_dispatch(dispatch, 'SUCCESS', (time.perf_counter() - dispatch_started) * 1000)
@@ -159,7 +163,9 @@ class RoutingEngine:
             except Exception as e:
                 LogService.finish_dispatch(dispatch, 'FAILED', (time.perf_counter() - dispatch_started) * 1000)
                 error = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
-                if attempt >= retry_count or not error.category.is_retryable or error.category == ErrorCategory.RATE_LIMIT:
+                if getattr(kwargs['request'], '_upstream_submission_started', False):
+                    error.replay_safe = False
+                if attempt >= retry_count or not error.is_retryable or error.category == ErrorCategory.RATE_LIMIT:
                     circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
                     raise error
             finally:
@@ -230,7 +236,9 @@ class RoutingEngine:
             except Exception as e:
                 LogService.finish_dispatch(dispatch, 'FAILED', (time.perf_counter() - dispatch_started) * 1000)
                 error = e if isinstance(e, RouterException) else adapter.normalize_error(exception=e)
-                if started or attempt >= retry_count or not error.category.is_retryable or error.category == ErrorCategory.RATE_LIMIT:
+                if getattr(kwargs['request'], '_upstream_submission_started', False):
+                    error.replay_safe = False
+                if started or attempt >= retry_count or not error.is_retryable or error.category == ErrorCategory.RATE_LIMIT:
                     circuit_breaker.record_failure(cred.id, error.category, error.retry_after, error.message, model_obj.provider_model_id)
                     raise error
             finally:
@@ -636,7 +644,7 @@ class RoutingEngine:
                 })
 
                 # If the error is client-side / prompt-specific, fallback won't help
-                is_eligible = re.category.is_fallback_eligible or re.category == ErrorCategory.AUTH_ERROR
+                is_eligible = re.is_fallback_eligible or (re.replay_safe and re.category == ErrorCategory.AUTH_ERROR)
                 if not is_eligible:
                     total_latency = round((time.perf_counter() - t0) * 1000, 2)
                     if record_log:
@@ -868,7 +876,7 @@ class RoutingEngine:
                     re.request_id = req_id
                     raise re
 
-                is_eligible = re.category.is_fallback_eligible or re.category == ErrorCategory.AUTH_ERROR
+                is_eligible = re.is_fallback_eligible or (re.replay_safe and re.category == ErrorCategory.AUTH_ERROR)
                 if not is_eligible:
                     if record_log:
                         total_latency = round((time.perf_counter() - t0) * 1000, 2)
@@ -1028,10 +1036,7 @@ class RoutingEngine:
                             "error_message": re.message,
                             "latency_ms": sub_lat,
                         })
-                    is_cat_fallback = (
-                        re.category.is_fallback_eligible
-                        or re.category == ErrorCategory.AUTH_ERROR
-                    )
+                    is_cat_fallback = re.is_fallback_eligible or (re.replay_safe and re.category == ErrorCategory.AUTH_ERROR)
                     in_profile_conds = (
                         profile.fallback_conditions is None
                         or (re.category.value in profile.fallback_conditions)
@@ -1200,10 +1205,7 @@ class RoutingEngine:
 
 
                     # More candidates do not override the configured fallback policy.
-                    is_cat_fallback = (
-                        re.category.is_fallback_eligible
-                        or re.category == ErrorCategory.AUTH_ERROR
-                    )
+                    is_cat_fallback = re.is_fallback_eligible or (re.replay_safe and re.category == ErrorCategory.AUTH_ERROR)
                     in_profile_conds = (
                         profile.fallback_conditions is None
                         or (re.category.value in profile.fallback_conditions)
@@ -1367,10 +1369,7 @@ class RoutingEngine:
                             "error_message": re.message,
                             "latency_ms": sub_lat,
                         })
-                    is_cat_fallback = (
-                        re.category.is_fallback_eligible
-                        or re.category == ErrorCategory.AUTH_ERROR
-                    )
+                    is_cat_fallback = re.is_fallback_eligible or (re.replay_safe and re.category == ErrorCategory.AUTH_ERROR)
                     in_profile_conds = (
                         profile.fallback_conditions is None
                         or (re.category.value in profile.fallback_conditions)
@@ -1595,10 +1594,7 @@ class RoutingEngine:
 
 
                     # Check if fallback is eligible:
-                    is_cat_fallback = (
-                        re.category.is_fallback_eligible
-                        or re.category == ErrorCategory.AUTH_ERROR
-                    )
+                    is_cat_fallback = re.is_fallback_eligible or (re.replay_safe and re.category == ErrorCategory.AUTH_ERROR)
                     in_profile_conds = (
                         profile.fallback_conditions is None
                         or (re.category.value in profile.fallback_conditions)
