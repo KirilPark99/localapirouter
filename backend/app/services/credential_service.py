@@ -19,9 +19,16 @@ class CredentialService:
         configuration = {**provider.adapter_configuration,
             "credential_metadata": getattr(credential, "metadata_json", {}) or {}}
         configuration["credential_id"] = credential.id
-        if configuration.get("module_id") == "lingling":
+        if configuration.get("module_id") == "freebuff":
+            # SQLite can reuse a deleted numeric ID; retained pools belong to the original record.
+            created = credential.created_at
+            configuration["credential_instance"] = (
+                created.replace(tzinfo=timezone.utc) if created.tzinfo is None
+                else created.astimezone(timezone.utc)
+            ).isoformat()
+        if configuration.get("module_id") in ("lingling", "freebuff", "qoder"):
             configuration["profile_proxy_id"] = getattr(credential, "proxy_id", None)
-        if configuration.get("module_id") not in ("codex_cli", "grok_builder_cli"):
+        if configuration.get("module_id") not in ("codex_cli", "grok_builder_cli", "qoder"):
             return configuration
 
         original_secret = credential.encrypted_api_key
@@ -30,7 +37,12 @@ class CredentialService:
             nonlocal original_secret
             import json
             from app.core.database import AsyncSessionLocal
-            if (not isinstance(fields, dict) or not fields or
+            if configuration["module_id"] == "qoder":
+                from modules.qoder.handler import normalize_auth
+                if not isinstance(fields, dict) or set(fields) != {"auth_json"}:
+                    raise ValueError("Invalid rotated Qoder account fields")
+                normalize_auth(fields)
+            elif (not isinstance(fields, dict) or not fields or
                 any(name not in ("access_token", "refresh_token", "id_token") or not isinstance(value, str) or not value for name, value in fields.items())):
                 raise ValueError("Invalid rotated CLI token fields")
             async with AsyncSessionLocal() as db:
@@ -43,7 +55,7 @@ class CredentialService:
                 if not isinstance(values, dict):
                     raise ValueError("CLI credentials must use encrypted JSON storage")
                 values.update(fields)
-                if values.get("auth_json"):
+                if configuration["module_id"] != "qoder" and values.get("auth_json"):
                     auth = json.loads(values["auth_json"])
                     if not isinstance(auth, dict):
                         raise ValueError("Invalid pasted CLI auth JSON")

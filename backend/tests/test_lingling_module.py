@@ -305,6 +305,53 @@ def test_client_environment_and_catalog(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("variants,options,expected", [
+    ({}, {"reasoning_effort": "high"}, None),  # MiMo: fixed native reasoning, not effort variants.
+    ({}, {"reasoning_effort": "max"}, None),
+    ({}, {"reasoning_effort": "auto"}, None),
+    ({"low": {}, "medium": {}, "high": {}}, {"reasoning_effort": "max"}, "high"),
+    ({"low": {}, "medium": {}, "high": {}}, {"reasoning": {"effort": "xhigh"}}, "high"),
+    ({"high": {}, "max": {}}, {"reasoning_effort": "max"}, "max"),
+    ({"none": {}, "high": {}}, {"thinking": {"type": "disabled"}}, "none"),
+    ({"low": {}}, {"reasoning_effort": "low"}, "low"),
+])
+async def test_reasoning_compatibility_uses_native_variants_without_mutation(monkeypatch, streaming, variants, options, expected):
+    monkeypatch.setitem(INFO, "variants", variants)
+    adapter, calls, _ = install(monkeypatch)
+    req = request(stream=streaming, **options)
+    before = req.model_dump()
+    ctx = ModuleExecutionContext(model_id=MODEL, timeout=5)
+    if streaming:
+        chunks = [chunk async for chunk in adapter.stream_chat(req, ctx)]
+        assert chunks[-1] == "data: [DONE]\n\n"
+    else:
+        assert (await adapter.chat_completions(req, ctx)).choices[0].message.content == "OK"
+    prompt = next(body for _, path, body in calls if path.endswith("/prompt_async"))
+    assert prompt.get("variant") == expected
+    assert ("variant" in prompt) is (expected is not None)
+    assert req.model_dump() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reasoning,variants,options", [
+    (True, {}, {"reasoning_effort": "none"}),
+    (True, {}, {"reasoning": {"effort": "none"}}),
+    (True, {}, {"thinking": {"type": "disabled"}}),
+    (True, {}, {"reasoning_effort": "invented"}),
+    (False, {}, {"reasoning_effort": "high"}),
+    (True, {"low": {}}, {"reasoning_effort": "max"}),
+])
+async def test_fixed_reasoning_never_claims_disable_or_accepts_unknown_effort(monkeypatch, reasoning, variants, options):
+    monkeypatch.setitem(INFO, "variants", variants)
+    monkeypatch.setitem(INFO["capabilities"], "reasoning", reasoning)
+    adapter, calls, _ = install(monkeypatch)
+    with pytest.raises(RouterException, match="reasoning.*auto"):
+        await adapter.chat_completions(request(**options), ModuleExecutionContext(model_id=MODEL, timeout=5))
+    assert not any(path in ("/config", "/session") or path.endswith("/prompt_async") for _, path, _ in calls)
+
+
+@pytest.mark.asyncio
 async def test_completion_stream_and_sampling_reset(monkeypatch):
     adapter, calls, streams = install(monkeypatch)
     ctx = ModuleExecutionContext(model_id=MODEL, timeout=5)

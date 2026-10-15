@@ -158,6 +158,11 @@ class QuotaService:
                     await db.rollback()
                     return None, request
                 rules = [r for r, *_ in rows]
+                if getattr(request, 'is_audio_transcription', False) and any(
+                        r.get('tokens') is not None or r.get('usd') is not None for r in rules):
+                    raise denied('Audio seconds cannot be safely metered by token/USD text quotas',
+                        next((key_id for r, _, _, owner, _, key_id in rows if owner is ProviderCredential and
+                              (r.get('tokens') is not None or r.get('usd') is not None)), None))
                 finite = any(r.get('tokens') is not None or r.get('usd') is not None for r in rules)
                 prices = LogService.price_snapshot(model_obj)
                 if any(r.get('usd') is not None for r in rules) and any(v is None for v in prices.values()):

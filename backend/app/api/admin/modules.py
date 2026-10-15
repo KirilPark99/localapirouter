@@ -313,7 +313,22 @@ async def list_module_profiles(module_id: str, db: AsyncSession = Depends(get_db
     return output
 
 
-async def _validate_lingling_pool(db: AsyncSession, module_id: str, fields: dict, proxy_id: Optional[int]):
+async def _validate_module_fields(db: AsyncSession, module_id: str, fields: dict, proxy_id: Optional[int]):
+    if module_id == "qoder":
+        from modules.qoder.handler import normalize_auth, egress_fingerprint
+        try:
+            normalize_auth(fields)
+        except ValueError:
+            raise HTTPException(422, "Qoder requires one valid CLI account or Personal Access Token") from None
+        try:
+            proxy_url = (await ProxyService.resolve_proxy_pool(db, [proxy_id]))[0] if proxy_id is not None else None
+            pin = egress_fingerprint(proxy_url)
+            if 'qoder_egress_pin' in fields and fields['qoder_egress_pin'] != pin:
+                raise ValueError('Qoder account egress changed')
+            fields['qoder_egress_pin'] = pin
+        except ValueError:
+            raise HTTPException(422, "Qoder proxy is unavailable or its account binding changed; restore it or authorize again") from None
+        return
     if module_id != "lingling":
         return
     try:
@@ -355,7 +370,7 @@ async def create_module_profile(
                 detail=f"Field '{field_spec.label}' ({field_spec.key}) is required by module '{loaded.manifest.name}'",
             )
 
-    await _validate_lingling_pool(db, module_id, data.fields, data.proxy_id)
+    await _validate_module_fields(db, module_id, data.fields, data.proxy_id)
 
     provider_slug = f"module_{loaded.manifest.id}"
     prov = (await db.execute(select(Provider).where(Provider.slug == provider_slug))).scalar_one_or_none()
@@ -444,7 +459,7 @@ async def update_module_profile(
     changes = data.model_dump(exclude_unset=True, exclude={"fields"})
     if "proxy_id" in changes and data.proxy_id is not None and await db.get(Proxy, data.proxy_id) is None:
         raise HTTPException(404, "Proxy not found")
-    if data.fields is not None or module_id == "lingling" and "proxy_id" in changes:
+    if data.fields is not None or module_id in ("lingling", "qoder") and "proxy_id" in changes:
         try:
             raw = decrypt_secret(cred.encrypted_api_key)
             current_fields = json.loads(raw) if raw.strip().startswith("{") else ({} if raw == "no-key" else {"api_key": raw})
@@ -465,7 +480,7 @@ async def update_module_profile(
                 if isinstance(value, str) and value and value == mask_secret(value):
                     raise HTTPException(409, "Profile secret changed; reload the form before saving")
             current_fields[key] = value
-        await _validate_lingling_pool(db, module_id, current_fields,
+        await _validate_module_fields(db, module_id, current_fields,
                                      data.proxy_id if "proxy_id" in changes else cred.proxy_id)
         if current_fields != original_fields:
             changes["api_key"] = json.dumps(current_fields)
@@ -503,6 +518,92 @@ async def delete_module_profile(
 
     await CredentialService.delete_credential(db, profile_id)
     return {"success": True, "message": f"Profile {profile_id} deleted"}
+
+
+# ponytail: process-local ownership, restart invalidates flows; shared store before multiple workers.
+_freebuff_login_flows: Dict[str, tuple[int, str, str, float]] = {}
+
+
+async def _freebuff_login(db, profile_id, owner, action, flow_id=None):
+    from time import monotonic
+    from urllib.parse import urlsplit
+    from app.adapters.module_adapter import CustomModuleAdapter
+    from app.core.errors import RouterException
+
+    cred = await _get_module_profile(db, "freebuff", profile_id)
+    configuration = CredentialService.module_runtime_configuration(cred.provider, cred)
+    if cred.provider.adapter_type != "custom_module" or configuration.get("module_id") != "freebuff":
+        raise HTTPException(404, "Freebuff profile is unavailable")
+    instance = cred.created_at.isoformat()
+    now = monotonic()
+    for key, (_, _, _, deadline) in list(_freebuff_login_flows.items()):
+        if deadline <= now:
+            _freebuff_login_flows.pop(key, None)
+    if flow_id is not None and _freebuff_login_flows.get(str(flow_id), ())[:3] != (profile_id, owner, instance):
+        raise HTTPException(404, "Login flow does not belong to this profile")
+    if action == "login_start" and len(_freebuff_login_flows) >= 128:
+        raise HTTPException(429, "Too many active Freebuff login flows")
+    try:
+        adapter, ctx = CustomModuleAdapter()._resolve_context(
+            decrypt_secret(cred.encrypted_api_key), configuration,
+            ProxyService.build_proxy_url(cred.proxy) if cred.proxy else None, 15.0,
+            extra_headers=cred.provider.extra_headers,
+        )
+        method = getattr(adapter, action, None)
+        if not callable(method):
+            raise HTTPException(503, "Freebuff login is unavailable")
+        async with asyncio.timeout(30):
+            result = await method(ctx, str(flow_id)) if flow_id is not None else await method(ctx)
+    except HTTPException as exc:
+        code = exc.status_code if exc.status_code in (400, 404, 409, 410, 429, 503) else 502
+        raise HTTPException(code, "Freebuff login request failed") from None
+    except RouterException as exc:
+        code = exc.status_code if exc.status_code in (400, 404, 409, 410, 429, 503) else 502
+        raise HTTPException(code, "Freebuff login request failed") from None
+    except Exception:
+        raise HTTPException(502, "Freebuff login request failed") from None
+    try:
+        flow = result["flow"]
+        result_id = flow["id"]
+        if str(uuid.UUID(result_id)) != result_id or (flow_id is not None and result_id != str(flow_id)):
+            raise ValueError("Invalid flow ID")
+        if flow["status"] not in ("pending", "done", "expired", "cancelled"):
+            raise ValueError("Invalid flow status")
+        url = urlsplit(flow["loginUrl"])
+        if (url.scheme != "https" or url.hostname not in ("freebuff.com", "www.freebuff.com", "codebuff.com", "www.codebuff.com")
+                or url.username or url.password or url.port not in (None, 443)):
+            raise ValueError("Invalid login URL")
+        public = {key: flow.get(key) for key in ("id", "loginUrl", "status", "expiresAt", "createdAt")}
+        if any(value is not None and type(value) not in (str, int, float)
+               for key, value in public.items() if key in ("expiresAt", "createdAt")):
+            raise ValueError("Invalid flow timestamp")
+        if flow.get("error"):
+            public["error"] = "Freebuff login pending or expired; check service connection"
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise HTTPException(502, "Invalid Freebuff login response") from None
+    if action == "login_start":
+        _freebuff_login_flows[result_id] = (profile_id, owner, instance, monotonic() + 600)
+    elif action == "login_cancel":
+        _freebuff_login_flows.pop(str(flow_id), None)
+    return JSONResponse({"flow": public}, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/freebuff/profiles/{profile_id}/login")
+async def start_freebuff_login(profile_id: int, db: AsyncSession = Depends(get_db),
+                               owner: str = Depends(get_current_admin)):
+    return await _freebuff_login(db, profile_id, owner, "login_start")
+
+
+@router.get("/freebuff/profiles/{profile_id}/login/{flow_id}")
+async def freebuff_login_status(profile_id: int, flow_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                               owner: str = Depends(get_current_admin)):
+    return await _freebuff_login(db, profile_id, owner, "login_status", flow_id)
+
+
+@router.post("/freebuff/profiles/{profile_id}/login/{flow_id}/cancel")
+async def cancel_freebuff_login(profile_id: int, flow_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                                owner: str = Depends(get_current_admin)):
+    return await _freebuff_login(db, profile_id, owner, "login_cancel", flow_id)
 
 
 @router.post("/{module_id}/profiles/{profile_id}/test")
@@ -568,6 +669,7 @@ async def sync_all_disk_profiles(
 
 class BrowserOAuthStart(BaseModel):
     proxy_id: Optional[int] = Field(None, ge=1)
+    cli_path: Optional[str] = Field(None, max_length=4096)
 
 
 class BrowserOAuthCallback(BaseModel):
@@ -592,6 +694,8 @@ async def start_browser_oauth(module_id: str, data: BrowserOAuthStart,
         if not proxy or not proxy.enabled:
             raise HTTPException(404, "Proxy is unavailable")
         proxy_url = ProxyService.build_proxy_url(proxy)
+    if module_id == 'qoder':
+        return await module_oauth.start(module_id, owner, data.proxy_id, proxy_url, cli_path=data.cli_path)
     return await module_oauth.start(module_id, owner, data.proxy_id, proxy_url)
 
 
@@ -625,6 +729,10 @@ async def save_browser_oauth(module_id: str, session_id: str, data: BrowserOAuth
             raise HTTPException(409, "Complete browser authorization before saving")
         if data.proxy_id != session.proxy_id:
             raise HTTPException(409, "Proxy changed; restart browser authorization")
+        if module_id == "qoder" and session.proxy_id is not None:
+            proxy = await db.get(Proxy, session.proxy_id, populate_existing=True)
+            if not proxy or not proxy.enabled or ProxyService.build_proxy_url(proxy) != session.proxy_url:
+                raise HTTPException(409, "Qoder login proxy changed or became unavailable; start again")
         fields = {**data.fields, **session.tokens}
         if data.profile_id is not None:
             cred = (await db.execute(select(ProviderCredential).join(Provider).where(

@@ -107,7 +107,7 @@ async def test_point(point, monkeypatch):
             with pytest.raises(RouterException, match='fixture failure'):
                 await a.chat_completions(req(), ctx())
     elif point == 16:
-        for mid in ('cline', 'clinepass', 'qoder', 'kimi_web', 'lmarena', 'notion_web'):
+        for mid in ('cline', 'clinepass', 'kimi_web', 'lmarena', 'notion_web'):
             for status in (400, 401, 403, 429, 503):
                 a = adapter(mid)
                 install(a, lambda r, status=status: httpx.Response(status, json={'error': {'message': 'fixture failure'}}))
@@ -119,10 +119,7 @@ async def test_point(point, monkeypatch):
                 err = CustomModuleAdapter().normalize_error(exception=caught.value)
                 assert err.upstream_status == status and err.category.value == {400: 'INVALID_REQUEST', 401: 'AUTH_ERROR', 403: 'AUTH_ERROR', 429: 'RATE_LIMIT', 503: 'UPSTREAM_5XX'}[status]
                 assert 'DuckDuckGo' not in str(err) and 'fixture failure' in str(err)
-        a = adapter('qoder')
-        install(a, lambda r: httpx.Response(200, text=wire({'statusCodeValue': 429, 'body': {'error': 'fixture failure'}})))
-        with pytest.raises(RouterException) as caught: await consume(a)
-        assert caught.value.upstream_status == 429
+        # Qoder now uses native subprocess I/O, covered in test_qoder_native.py.
         err = CustomModuleAdapter().normalize_error(status_code=403, response_body='generic forbidden')
         assert 'DuckDuckGo' not in str(err)
     elif point == 17:
@@ -387,7 +384,7 @@ def test_reasoning_details_collector():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('mid', ['cline', 'clinepass', 'qoder', 'kimi_web', 'lmarena', 'codex_cli', 'grok_builder_cli', 'deepseek_web', 'zai_web'])
+@pytest.mark.parametrize('mid', ['cline', 'clinepass', 'kimi_web', 'lmarena', 'codex_cli', 'grok_builder_cli', 'deepseek_web', 'zai_web'])
 async def test_real_handler_bridge_abort_and_cancel(mid, monkeypatch):
     a = adapter(mid)
     c = ctx()

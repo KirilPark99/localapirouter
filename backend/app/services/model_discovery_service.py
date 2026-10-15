@@ -13,8 +13,19 @@ from app.services.credential_service import CredentialService
 from app.services.model_ratings_service import ModelRatingsService
 from app.services.model_limits_service import ModelLimitsService
 from app.core.errors import RouterException
+from app.services.audio_service import AUDIO_ENDPOINT, audio_metadata, is_transcription_model
 
 class ModelDiscoveryService:
+    @staticmethod
+    def _set_model_type(model, model_type):
+        model.model_type = model_type.lower().strip()
+        if model.model_type == "audio":
+            model.capabilities = audio_metadata(model.capabilities)
+            model.supported_endpoints = [AUDIO_ENDPOINT]
+        elif (model.capabilities or {}).get("transcription"):
+            model.capabilities = {**model.capabilities, "chat": True, "streaming": True, "transcription": False}
+            model.supported_endpoints = ["/chat/completions"]
+
     @classmethod
     def _validate_reasoning_effort(cls, val: Optional[str]) -> Optional[str]:
         if val is None:
@@ -83,6 +94,10 @@ class ModelDiscoveryService:
 
         # Upsert models
         for item in discovered_data:
+            transcription = is_transcription_model(item.provider_model_id, item.supported_endpoints)
+            if transcription:
+                item.capabilities = audio_metadata(item.capabilities)
+                item.supported_endpoints = [AUDIO_ENDPOINT]
             canonical_slug = cls.compute_canonical_slug(provider.slug, item.provider_model_id)
             if item.provider_model_id in existing_models:
                 # Update existing model without creating duplicate
@@ -95,10 +110,12 @@ class ModelDiscoveryService:
                 m.max_output_tokens = item.max_output_tokens or m.max_output_tokens
                 m.available = True
                 m.discovered_at = now
+                if transcription:
+                    m.model_type = "audio"
             else:
                 # Insert new model
                 low_id = item.provider_model_id.lower()
-                auto_type = "jev" if ("jev" in low_id or "typesafe" in low_id) and ("router" not in low_id) else "openai"
+                auto_type = "audio" if transcription else "jev" if ("jev" in low_id or "typesafe" in low_id) and ("router" not in low_id) else "openai"
                 new_model = DiscoveredModel(
                     provider_id=provider.id,
                     credential_id=credential_id,
@@ -227,6 +244,9 @@ class ModelDiscoveryService:
                 .where(DiscoveredModel.id.in_(model_ids))
                 .values(**values)
             )
+            if set_model_type and model_type:
+                for model in (await db.scalars(select(DiscoveredModel).where(DiscoveredModel.id.in_(model_ids)))).all():
+                    cls._set_model_type(model, model_type)
             await db.commit()
             return len(model_ids)
         return 0
@@ -283,6 +303,8 @@ class ModelDiscoveryService:
         clean_mid = provider_model_id.lower()
         if model_type:
             resolved_type = model_type.lower().strip()
+        elif is_transcription_model(provider_model_id):
+            resolved_type = "audio"
         elif ("jev" in clean_mid or "typesafe" in clean_mid) and ("router" not in clean_mid):
             resolved_type = "jev"
         else:
@@ -291,6 +313,8 @@ class ModelDiscoveryService:
         endpoints = ["/chat/completions"]
         if resolved_type == "jev":
             endpoints.append("/v1/systemone")
+        elif resolved_type == "audio":
+            endpoints = [AUDIO_ENDPOINT]
 
         model = DiscoveredModel(
             provider_id=provider_id,
@@ -320,6 +344,8 @@ class ModelDiscoveryService:
             available=True,
             discovered_at=now,
         )
+        if resolved_type == "audio":
+            model.capabilities = audio_metadata(model.capabilities)
         db.add(model)
         await db.commit()
         await db.refresh(model)
@@ -428,7 +454,7 @@ class ModelDiscoveryService:
         if "temperature" in data.model_fields_set:
             m.temperature = data.temperature if (data.temperature is not None and 0.0 <= data.temperature <= 2.0) else None
         if "model_type" in data.model_fields_set and data.model_type is not None:
-            m.model_type = data.model_type.lower().strip()
+            cls._set_model_type(m, data.model_type)
 
         await db.commit()
         return await cls.get_model_read(db, model_id)

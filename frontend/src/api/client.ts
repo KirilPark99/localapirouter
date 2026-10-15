@@ -15,7 +15,7 @@ export async function apiRequestWithMeta<T = any>(
   options: RequestInit = {}
 ): Promise<{ data: T; headers: Headers }> {
   const headers = {
-    "Content-Type": "application/json",
+    ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
     ...getAuthHeader(),
     ...(options.headers || {}),
   };

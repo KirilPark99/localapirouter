@@ -1,0 +1,16 @@
+{
+  "id": "freebuff",
+  "name": "Freebuff",
+  "version": "2.0.0",
+  "description": "freebuff2api-wokers (worker.js → Node), изолированный пул каждого профиля. Вход по ссылке или authToken; HTTP(S)-прокси закреплён без direct fallback. Сторонний клиент: upstream может отказать или заблокировать аккаунт.",
+  "icon": "Network",
+  "auth_type": "custom_fields",
+  "fields": [
+    {"key": "project_path", "label": "Каталог freebuff2api-wokers", "type": "text", "required": true, "default": "/home/kiril/PythonProjects/freebuff2api-wokers"},
+    {"key": "auth_token", "label": "Freebuff authToken", "type": "password", "required": false, "default": "", "description": "Необязательно: можно войти по ссылке. Сохранённые аккаунты прежнего модуля остаются в своём пуле."},
+    {"key": "api_base", "label": "Upstream API origin", "type": "text", "required": false, "default": "https://www.codebuff.com"},
+    {"key": "node_path", "label": "Node executable", "type": "text", "required": false, "default": "", "description": "Node >=22.19; пустое значение использует PATH."},
+    {"key": "startup_timeout", "label": "Таймаут запуска (сек.)", "type": "number", "required": true, "default": 30}
+  ],
+  "default_models": []
+}

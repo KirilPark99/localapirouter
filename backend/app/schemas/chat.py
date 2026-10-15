@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import json
 import time
 import uuid
@@ -166,6 +166,28 @@ class ChatCompletionRequest(BaseModel):
     reasoning: Optional[Dict[str, Any]] = None
     thinking: Optional[Dict[str, Any]] = None
     prompt_cache_key: Optional[str] = Field(default=None, max_length=512)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def preserve_unknown_parameter_names(cls, values, handler):
+        request = handler(values)
+        if isinstance(values, dict):
+            names = [key for key in values if key not in cls.model_fields]
+            for index, message in enumerate(values.get("messages", [])):
+                if isinstance(message, dict):
+                    names.extend(f"messages[{index}].{key}" for key in message if key not in ChatMessage.model_fields)
+            # Names only, no values; ordinary serialization/provider behavior is unchanged.
+            object.__setattr__(request, "_unknown_client_fields", tuple(names))
+        return request
+
+    def reject_unknown_parameters(self, provider: str):
+        names = getattr(self, "_unknown_client_fields", ())
+        if names:
+            from app.core.errors import RouterException, ErrorCategory
+            name = str(names[0])[:100]
+            if any(not (c.isascii() and (c.isalnum() or c in "_.[]")) for c in name):
+                name = "unknown field"
+            raise RouterException(f"{provider} does not support parameter: {name}", ErrorCategory.INVALID_REQUEST, status_code=400)
 
     def get_effective_max_tokens(self) -> Optional[int]:
         return self.max_completion_tokens if self.max_completion_tokens is not None else self.max_tokens

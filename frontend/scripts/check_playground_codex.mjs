@@ -19,22 +19,30 @@ function bind(name, context) {
 const models = [
   { canonical_slug: "renamed/luna", provider_model_id: "gpt-6-luna", provider_id: 49 },
   { canonical_slug: "renamed/grok", provider_model_id: "grok-4.7", provider_id: 50 },
+  { canonical_slug: "renamed/qoder", provider_model_id: "Auto", provider_id: 51, capabilities: { reasoning: false } },
+  { canonical_slug: 'renamed/freebuff', provider_model_id: 'Solar-Mini-4', provider_id: 56 },
 ];
 const providers = [
   { id: 49, configuration: { module_id: "codex_cli" } },
   { id: 50, configuration: { module_id: "grok_builder_cli" } },
+  { id: 51, configuration: { module_id: "qoder" } },
+  { id: 56, configuration: { module_id: 'freebuff' } },
 ];
-const supportsSampling = bind("supportsSampling", { models, providers });
+const getTargetModule = bind('getTargetModule', { models, providers });
+const supportsSampling = bind("supportsSampling", { getTargetModule });
+const supportsOutputLimit = bind('supportsOutputLimit', { getTargetModule });
+for (const target of ['qoder/Auto', 'module_qoder/Auto', 'renamed/qoder', 'Auto']) assert.equal(supportsSampling(target), false);
+for (const target of ['freebuff/Solar-Mini-4', 'module_freebuff/Solar-Mini-4', 'renamed/freebuff', 'Solar-Mini-4']) assert.equal(supportsSampling(target), false);
 for (const target of ["codex_cli/gpt-6-luna", "module_codex_cli/gpt-6-luna", "renamed/luna", "gpt-6-luna", "grok_builder_cli/grok-4.7", "module_grok_builder_cli/grok-4.7", "renamed/grok", "grok-4.7"]) assert.equal(supportsSampling(target), false);
 for (const target of ["google-ai/gemini", "route/mixed", "judge/mixed", "fusion/mixed"]) assert.equal(supportsSampling(target), true);
 const noop = () => {};
 let checkedRequests = 0;
 for (const isStream of [false, true]) {
   for (const mode of ["single", "chat", "compare"]) {
-    for (const cliTarget of ["codex_cli/gpt-6-luna", "renamed/luna", "grok_builder_cli/grok-4.7", "renamed/grok"]) {
+    for (const cliTarget of ["codex_cli/gpt-6-luna", "renamed/luna", "grok_builder_cli/grok-4.7", "renamed/grok", 'renamed/qoder', 'renamed/freebuff', 'module_freebuff/Solar-Mini-4']) {
       const captured = [];
       const context = {
-        supportsSampling, checkModelSupportsThinking: () => true,
+        supportsSampling, supportsOutputLimit, getTargetModule, checkModelSupportsThinking: (target) => target !== 'renamed/qoder',
         thinkingEffortA: "high", thinkingEffortB: "low", customThinkingA: "8192", customThinkingB: "8192",
         temperature: 0.7, topP: 1, maxTokens: 4096, isStream,
         abortControllerRefA: { current: null }, abortControllerRefB: { current: null },
@@ -63,10 +71,15 @@ for (const isStream of [false, true]) {
       assert.equal(first.model, cliTarget);
       assert.equal(Object.hasOwn(first, "temperature"), false);
       assert.equal(Object.hasOwn(first, "top_p"), false);
-      assert.equal(first.max_tokens, 4096);
-      assert.equal(first.reasoning_effort, "high");
+      assert.equal(first.max_tokens, getTargetModule(cliTarget) === 'freebuff' ? undefined : 4096);
+      assert.equal(first.reasoning_effort, cliTarget === 'renamed/qoder' ? undefined : 'high');
       assert.equal(first.stream, isStream);
-      if (isStream) assert.equal(first.stream_options.include_usage, true);
+      if (isStream && getTargetModule(cliTarget) !== 'freebuff') assert.equal(first.stream_options.include_usage, true);
+      if (getTargetModule(cliTarget) === 'freebuff') {
+        assert.equal(Object.hasOwn(first, 'stream_options'), false);
+        const allowed = new Set(['model','messages','stream','reasoning_effort']);
+        assert.ok(Object.keys(first).every(key => allowed.has(key)), 'Freebuff request must match native accepted fields');
+      }
       if (mode === "compare") {
         assert.equal(captured[1].temperature, 0.7);
         assert.equal(captured[1].top_p, 1);
@@ -84,6 +97,8 @@ for (const isStream of [false, true]) {
         assert.equal(captured[1].model, cliTarget);
         assert.equal(Object.hasOwn(captured[1], "temperature"), false);
         assert.equal(Object.hasOwn(captured[1], "top_p"), false);
+        assert.equal(captured[1].max_tokens, getTargetModule(cliTarget) === 'freebuff' ? undefined : 4096);
+        if (getTargetModule(cliTarget) === 'freebuff') assert.equal(Object.hasOwn(captured[1], 'stream_options'), false);
         checkedRequests += captured.length;
       }
     }
@@ -95,16 +110,27 @@ for (const [mode, targetA, targetB, expected] of [
   ["compare", "grok_builder_cli/grok-4.7", "google-ai/gemini", false],
   ["compare", "google-ai/gemini", "grok_builder_cli/grok-4.7", false],
 ]) assert.equal(bind("samplingDisabled", { supportsSampling, mode, targetA, targetB }), expected);
-for (const targetA of ["codex_cli/gpt-6-luna", "renamed/luna", "grok_builder_cli/grok-4.7", "renamed/grok", "google-ai/gemini"]) {
+for (const [mode, targetA, targetB, expected] of [
+  ['single', 'renamed/freebuff', 'google-ai/gemini', true],
+  ['compare', 'renamed/freebuff', 'module_freebuff/Solar-Mini-4', true],
+  ['compare', 'renamed/freebuff', 'google-ai/gemini', false],
+  ['compare', 'google-ai/gemini', 'renamed/freebuff', false],
+  ['single', 'renamed/qoder', '', false],
+]) assert.equal(bind('outputLimitDisabled', { supportsOutputLimit, mode, targetA, targetB }), expected);
+let checkedExports = 0;
+for (const targetA of ["codex_cli/gpt-6-luna", "renamed/luna", "grok_builder_cli/grok-4.7", "renamed/grok", "google-ai/gemini", 'renamed/freebuff', 'module_freebuff/Solar-Mini-4']) {
   for (const codeTab of ["python", "curl", "node"]) {
     const code = bind("getExportCode", {
-      supportsSampling, targetA, mode: "chat", chatInput: "Synthetic input", userPrompt: "", systemPrompt: "Synthetic system",
+      supportsSampling, supportsOutputLimit, targetA, mode: "chat", chatInput: "Synthetic input", userPrompt: "", systemPrompt: "Synthetic system",
       supportsThinkingA: true, thinkingEffortA: "high", customThinkingA: "8192", codeTab,
       temperature: 0.7, maxTokens: 4096, isStream: false,
     })();
     assert.equal(code.includes("temperature"), supportsSampling(targetA));
     assert.equal(code.includes("top_p"), false);
-    assert.ok(code.includes("4096") && code.includes("high"));
+    assert.equal(code.includes('max_tokens'), supportsOutputLimit(targetA));
+    assert.equal(code.includes('4096'), supportsOutputLimit(targetA));
+    assert.ok(code.includes('high'));
+    checkedExports++;
   }
 }
-console.log(`PASS: ${checkedRequests} captured offline requests; chat/single/compare, stream/JSON, renamed Codex/Grok, other-provider parameters, 15 export examples.`);
+console.log(`PASS: ${checkedRequests} captured offline requests; chat/single/compare, stream/JSON, Codex/Grok/Qoder/Freebuff aliases, other-provider parameters preserved, ${checkedExports} export examples.`);

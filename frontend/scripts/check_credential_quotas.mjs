@@ -228,6 +228,19 @@ try {
   assert.equal(oauthHtml.includes(`href="${renderedOAuth.auth_url}"`), false, 'Only a copyable URL; no browser-opening link');
   assert.equal(fetches, 0);
   console.log('PASS: actual pending OAuth modal renders a read-only full URL, callback/cancel controls and static-IP guidance; zero network.');
+  module.manifest.id = 'qoder';
+  renderedOAuth = { ...renderedOAuth, moduleId: 'qoder' };
+  moduleServer.moduleGraph.invalidateAll();
+  const { ModulesPage: QoderPage } = await moduleServer.ssrLoadModule('/src/pages/ModulesPage.tsx');
+  const { I18nProvider: QoderProvider } = await moduleServer.ssrLoadModule('/src/i18n/context.tsx');
+  const qoderHtml = renderToStaticMarkup(React.createElement(QoderProvider, null, React.createElement(QoderPage)));
+  assert.ok(qoderHtml.includes('Personal Access Token') && qoderHtml.includes('автоматически проверяет завершение входа'));
+  assert.ok(qoderHtml.includes('id="module-oauth-url"') && /readonly=""/i.test(qoderHtml));
+  assert.equal(qoderHtml.includes('id="module-oauth-callback"'), false, 'Native device login has no pasted callback');
+  assert.ok(qoderHtml.includes('Сессия действует 5 минут.'), 'Match the native device-flow deadline');
+  assert.equal(fetches, 0);
+  module.manifest.id = 'codex_cli';
+  console.log('PASS: Qoder account modal offers native browser sign-in/PAT, copy-only URL and automatic status, not a fake PKCE callback; zero network.');
 } finally { await moduleServer.close(); fs.rmSync(moduleScratch, { recursive: true, force: true }); }
 
 // A completed request is not proof that an import transaction committed.
@@ -330,14 +343,14 @@ for (const mode of ['tor', 'proxy', 'mixed']) {
 console.log('PASS: Lingling Tor/proxy/mixed actual modal, ordered registry controls, disabled exits, no Direct label, typed pool create/edit payload; zero network.');
 
 // Extract the real shared start handler: creating a session must never open a browser.
-for (const moduleId of ['codex_cli', 'grok_builder_cli', 'agy_cli']) {
+for (const moduleId of ['codex_cli', 'grok_builder_cli', 'agy_cli', 'qoder']) {
   for (const proxyId of [undefined, 8]) {
     let opens = 0;
     const oauthCalls = [];
     const oauth = {
       URL, Date, JSON, selectedModule: { manifest: { id: moduleId } },
       supportsBrowserOAuth: true, oauthStarting: false, savingProfile: false,
-      formProxyId: proxyId, oauthGeneration: { current: 0 }, session: null,
+      formProxyId: proxyId, formFields: { cli_path: '/fixture/qodercli' }, oauthGeneration: { current: 0 }, session: null,
       window: { open() { opens++; return { opener: null, closed: false, close() {}, location: { replace() {} } }; } },
       cancelOAuth() { oauth.oauthGeneration.current++; oauth.session = null; },
       updateOAuthSession(value) { oauth.session = value; },
@@ -355,6 +368,7 @@ for (const moduleId of ['codex_cli', 'grok_builder_cli', 'agy_cli']) {
     assert.equal(oauthCalls.length, 1);
     assert.equal(oauthCalls[0].url, `/api/admin/modules/${moduleId}/oauth/start`);
     assert.equal(oauthCalls[0].body.proxy_id, proxyId ?? null);
+    assert.equal(oauthCalls[0].body.cli_path, moduleId === 'qoder' ? '/fixture/qodercli' : undefined);
     assert.equal(oauth.session.auth_url, 'https://unit.invalid/authorize?state=synthetic');
     assert.equal(oauth.session.proxyId, proxyId ?? null);
     assert.equal(oauth.oauthStarting, false);
@@ -362,7 +376,7 @@ for (const moduleId of ['codex_cli', 'grok_builder_cli', 'agy_cli']) {
   }
 }
 assert.equal(fetches, 0);
-console.log('PASS: actual Codex/Grok/Antigravity OAuth start handlers return URLs with unchanged proxy binding and zero browser opens; zero network.');
+console.log('PASS: actual Codex/Grok/Antigravity/Qoder OAuth start handlers return URLs with unchanged proxy binding and zero browser opens; zero network.');
 
 // Exercise the real module grouping handlers without touching module profiles or real APIs.
 let groupStore = structuredClone(renderedGrouping), groupCalls = [], groupFailure = false, groupConfirmed = true;

@@ -70,7 +70,11 @@ interface ProviderGroup {
 }
 
 export const ModelsPage: React.FC = () => {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
+  const audioLabel = language === "ru" ? "Аудио (STT)" : "Audio (STT)";
+  const audioHelp = language === "ru"
+    ? "Распознавание речи из файла через /v1/audio/transcriptions. Groq: whisper-large-v3 и whisper-large-v3-turbo. Не используется для чата."
+    : "Transcribe an audio file via /v1/audio/transcriptions. Groq: whisper-large-v3 and whisper-large-v3-turbo. Not a chat model.";
   const [models, setModels] = useState<DiscoveredModel[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
@@ -140,7 +144,7 @@ export const ModelsPage: React.FC = () => {
   const [savingTemp, setSavingTemp] = useState(false);
 
   // Model Type (Engine) state
-  const [modelTypeFilter, setModelTypeFilter] = useState<"all" | "openai" | "jev">("all");
+  const [modelTypeFilter, setModelTypeFilter] = useState<"all" | "openai" | "jev" | "audio">("all");
   const [modelTypeModalModel, setModelTypeModalModel] = useState<DiscoveredModel | null>(null);
   const [isBatchModelTypeModalOpen, setIsBatchModelTypeModalOpen] = useState(false);
   const [selectedModelType, setSelectedModelType] = useState<string>("openai");
@@ -853,7 +857,7 @@ export const ModelsPage: React.FC = () => {
         )
       );
       setStatusMessage({
-        text: `Model ${modelTypeModalModel.canonical_slug} set to ${selectedModelType === "jev" ? "Jev (System One)" : "OpenAI Compatible"}.`,
+        text: `Model ${modelTypeModalModel.canonical_slug} set to ${selectedModelType === "audio" ? audioLabel : selectedModelType === "jev" ? "Jev (System One)" : "OpenAI Compatible"}.`,
         ok: true,
       });
       setModelTypeModalModel(null);
@@ -895,7 +899,7 @@ export const ModelsPage: React.FC = () => {
         )
       );
       setStatusMessage({
-        text: `Set ${selectedModelIds.size} models to ${batchSelectedModelType === "jev" ? "Jev (System One)" : "OpenAI Compatible"}.`,
+        text: `Set ${selectedModelIds.size} models to ${batchSelectedModelType === "audio" ? audioLabel : batchSelectedModelType === "jev" ? "Jev (System One)" : "OpenAI Compatible"}.`,
         ok: true,
       });
       setIsBatchModelTypeModalOpen(false);
@@ -1092,8 +1096,7 @@ export const ModelsPage: React.FC = () => {
 
       // Model type filter check
       const mType = m.model_type || "openai";
-      if (modelTypeFilter === "openai" && mType !== "openai") return;
-      if (modelTypeFilter === "jev" && mType !== "jev") return;
+      if (modelTypeFilter !== "all" && mType !== modelTypeFilter) return;
 
       // Search filter check
       if (
@@ -1170,7 +1173,7 @@ export const ModelsPage: React.FC = () => {
       });
 
       // If user is searching or filtered, only show providers that have matching models
-      if ((q || visibilityFilter === "hidden" || ratingFilter !== "all") && pModels.length === 0) {
+      if ((q || visibilityFilter === "hidden" || ratingFilter !== "all" || modelTypeFilter !== "all") && pModels.length === 0) {
         return;
       }
       groups.push({
@@ -1528,7 +1531,7 @@ export const ModelsPage: React.FC = () => {
                                 ? "bg-violet-950/80 border-violet-500/60 text-violet-200 hover:bg-violet-900 shadow-xs"
                                 : "bg-slate-800/80 border-slate-700/60 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
                             }`}
-                            title={`Model Mode: ${m.model_type === "jev" ? "Jev (System One Decision Model)" : "OpenAI Compatible"}. Click to change.`}
+                            title={`Model Mode: ${m.model_type === "audio" ? audioLabel : m.model_type === "jev" ? "Jev (System One Decision Model)" : "OpenAI Compatible"}. Click to change.`}
                           >
                             {m.model_type === "jev" ? (
                               <>
@@ -1538,7 +1541,7 @@ export const ModelsPage: React.FC = () => {
                             ) : (
                               <>
                                 <Cpu size={10} className="text-slate-400" />
-                                <span>OpenAI</span>
+                                <span>{m.model_type === "audio" ? audioLabel : "OpenAI"}</span>
                               </>
                             )}
                           </button>
@@ -2101,6 +2104,14 @@ export const ModelsPage: React.FC = () => {
               >
                 ⚡ Jev
               </button>
+              <button
+                type="button"
+                onClick={() => setModelTypeFilter("audio")}
+                className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${modelTypeFilter === "audio" ? "bg-cyan-600/30 text-cyan-300" : "text-slate-400 hover:text-slate-200"}`}
+                title={audioHelp}
+              >
+                {audioLabel}
+              </button>
             </div>
           </div>
 
@@ -2231,7 +2242,7 @@ export const ModelsPage: React.FC = () => {
               onClick={openBatchModelTypeModal}
               disabled={batchProcessing}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-950/60 hover:bg-violet-900 disabled:opacity-50 text-violet-200 text-xs font-semibold rounded-lg border border-violet-700/70 shadow-xs transition-colors cursor-pointer whitespace-nowrap"
-              title="Set model type (OpenAI Compatible or Jev System One) for selected models"
+              title="Set model type (OpenAI Compatible, Jev System One or Audio STT) for selected models"
             >
               <Cpu size={14} />
               <span>Set Model Type ({selectedModelIds.size})</span>
@@ -2460,7 +2471,7 @@ export const ModelsPage: React.FC = () => {
                                         ? "bg-violet-950/80 border-violet-500/60 text-violet-200 hover:bg-violet-900 shadow-xs"
                                         : "bg-slate-800/80 border-slate-700/60 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
                                     }`}
-                                    title={`Model Mode: ${m.model_type === "jev" ? "Jev (System One Decision Model)" : "OpenAI Compatible"}. Click to change.`}
+                                    title={`Model Mode: ${m.model_type === "audio" ? audioLabel : m.model_type === "jev" ? "Jev (System One Decision Model)" : "OpenAI Compatible"}. Click to change.`}
                                   >
                                     {m.model_type === "jev" ? (
                                       <>
@@ -2470,7 +2481,7 @@ export const ModelsPage: React.FC = () => {
                                     ) : (
                                       <>
                                         <Cpu size={10} className="text-slate-400" />
-                                        <span>OpenAI</span>
+                                        <span>{m.model_type === "audio" ? audioLabel : "OpenAI"}</span>
                                       </>
                                     )}
                                   </button>
@@ -2725,7 +2736,9 @@ export const ModelsPage: React.FC = () => {
             >
               <option value="openai">OpenAI Compatible (Default - Chat, Completions, Tools)</option>
               <option value="jev">Jev (System One Decision Model - Choice, Score, Noul)</option>
+              <option value="audio">{audioLabel}</option>
             </select>
+            {manualModelType === "audio" && <p className="text-[11px] text-slate-400 mt-2">{audioHelp}</p>}
           </div>
 
           <div className="flex justify-end gap-2.5 pt-3 border-t border-slate-800">
@@ -3610,7 +3623,7 @@ export const ModelsPage: React.FC = () => {
                 <span>
                   Current type:{" "}
                   <span className="text-violet-400 font-mono font-semibold">
-                    {modelTypeModalModel.model_type === "jev" ? "Jev (System One)" : "OpenAI Compatible"}
+                    {modelTypeModalModel.model_type === "audio" ? audioLabel : modelTypeModalModel.model_type === "jev" ? "Jev (System One)" : "OpenAI Compatible"}
                   </span>
                 </span>
               </div>
@@ -3666,6 +3679,14 @@ export const ModelsPage: React.FC = () => {
                   Fast probabilistic decision engine evaluating input states against choice, score, and noul primitives with calibrated probabilities and confidence levels.
                 </p>
               </div>
+              <button
+                type="button"
+                onClick={() => setSelectedModelType("audio")}
+                className={`w-full p-3.5 rounded-xl border text-left transition-all ${selectedModelType === "audio" ? "bg-cyan-950/50 border-cyan-500 text-cyan-100" : "bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700"}`}
+              >
+                <span className="font-semibold text-xs">{audioLabel}</span>
+                <p className="text-[11px] text-slate-400 mt-2">{audioHelp}</p>
+              </button>
             </div>
 
             <div className="p-3 bg-slate-950/60 border border-slate-800/80 rounded-lg text-[11px] space-y-1.5 text-slate-300">
@@ -3751,6 +3772,14 @@ export const ModelsPage: React.FC = () => {
                 {batchSelectedModelType === "jev" && <CheckCircle2 size={16} className="text-violet-400" />}
               </div>
             </div>
+            <button
+              type="button"
+              onClick={() => setBatchSelectedModelType("audio")}
+              className={`w-full p-3.5 rounded-xl border text-left transition-all ${batchSelectedModelType === "audio" ? "bg-cyan-950/50 border-cyan-500 text-cyan-100" : "bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700"}`}
+            >
+              <span className="font-semibold text-xs">{audioLabel}</span>
+              <p className="text-[11px] text-slate-400 mt-2">{audioHelp}</p>
+            </button>
           </div>
 
           <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">

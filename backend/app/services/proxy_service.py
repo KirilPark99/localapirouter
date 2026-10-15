@@ -376,6 +376,18 @@ class ProxyService:
             # ponytail: close all Lingling workers; index dependencies if pool counts grow.
             await adapter.close()
 
+    @staticmethod
+    async def _close_assigned_module_workers(db: AsyncSession, proxy_id: int) -> None:
+        from app.modules.loader import ModuleLoader
+        for module_id in ('freebuff', 'qoder'):
+            adapter = ModuleLoader.get_adapter(module_id)
+            if adapter:
+                ids = (await db.scalars(select(ProviderCredential.id).join(Provider).where(
+                    ProviderCredential.proxy_id == proxy_id, Provider.adapter_type == "custom_module",
+                    Provider.configuration["module_id"].as_string() == module_id))).all()
+                for credential_id in ids:
+                    await adapter.close_profile(credential_id)
+
     @classmethod
     async def update_proxy(cls, db: AsyncSession, proxy_id: int, data: ProxyUpdate) -> Optional[ProxyRead]:
         result = await db.execute(
@@ -425,6 +437,7 @@ class ProxyService:
         await db.commit()
         await db.refresh(proxy)
         if any(getattr(data, key) is not None for key in ("scheme", "host", "port", "username", "password", "enabled")):
+            await cls._close_assigned_module_workers(db, proxy_id)
             await cls._close_lingling_workers()
 
         return ProxyRead(
@@ -450,6 +463,7 @@ class ProxyService:
         proxy = result.scalar_one_or_none()
         if not proxy:
             return False
+        await cls._close_assigned_module_workers(db, proxy_id)
         await db.delete(proxy)
         await db.commit()
         await cls._close_lingling_workers()

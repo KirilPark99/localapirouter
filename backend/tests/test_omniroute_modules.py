@@ -73,7 +73,10 @@ def test_all_modules_discovery():
         assert mid in modules, f"Module {mid} was not discovered"
         m = modules[mid]
         assert m.status == "ready", f"Module {mid} status is {m.status}: {m.error}"
-        assert len(m.manifest.default_models) > 0, f"Module {mid} has no default models"
+        if mid == 'qoder':
+            assert m.manifest.default_models == [], 'Native account models must not be invented'
+        else:
+            assert len(m.manifest.default_models) > 0, f"Module {mid} has no default models"
 
         adapter = ModuleLoader.get_adapter(mid)
         assert adapter is not None, f"No adapter found for module {mid}"
@@ -116,13 +119,16 @@ async def test_cline_and_clinepass():
 
 
 @pytest.mark.asyncio
-async def test_qoder_module():
+async def test_qoder_module(monkeypatch):
+    from unittest.mock import AsyncMock
     adapter = ModuleLoader.get_adapter("qoder")
-    ctx = ModuleExecutionContext(credentials={"api_key": "sk-test", "api_base": "https://custom.qoder.com/v1"})
-    assert adapter._get_base_url(ctx) == "https://custom.qoder.com/v1"
-
+    assert adapter is not None
+    run = AsyncMock(return_value='MODEL\nAuto\nNative Custom (custom-key)\n')
+    monkeypatch.setattr(adapter, '_run', run)
+    ctx = ModuleExecutionContext(credentials={"personal_access_token": "fixture-pat"})
     models = await adapter.list_models(ctx)
-    assert any(m.provider_model_id == "qwen3.8-max-preview" for m in models)
+    assert [m.provider_model_id for m in models] == ['Auto', 'custom-key']
+    run.assert_awaited_once_with(ctx, ['--list-models'])
 
 
 def test_kimi_web_connect_framing():

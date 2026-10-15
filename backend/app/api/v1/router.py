@@ -315,6 +315,87 @@ async def _secure_outbound(content, request, db, router_key, model_id):
             await _safe_close_session(session)
 
 
+@router.post("/audio/transcriptions")
+@_trace_request
+async def audio_transcriptions(request: Request, response: Response, db: AsyncSession = Depends(get_db),
+                               router_key: Optional[RouterApiKey] = Depends(get_inference_key_dep)):
+    from pathlib import PurePosixPath
+    from starlette.datastructures import UploadFile
+    from starlette.formparsers import MultiPartException
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+    from pydantic import ValidationError
+    from app.services.audio_service import AudioService, TranscriptionRequest, AUDIO_EXTENSIONS, MAX_AUDIO_BYTES
+    from app.core.errors import ErrorCategory
+    from app.security.registry import GuardrailRegistry
+    from app.core.admission import admission
+    req_id = f"req_{uuid.uuid4().hex[:16]}"
+    response.headers['X-Request-Id'] = req_id
+    received, upload_limited = 0, False
+    async def bounded_receive():
+        nonlocal received, upload_limited
+        message = await request.receive()
+        received += len(message.get('body', b''))
+        if received > MAX_AUDIO_BYTES + 64 * 1024:
+            upload_limited = True
+            # MultiPartParser closes spooled files on this exception.
+            raise MultiPartException('Audio multipart upload exceeds limit')
+        return message
+    upload_request = Request(request.scope, receive=bounded_receive)
+    try:
+        async with upload_request.form(max_files=1, max_fields=12, max_part_size=8192) as form:
+            allowed = {'file', 'model', 'language', 'prompt', 'response_format', 'temperature', 'timestamp_granularities[]'}
+            if any(key not in allowed for key in form) or any(len(form.getlist(key)) > 1 for key in form if key != 'timestamp_granularities[]'):
+                raise RouterException('Unsupported or duplicate transcription fields', ErrorCategory.INVALID_REQUEST)
+            upload = form.get('file')
+            if not isinstance(upload, UploadFile):
+                raise RouterException('A multipart audio file is required', ErrorCategory.INVALID_REQUEST)
+            filename = PurePosixPath((upload.filename or '').replace('\\', '/')).name
+            if filename.rsplit('.', 1)[-1].lower() not in AUDIO_EXTENSIONS:
+                raise RouterException('Unsupported audio file extension', ErrorCategory.INVALID_REQUEST)
+            if upload.size is not None and upload.size > MAX_AUDIO_BYTES:
+                raise RouterException('Audio file exceeds 25 MB upload limit', ErrorCategory.INVALID_REQUEST, status_code=413)
+            audio = await upload.read(MAX_AUDIO_BYTES + 1)
+            if not audio or len(audio) > MAX_AUDIO_BYTES:
+                raise RouterException('Audio file is empty or exceeds 25 MB upload limit', ErrorCategory.INVALID_REQUEST,
+                                      status_code=413 if audio else 400)
+            values = {key: value for key, value in form.items() if key not in ('file', 'timestamp_granularities[]')}
+            payload = TranscriptionRequest.model_validate({**values, 'timestamp_granularities': form.getlist('timestamp_granularities[]')})
+            if router_key is not None:
+                RoutingEngine._check_permissions(router_key, payload.model)
+            # Audio stays binary; scan only optional textual guidance, not base64 or filenames.
+            guidance = ChatCompletionRequest(model=payload.model, messages=[ChatMessage(role='user', content=payload.prompt or '')])
+            guard = await GuardrailRegistry.run_pre_call_hooks(payload=guidance, headers=dict(request.headers),
+                model_id=payload.model, db=db, router_key=router_key)
+            if guard.block:
+                raise RouterException('Transcription guidance blocked by safety policy', ErrorCategory.INVALID_REQUEST)
+            if guard.modified_payload is not None and payload.prompt is not None:
+                payload.prompt = guard.modified_payload.messages[0].content
+            if guard.warnings:
+                response.headers['X-Guardrail-Warning'] = ','.join(sorted(set(guard.warnings)))
+            if router_key is not None:
+                request.state.key_reservation = admission.reserve('router-key', router_key.id, rpm=router_key.rate_limit_rpm)
+            result = await AudioService.transcribe(db, payload, audio, filename, upload.content_type,
+                                                  router_key=router_key, request_id=req_id)
+            result = await _secure_outbound(result, request, db, router_key, payload.model)
+            if isinstance(result, str):
+                return Response(content=result, media_type='text/plain', headers=dict(response.headers))
+            return JSONResponse(content=result, headers=dict(response.headers))
+    except StarletteHTTPException as exc:
+        if not upload_limited:
+            raise
+        error = RouterException('Audio upload exceeds 25 MB limit', ErrorCategory.INVALID_REQUEST, status_code=413)
+        return JSONResponse(status_code=413, content=error.to_openai_dict(req_id), headers={'X-Request-Id': req_id})
+    except ValidationError:
+        # Do not echo guidance or audio metadata in schema error payloads.
+        error = RouterException('Invalid transcription parameters', ErrorCategory.INVALID_REQUEST, status_code=422)
+        return JSONResponse(status_code=422, content=error.to_openai_dict(req_id), headers={'X-Request-Id': req_id})
+    except RouterException as exc:
+        headers = {'X-Request-Id': req_id}
+        if exc.retry_after is not None:
+            headers['Retry-After'] = str(exc.retry_after)
+        return JSONResponse(status_code=exc.status_code, content=exc.to_openai_dict(req_id), headers=headers)
+
+
 @router.post("/chat/completions")
 @_trace_request
 async def chat_completions(

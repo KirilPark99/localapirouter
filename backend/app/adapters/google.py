@@ -1,5 +1,6 @@
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 import json
+import re
 import httpx
 from app.adapters.base import BaseProviderAdapter, DiscoveredModelData
 from app.adapters.openai import GenericOpenAIAdapter
@@ -152,6 +153,16 @@ class GoogleAIStudioAdapter(BaseProviderAdapter):
             return "https://generativelanguage.googleapis.com/v1beta/openai"
         return base_url.rstrip("/")
 
+    @staticmethod
+    def _prepare_reasoning_request(model_id: str, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        # Gemini 3 Flash-Lite cannot disable thinking; use its lowest supported level.
+        native = model_id.lower().removeprefix("google/").removeprefix("models/")
+        effort = request.get_effective_reasoning_effort()
+        if (re.fullmatch(r"gemini-3(?:\.\d+)?-flash-lite(?:-.*)?", native)
+                and effort is not None and str(effort).strip().lower() in ("none", "off", "disabled")):
+            return request.model_copy(update={"reasoning_effort": "minimal", "reasoning": None, "thinking": None})
+        return request
+
     async def chat_completions(
         self,
         base_url: str,
@@ -169,7 +180,7 @@ class GoogleAIStudioAdapter(BaseProviderAdapter):
             base_url=effective_base,
             api_key=api_key,
             model_id=clean_model_id,
-            request=request,
+            request=self._prepare_reasoning_request(clean_model_id, request),
             extra_headers=extra_headers,
             configuration={"chat_endpoint": "/chat/completions", "auth_type": "bearer"},
             proxy_url=proxy_url,
@@ -193,7 +204,7 @@ class GoogleAIStudioAdapter(BaseProviderAdapter):
             base_url=effective_base,
             api_key=api_key,
             model_id=clean_model_id,
-            request=request,
+            request=self._prepare_reasoning_request(clean_model_id, request),
             extra_headers=extra_headers,
             configuration={"chat_endpoint": "/chat/completions", "auth_type": "bearer"},
             proxy_url=proxy_url,

@@ -631,6 +631,21 @@ class LinglingAdapter(BaseModuleAdapter):
                     raise RouterException("Selected OpenCode model does not support client tool calls", ErrorCategory.INVALID_REQUEST)
                 if any(p["type"] == "file" for p in prompt["parts"]) and not info["capabilities"]["input"]["image"]:
                     raise RouterException("Selected Lingling model does not support images", ErrorCategory.INVALID_REQUEST)
+                variant = request.get_effective_reasoning_effort()
+                variants = info.get("variants") or {}
+                if variant == "auto":
+                    variant = None
+                elif variant not in variants and variant in ("max", "xhigh") and "high" in variants:
+                    variant = "high"
+                elif not variants and info.get("capabilities", {}).get("reasoning") and variant in (
+                        "minimal", "low", "medium", "high", "xhigh", "max"):
+                    # ponytail: fixed native reasoning; expose levels only when OpenCode offers variants.
+                    variant = None
+                if variant and variant not in variants:
+                    available = ", ".join(["auto (native)", *variants])
+                    raise RouterException(
+                        f"Requested reasoning effort is unsupported; available: {available}. "
+                        "Disabling reasoning requires a native off/none variant.", ErrorCategory.INVALID_REQUEST)
                 limit = dict(native.get(model, info)["limit"])
                 maximum = request.get_effective_max_tokens()
                 if maximum is not None:
@@ -641,10 +656,7 @@ class LinglingAdapter(BaseModuleAdapter):
                     "agent": {"build": {"temperature": request.temperature if request.temperature is not None else 1,
                     "top_p": request.top_p if request.top_p is not None else 1}}, "provider": {"opencode": {"models": {model: {"limit": limit}}}}})
                 prompt["model"] = {"providerID": "opencode", "modelID": model}
-                variant = request.get_effective_reasoning_effort()
                 if variant:
-                    if variant not in info.get("variants", {}):
-                        raise RouterException("Requested reasoning variant is not supported by this OpenCode model", ErrorCategory.INVALID_REQUEST)
                     prompt["variant"] = variant
                 # Keep genuine OpenCode schemas; every permission is rejected below.
                 session = await call("POST", "/session", json={"title": "MyAIrouter", "permission": [

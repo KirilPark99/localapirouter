@@ -67,6 +67,32 @@ def _price_per_million(value: Any) -> Optional[float]:
         return None
 
 
+async def iter_chat_sse(response, max_bytes=None):
+    """Normalize HTTP SSE framing once for generic and module transports."""
+    buffer, data, size = "", [], 0
+    async for text in response.aiter_text():
+        size += len(text.encode('utf-8'))
+        if max_bytes is not None and size > max_bytes:
+            raise ValueError('Response stream exceeds assembly limit')
+        buffer += text
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.removesuffix("\r")
+            if not line:
+                if data:
+                    value = "\n".join(data)
+                    data = []
+                    if value != "[DONE]":
+                        value = json.dumps(json.loads(value), ensure_ascii=False)
+                    yield f"data: {value}\n\n"
+                    if value == "[DONE]":
+                        return
+            elif line.startswith("data:"):
+                value = line[5:]
+                data.append(value[1:] if value.startswith(" ") else value)
+            # Comments, event/id/retry and unknown fields are not data.
+
+
 class GenericOpenAIAdapter(BaseProviderAdapter):
     def _build_headers(
         self,
@@ -180,6 +206,10 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
                     if "reasoning" in cap_raw:
                         capabilities["reasoning"] = bool(cap_raw["reasoning"])
 
+                from app.services.audio_service import AUDIO_ENDPOINT, audio_metadata, is_transcription_model
+                transcription = is_transcription_model(str(model_id))
+                if transcription:
+                    capabilities = audio_metadata(capabilities)
                 pricing = item.get("pricing")
                 pricing = pricing if isinstance(pricing, dict) else {}
                 models_list.append(
@@ -187,7 +217,7 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
                         provider_model_id=str(model_id),
                         display_name=str(display_name),
                         capabilities=capabilities,
-                        supported_endpoints=["/chat/completions"],
+                        supported_endpoints=[AUDIO_ENDPOINT] if transcription else ["/chat/completions"],
                         context_length=context_length,
                         max_output_tokens=max_output_tokens,
                         input_price_per_1m=_price_per_million(pricing.get("prompt")),
@@ -195,6 +225,48 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
                     )
                 )
         return models_list
+
+    async def transcribe_audio(self, *, base_url, api_key, model_id, payload, audio, filename,
+                               content_type, extra_headers, configuration, proxy_url=None, timeout=120):
+        client = await http_client_manager.get_client(proxy_url=proxy_url, timeout=timeout)
+        endpoint = configuration.get('transcriptions_endpoint', '/audio/transcriptions')
+        url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+        auth_type = configuration.get('auth_type', 'bearer')
+        headers = self._build_headers(api_key, auth_type, configuration.get('auth_header', 'Authorization'), extra_headers)
+        headers = {key: value for key, value in headers.items() if key.lower() not in ('content-type', 'content-length')}
+        fields = payload.model_dump(exclude_none=True, exclude={'timestamp_granularities'})
+        fields['model'] = model_id
+        # Repeated multipart fields cannot be represented by a dict.
+        files = [('file', (filename, audio, content_type or 'application/octet-stream'))]
+        files.extend((key, (None, str(value))) for key, value in fields.items())
+        files.extend(('timestamp_granularities[]', (None, value)) for value in payload.timestamp_granularities)
+        try:
+            response = await client.post(url, headers=headers, files=files,
+                params={'key': api_key} if auth_type == 'query_param' else None, follow_redirects=False)
+        except Exception as exc:
+            error = self.normalize_error(exception=exc)
+            # A read/write timeout may follow a paid submission: never replay it.
+            error.replay_safe = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+            raise error from exc
+        if response.status_code != 200:
+            try:
+                retry_after = float(response.headers['Retry-After'])
+            except (KeyError, ValueError):
+                retry_after = None
+            error = self.normalize_error(status_code=response.status_code, response_body=response.text, retry_after=retry_after)
+            error.replay_safe = response.status_code in (401, 403, 404, 429)
+            raise error
+        if payload.response_format == 'text':
+            return response.text
+        try:
+            result = response.json()
+            if not isinstance(result, dict) or not isinstance(result.get('text'), str):
+                raise ValueError('Missing transcription text')
+        except ValueError as exc:
+            from app.core.errors import ErrorCategory
+            raise RouterException('Upstream returned invalid transcription JSON', ErrorCategory.UPSTREAM_5XX,
+                                  replay_safe=False) from exc
+        return result
 
     async def validate_credentials(
         self,
@@ -435,26 +507,10 @@ class GenericOpenAIAdapter(BaseProviderAdapter):
                     err_body = await resp.aread()
                     raise self.normalize_error(status_code=resp.status_code, response_body=err_body.decode("utf-8", errors="ignore"))
 
-                buffer, data = "", []
-                # Split protocol LF only: Unicode separators are valid JSON text.
-                async for text in resp.aiter_text():
-                    buffer += text
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        line = line.removesuffix("\r")
-                        if not line:
-                            if data:
-                                value = "\n".join(data)
-                                data = []
-                                if value != "[DONE]":
-                                    value = json.dumps(json.loads(value), ensure_ascii=False)
-                                yield f"data: {value}\n\n"
-                                if value == "[DONE]":
-                                    return
-                        elif line.startswith("data:"):
-                            value = line[5:]
-                            data.append(value[1:] if value.startswith(" ") else value)
-                        # Comments, event/id/retry and unknown fields are not data.
+                from contextlib import aclosing
+                async with aclosing(iter_chat_sse(resp)) as source:
+                    async for frame in source:
+                        yield frame
         except Exception as e:
             if isinstance(e, RouterException):
                 raise

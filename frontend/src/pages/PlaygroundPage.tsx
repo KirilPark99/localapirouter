@@ -47,7 +47,7 @@ import {
 import { getHiddenModelIds, groupModelsByProvider, getVisibleModels } from "../utils/models";
 import { useI18n } from "../i18n";
 
-type PlaygroundMode = "single" | "chat" | "compare" | "jev";
+type PlaygroundMode = "single" | "chat" | "compare" | "jev" | "audio";
 type ThinkingEffort = "auto" | "low" | "medium" | "high" | "off" | "custom";
 
 export interface JevPreset {
@@ -199,7 +199,11 @@ interface ChatMessageItem {
 }
 
 export const PlaygroundPage: React.FC = () => {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
+  const audioLabel = language === "ru" ? "Аудио (STT)" : "Audio (STT)";
+  const audioHelp = language === "ru"
+    ? "Загрузите аудиофайл для распознавания речи. Groq: whisper-large-v3 и whisper-large-v3-turbo. Только прямые аудиомодели, без профилей маршрутизации."
+    : "Upload an audio file to transcribe speech. Groq: whisper-large-v3 and whisper-large-v3-turbo. Direct audio models only; no routing profiles.";
   // Data State
   const [models, setModels] = useState<DiscoveredModel[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -280,6 +284,12 @@ export const PlaygroundPage: React.FC = () => {
   const [jevActiveTab, setJevActiveTab] = useState<"results" | "json">("results");
   const [copiedJevJson, setCopiedJevJson] = useState(false);
 
+  const [audioFile, setAudioFile] = useState<File | null>(null);
+  const [audioLanguage, setAudioLanguage] = useState("");
+  const [audioLoading, setAudioLoading] = useState(false);
+  const [audioResponse, setAudioResponse] = useState<{ text: string } | null>(null);
+  const [audioError, setAudioError] = useState<string | null>(null);
+
   // Quick prompt presets
   const presets = [
     { label: "💻 Code Generation", prompt: "Write a fast prime sieve function in Python with Sieve of Eratosthenes." },
@@ -308,7 +318,7 @@ export const PlaygroundPage: React.FC = () => {
 
       // Default Target A
       const hiddenIds = getHiddenModelIds();
-      const visibleModels = getVisibleModels(m, hiddenIds);
+      const visibleModels = getVisibleModels(m, hiddenIds).filter((model) => model.model_type !== "audio");
 
       const urlParams = new URLSearchParams(window.location.search);
       const queryModel = urlParams.get("model");
@@ -338,6 +348,7 @@ export const PlaygroundPage: React.FC = () => {
         }
       } else if (queryModel) {
         setTargetA(queryModel);
+        if (m.some((model) => model.canonical_slug === queryModel && model.model_type === "audio")) setMode("audio");
         if (queryModel.startsWith("fusion/")) {
           setTargetTypeFilter("fusion");
         } else if (queryModel.startsWith("judge/") || queryModel.startsWith("smart/")) {
@@ -428,16 +439,20 @@ export const PlaygroundPage: React.FC = () => {
       });
     });
 
-    return list;
-  }, [routes, fusions, judges, visibleProviderGroups]);
+    const audioSlugs = new Set(models.filter((m) => m.model_type === "audio").map((m) => m.canonical_slug));
+    return list.filter((item) => {
+      const isAudio = audioSlugs.has(item.id);
+      return mode === "audio" ? item.type === "model" && isAudio : !isAudio;
+    });
+  }, [routes, fusions, judges, visibleProviderGroups, models, mode]);
 
   // Filtered targets based on search & category
   const filteredTargets = useMemo(() => {
     return allTargets.filter((item) => {
-      if (targetTypeFilter === "routes" && item.type !== "route") return false;
-      if (targetTypeFilter === "fusion" && item.type !== "fusion") return false;
-      if (targetTypeFilter === "judge" && item.type !== "judge") return false;
-      if (targetTypeFilter === "models" && item.type !== "model") return false;
+      if (mode !== "audio" && targetTypeFilter === "routes" && item.type !== "route") return false;
+      if (mode !== "audio" && targetTypeFilter === "fusion" && item.type !== "fusion") return false;
+      if (mode !== "audio" && targetTypeFilter === "judge" && item.type !== "judge") return false;
+      if (mode !== "audio" && targetTypeFilter === "models" && item.type !== "model") return false;
       if (!targetSearch.trim()) return true;
       const q = targetSearch.toLowerCase();
       return (
@@ -446,28 +461,33 @@ export const PlaygroundPage: React.FC = () => {
         (item.subtitle && item.subtitle.toLowerCase().includes(q))
       );
     });
-  }, [allTargets, targetTypeFilter, targetSearch]);
+  }, [allTargets, targetTypeFilter, targetSearch, mode]);
 
   // Auto-sync targetA when category filter changes or search filters out the currently selected target
   useEffect(() => {
-    if (filteredTargets.length > 0 && !filteredTargets.some((t) => t.id === targetA)) {
-      setTargetA(filteredTargets[0].id);
+    if (!filteredTargets.some((t) => t.id === targetA)) {
+      setTargetA(filteredTargets[0]?.id || "");
     }
   }, [filteredTargets, targetA]);
+
+  useEffect(() => {
+    if (!allTargets.some((t) => t.id === targetB)) setTargetB(allTargets[0]?.id || "");
+  }, [allTargets, targetB]);
 
   const getTargetInfo = (targetId: string) => {
     return allTargets.find((t) => t.id === targetId);
   };
 
-  const supportsSampling = (targetId: string) => {
+  const getTargetModule = (targetId: string) => {
     const model = models.find((m) => m.canonical_slug === targetId || m.provider_model_id === targetId);
     const provider = providers.find((p) => p.id === model?.provider_id);
-    return !["codex_cli", "grok_builder_cli"].some((moduleId) =>
-      targetId.startsWith(`${moduleId}/`) || targetId.startsWith(`module_${moduleId}/`) ||
-      provider?.configuration?.module_id === moduleId
-    );
+    return provider?.configuration?.module_id || ["codex_cli", "grok_builder_cli", "qoder", "freebuff"].find((moduleId) =>
+      targetId.startsWith(`${moduleId}/`) || targetId.startsWith(`module_${moduleId}/`));
   };
+  const supportsSampling = (targetId: string) => !["codex_cli", "grok_builder_cli", "qoder", "freebuff"].includes(getTargetModule(targetId) || "");
+  const supportsOutputLimit = (targetId: string) => getTargetModule(targetId) !== "freebuff";
   const samplingDisabled = !supportsSampling(targetA) && (mode !== "compare" || !supportsSampling(targetB));
+  const outputLimitDisabled = !supportsOutputLimit(targetA) && (mode !== "compare" || !supportsOutputLimit(targetB));
 
   // Check if a model/route supports thinking / reasoning
   const isReasoningName = (name: string): boolean => {
@@ -509,6 +529,7 @@ export const PlaygroundPage: React.FC = () => {
     }
     const m = models.find((x) => x.canonical_slug === targetId || x.provider_model_id === targetId);
     if (m) {
+      if (m.capabilities?.reasoning === false) return false;
       if (m.capabilities?.reasoning === true) return true;
       return isReasoningName(m.provider_model_id) || isReasoningName(m.canonical_slug) || isReasoningName(m.display_name);
     }
@@ -605,11 +626,11 @@ export const PlaygroundPage: React.FC = () => {
       model: targetId,
       messages,
       ...(supportsSampling(targetId) ? { temperature, top_p: topP } : {}),
-      max_tokens: maxTokens,
+      ...(supportsOutputLimit(targetId) ? { max_tokens: maxTokens } : {}),
       stream: isStream,
     };
 
-    if (isStream) payload.stream_options = { include_usage: true };
+    if (isStream && getTargetModule(targetId) !== "freebuff") payload.stream_options = { include_usage: true };
 
     // Apply Reasoning Effort parameter (reasoning_effort) if supported
     if (supportsThinking && effort !== "off") {
@@ -1062,6 +1083,36 @@ export const PlaygroundPage: React.FC = () => {
     }
   };
 
+  const handleAudioSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (audioLoading || !audioFile || !allTargets.some((item) => item.id === targetA)) return;
+    if (!audioFile.size || audioFile.size > 25_000_000) {
+      setAudioError(language === "ru" ? "Выберите непустой аудиофайл размером не более 25 МБ." : "Choose a nonempty audio file up to 25 MB.");
+      return;
+    }
+    setAudioLoading(true);
+    setAudioError(null);
+    setAudioResponse(null);
+    try {
+      const body = new FormData();
+      body.append("file", audioFile);
+      body.append("model", targetA);
+      body.append("response_format", "json");
+      if (audioLanguage.trim()) body.append("language", audioLanguage.trim());
+      const response = await apiRequest<{ text: string }>("/v1/audio/transcriptions", {
+        method: "POST",
+        headers: selectedKey ? { "X-Router-Key-Id": String(selectedKey) } : {},
+        body,
+      });
+      if (typeof response.text !== "string") throw new Error("Invalid transcription response");
+      setAudioResponse(response);
+    } catch (err: any) {
+      setAudioError(err.message || "Transcription failed");
+    } finally {
+      setAudioLoading(false);
+    }
+  };
+
   // Generate Export Code
   const getExportCode = () => {
     const token = "sk-router-YOUR-KEY";
@@ -1136,8 +1187,7 @@ client = OpenAI(
 
 response = client.chat.completions.create(
     model="${target}",
-    messages=${JSON.stringify(msgs, null, 4)},${supportsSampling(target) ? `\n    temperature=${temperature},` : ""}
-    max_tokens=${maxTokens},
+    messages=${JSON.stringify(msgs, null, 4)},${supportsSampling(target) ? `\n    temperature=${temperature},` : ""}${supportsOutputLimit(target) ? `\n    max_tokens=${maxTokens},` : ""}
     stream=${isStream ? "True" : "False"}${
       extraKwargs.reasoning_effort ? `,\n    extra_body={"reasoning_effort": "${extraKwargs.reasoning_effort}"}` : ""
     }
@@ -1156,7 +1206,7 @@ ${
         model: target,
         messages: msgs,
         ...(supportsSampling(target) ? { temperature } : {}),
-        max_tokens: maxTokens,
+        ...(supportsOutputLimit(target) ? { max_tokens: maxTokens } : {}),
         stream: isStream,
         ...extraKwargs,
       };
@@ -1176,8 +1226,7 @@ const client = new OpenAI({
 async function main() {
   const response = await client.chat.completions.create({
     model: "${target}",
-    messages: ${JSON.stringify(msgs, null, 2)},${supportsSampling(target) ? `\n    temperature: ${temperature},` : ""}
-    max_tokens: ${maxTokens},
+    messages: ${JSON.stringify(msgs, null, 2)},${supportsSampling(target) ? `\n    temperature: ${temperature},` : ""}${supportsOutputLimit(target) ? `\n    max_tokens: ${maxTokens},` : ""}
     stream: ${isStream},${
       extraKwargs.reasoning_effort ? `\n    extra_body: { reasoning_effort: "${extraKwargs.reasoning_effort}" },` : ""
     }
@@ -1271,17 +1320,23 @@ main();`;
               <Zap size={13} className={mode === "jev" ? "text-amber-300" : "text-violet-400"} />
               Jev (System One)
             </button>
+            <button
+              onClick={() => { setMode("audio"); setTargetTypeFilter("models"); setTargetSearch(""); }}
+              className={`btn-press px-3 py-1.5 rounded-lg font-semibold transition-all ${mode === "audio" ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
+            >
+              {audioLabel}
+            </button>
           </div>
 
           {/* Code Export Button */}
-          <button
+          {mode !== "audio" && <button
             onClick={() => setShowCodeModal(true)}
             className="btn-press flex items-center gap-1.5 px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-slate-200 rounded-xl text-xs font-semibold border border-white/[0.08] transition-all shadow-xs"
             title="Export code (cURL / Python / Node.js)"
           >
             <Code size={13} className="text-indigo-400" />
             Code
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -1302,7 +1357,7 @@ main();`;
             </div>
 
             {/* Target Category Tabs */}
-            <div className="grid grid-cols-5 gap-1 p-1 bg-slate-950/80 rounded-xl border border-white/[0.06] text-[10px] font-medium text-slate-400">
+            {mode !== "audio" && <div className="grid grid-cols-5 gap-1 p-1 bg-slate-950/80 rounded-xl border border-white/[0.06] text-[10px] font-medium text-slate-400">
               <button
                 type="button"
                 onClick={() => setTargetTypeFilter("all")}
@@ -1372,7 +1427,7 @@ main();`;
               >
                 Judge
               </button>
-            </div>
+            </div>}
 
             {/* Target Search Box */}
             <div className="relative">
@@ -1400,11 +1455,7 @@ main();`;
               onChange={(e) => setTargetA(e.target.value)}
               className="w-full px-2.5 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs font-mono focus:border-indigo-500 focus:outline-none truncate"
             >
-              {!filteredTargets.some((item) => item.id === targetA) && targetA && (
-                <option value={targetA}>
-                  [{targetA.startsWith("route/") ? "ROUTE" : targetA.startsWith("fusion/") ? "FUSION" : targetA.startsWith("judge/") || targetA.startsWith("smart/") ? "JUDGE" : "DIRECT"}] {targetA}
-                </option>
-              )}
+              {!targetA && <option value="">{t.common.none}</option>}
               {filteredTargets.map((item) => (
                 <option key={item.id} value={item.id}>
                   [{item.type === "route" ? "ROUTE" : item.type === "fusion" ? "FUSION" : item.type === "judge" ? "JUDGE" : item.group}] {item.name}
@@ -1435,13 +1486,13 @@ main();`;
                   ? "Fusion Ensemble"
                   : targetA.startsWith("route/")
                   ? "Route Fallback"
-                  : "Direct Model"}
+                  : mode === "audio" ? audioLabel : "Direct Model"}
               </span>
             </div>
           </div>
 
           {/* Thinking Level Card for Target A (When Supported) */}
-          {supportsThinkingA && (
+          {mode !== "audio" && supportsThinkingA && (
             <div className="bg-slate-900/90 border border-purple-900/60 rounded-xl p-3.5 space-y-2.5 shadow-sm">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-purple-200 flex items-center gap-1.5">
@@ -1658,7 +1709,12 @@ main();`;
           </div>
 
           {/* Mode-specific Left Sidebar Controls */}
-          {mode === "jev" ? (
+          {mode === "audio" ? (
+            <div className="bg-slate-900/90 border border-cyan-500/30 rounded-xl p-3.5 text-xs text-slate-400">
+              <p>{audioHelp}</p>
+              <code className="block mt-2 text-cyan-300">POST /v1/audio/transcriptions</code>
+            </div>
+          ) : mode === "jev" ? (
             <>
               {/* Jev Decision Presets Card */}
               <div className="bg-slate-900/90 border border-violet-500/30 rounded-xl p-3.5 space-y-2.5 shadow-sm">
@@ -1766,6 +1822,7 @@ main();`;
                     <input
                       type="number"
                       value={maxTokens}
+                      disabled={outputLimitDisabled}
                       onChange={(e) => setMaxTokens(parseInt(e.target.value) || 2048)}
                       className="w-full px-2 py-1 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs font-mono focus:border-indigo-500 focus:outline-none"
                     />
@@ -1787,7 +1844,10 @@ main();`;
 
                 {/* Stream Toggle */}
                 {(!supportsSampling(targetA) || (mode === "compare" && !supportsSampling(targetB))) && (
-                  <p className="text-[10px] text-slate-400">Codex / Grok CLI: temperature / top_p are not sent.</p>
+                  <p className="text-[10px] text-slate-400">Codex / Grok / Qoder / Freebuff: temperature / top_p are not sent.</p>
+                )}
+                {(!supportsOutputLimit(targetA) || (mode === "compare" && !supportsOutputLimit(targetB))) && (
+                  <p className="text-[10px] text-slate-400">Freebuff: max_tokens / stream_options are not supported and are not sent.</p>
                 )}
                 <div className="pt-1 border-t border-slate-800 flex items-center justify-between">
                   <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
@@ -2392,6 +2452,48 @@ main();`;
                 </div>
               </div>
             </div>
+          )}
+
+          {mode === "audio" && (
+            <form onSubmit={handleAudioSubmit} className="glass-panel card-specular rounded-2xl border border-white/[0.07] p-5 shadow-xl space-y-4">
+              <h2 className="text-base font-bold text-slate-100">{audioLabel}</h2>
+              <label className="block text-xs text-slate-300 space-y-2">
+                <span>{language === "ru" ? "Аудиофайл (до 25 МБ)" : "Audio file (up to 25 MB)"}</span>
+                <input
+                  type="file"
+                  accept="audio/*,.flac,.mp3,.mp4,.mpeg,.mpga,.m4a,.ogg,.wav,.webm"
+                  required
+                  disabled={audioLoading}
+                  onChange={(e) => { setAudioFile(e.target.files?.[0] || null); setAudioResponse(null); setAudioError(null); }}
+                  className="block w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs"
+                />
+              </label>
+              <label className="block text-xs text-slate-300 space-y-2">
+                <span>{language === "ru" ? "Язык (необязательно, например ru или en)" : "Language (optional, e.g. ru or en)"}</span>
+                <input
+                  type="text"
+                  value={audioLanguage}
+                  onChange={(e) => setAudioLanguage(e.target.value)}
+                  placeholder={language === "ru" ? "Автоопределение" : "Auto-detect"}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs focus:border-cyan-500 focus:outline-none"
+                />
+              </label>
+              {!allTargets.length && <p className="text-xs text-amber-300">{language === "ru" ? "Нет доступных аудиомоделей. В каталоге выберите тип Аудио (STT) для модели Whisper." : "No audio models available. Set a Whisper model to Audio (STT) in the catalog."}</p>}
+              <button type="submit" disabled={audioLoading || !audioFile || !targetA} className="btn-press px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white rounded-xl text-xs font-semibold flex items-center gap-2">
+                {audioLoading ? <RefreshCw size={13} className="animate-spin" /> : <Send size={13} />}
+                {audioLoading ? t.common.loading : language === "ru" ? "Распознать речь" : "Transcribe"}
+              </button>
+              {audioError && <p role="alert" className="p-3 bg-rose-950/60 border border-rose-800 rounded-xl text-rose-300 text-xs">{audioError}</p>}
+              {audioResponse && (
+                <div className="space-y-3 pt-3 border-t border-slate-800">
+                  <button type="button" onClick={() => handleCopyText(audioResponse.text)} className="text-xs text-cyan-300 flex items-center gap-1.5">
+                    <Copy size={12} />{copiedResponseA ? t.common.copied : t.common.copy}
+                  </button>
+                  <pre aria-live="polite" className="whitespace-pre-wrap text-xs text-slate-100">{audioResponse.text}</pre>
+                  <details className="text-xs text-slate-400"><summary>JSON</summary><pre className="whitespace-pre-wrap mt-2">{JSON.stringify(audioResponse, null, 2)}</pre></details>
+                </div>
+              )}
+            </form>
           )}
 
           {/* ===================== MODE 4: JEV (SYSTEM ONE) ===================== */}

@@ -113,6 +113,14 @@ interface ModuleProfile {
   notes?: string | null;
 }
 
+interface FreebuffLoginFlow {
+  id: string;
+  loginUrl: string;
+  status: "pending" | "done" | "expired" | "cancelled";
+  expiresAt?: string | number | null;
+  error?: string;
+}
+
 interface OAuthStatus {
   status: "pending" | "authorized" | "error";
   message?: string;
@@ -176,7 +184,107 @@ export const ModulesPage: React.FC = () => {
   const [oauthStarting, setOAuthStarting] = useState(false);
   const [oauthCallbackBusy, setOAuthCallbackBusy] = useState(false);
   const [callbackUrl, setCallbackUrl] = useState("");
-  const supportsBrowserOAuth = ["agy_cli", "codex_cli", "grok_builder_cli"].includes(selectedModule?.manifest.id || "");
+  const supportsBrowserOAuth = ["agy_cli", "codex_cli", "grok_builder_cli", "qoder"].includes(selectedModule?.manifest.id || "");
+
+  const [freebuffProfile, setFreebuffProfile] = useState<ModuleProfile | null>(null);
+  const [freebuffFlow, setFreebuffFlow] = useState<FreebuffLoginFlow | null>(null);
+  const [freebuffMessage, setFreebuffMessage] = useState("");
+  const [freebuffError, setFreebuffError] = useState("");
+
+  useEffect(() => {
+    if (!freebuffProfile || selectedModule?.manifest.id !== "freebuff" || isProfileModalOpen) {
+      setFreebuffProfile(null);
+      return;
+    }
+    const profileId = freebuffProfile.id;
+    const base = `/api/admin/modules/freebuff/profiles/${profileId}/login`;
+    const controller = new AbortController();
+    let stopped = false;
+    let flow: FreebuffLoginFlow | null = null;
+    let timer: ReturnType<typeof setTimeout>;
+    let deadline = Date.now() + 600_000;
+    let polls = 0;
+    setFreebuffFlow(null);
+    setFreebuffError("");
+    setFreebuffMessage("Получение ссылки…");
+    const cancel = (id: string) => apiRequest(`${base}/${id}/cancel`, { method: "POST", keepalive: true,
+      signal: AbortSignal.timeout(30_000) }).catch((err: Error) => console.warn("Freebuff: не удалось отменить вход", err.message));
+    const publish = (result: FreebuffLoginFlow) => {
+      const url = new URL(result.loginUrl);
+      if (url.protocol !== "https:" || !["freebuff.com", "www.freebuff.com", "codebuff.com", "www.codebuff.com"].includes(url.hostname) ||
+          (url.port && url.port !== "443") || url.username || url.password ||
+          !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(result.id) ||
+          !["pending", "done", "expired", "cancelled"].includes(result.status) ||
+          (flow && result.id !== flow.id)) throw new Error("Некорректный ответ Freebuff");
+      flow = result;
+      const expiry = typeof result.expiresAt === "number" ? result.expiresAt :
+        result.expiresAt ? Number(result.expiresAt) || Date.parse(result.expiresAt) : NaN;
+      if (Number.isFinite(expiry)) deadline = Math.min(deadline, expiry);
+      setFreebuffFlow(result);
+    };
+    const request = (path: string, options: RequestInit = {}) => apiRequest<{ flow: FreebuffLoginFlow }>(path, {
+      ...options, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]),
+    });
+    const poll = async () => {
+      if (stopped || !flow || (flow.status !== "pending" && flow.status !== "done")) return;
+      if (flow.status === "pending" && (Date.now() >= deadline || polls++ >= 200)) {
+        void cancel(flow.id);
+        setFreebuffFlow({ ...flow, status: "expired" });
+        setFreebuffMessage("Время ожидания истекло. Получите новую ссылку.");
+        return;
+      }
+      try {
+        const result = flow.status === "done" ? flow : (await request(`${base}/${flow.id}`)).flow;
+        if (stopped) return;
+        publish(result);
+        if (result.error) setFreebuffMessage(result.error);
+        if (result.status === "done") {
+          setFreebuffMessage("Вход завершён. Синхронизация моделей…");
+          await apiRequest(`/api/admin/modules/freebuff/profiles/${profileId}/sync-models`, {
+            method: "POST", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]),
+          });
+          if (stopped) return;
+          const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]);
+          const [nextProfiles, nextModules] = await Promise.all([
+            apiRequest<ModuleProfile[]>("/api/admin/modules/freebuff/profiles", { signal }),
+            apiRequest<LoadedModule[]>("/api/admin/modules", { signal }),
+          ]);
+          if (stopped) return;
+          setProfiles(nextProfiles);
+          setModules(nextModules);
+          const updated = nextModules.find(mod => mod.manifest.id === "freebuff");
+          if (updated) setSelectedModule(updated);
+          setFreebuffMessage("Вход завершён, модели синхронизированы.");
+        } else if (result.status !== "pending") {
+          setFreebuffMessage(result.status === "expired" ? "Ссылка истекла. Получите новую ссылку." : "Вход отменён.");
+        } else timer = setTimeout(poll, 3000);
+      } catch (err: any) {
+        if (!stopped) {
+          setFreebuffError(err.message || "Ошибка проверки входа");
+          if (flow?.status === "pending") void cancel(flow.id);
+        }
+      }
+    };
+    // Do not abort a mutation before its ID is received: a late start is cancelled below.
+    void apiRequest<{ flow: FreebuffLoginFlow }>(base, { method: "POST", signal: AbortSignal.timeout(30_000) }).then(({ flow: result }) => {
+      if (stopped) {
+        if (/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(result?.id)) void cancel(result.id);
+        return;
+      }
+      publish(result);
+      setFreebuffMessage(result.status === "pending" ? "Ожидание входа в выбранном браузере…" :
+        result.status === "done" ? "Вход завершён. Синхронизация моделей…" :
+        result.status === "expired" ? "Ссылка истекла. Получите новую ссылку." : "Вход отменён.");
+      if (result.status === "done") void poll();
+      else if (result.status === "pending") timer = setTimeout(poll, 3000);
+    }).catch((err: any) => { if (!stopped) setFreebuffError(err.message || "Не удалось начать вход"); });
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      controller.abort();
+      if (flow?.status === "pending") void cancel(flow.id);
+    };
+  }, [freebuffProfile?.id, selectedModule?.manifest.id, isProfileModalOpen]);
 
   const quotaCatalog = {
     models: [...new Set(quotaModels.filter(model => model.provider_id === selectedModule?.provider_id).map(model => model.canonical_slug))].sort(),
@@ -276,7 +384,8 @@ export const ModulesPage: React.FC = () => {
     try {
       const result = await apiRequest<OAuthStatus & { session_id: string; auth_url: string; loopback: boolean }>(
         `/api/admin/modules/${moduleId}/oauth/start`,
-        { method: "POST", body: JSON.stringify({ proxy_id: proxyId }) }
+        { method: "POST", body: JSON.stringify({ proxy_id: proxyId,
+          ...(moduleId === "qoder" ? { cli_path: formFields.cli_path || null } : {}) }) }
       );
       if (generation !== oauthGeneration.current) {
         await apiRequest(`/api/admin/modules/${moduleId}/oauth/${result.session_id}`, { method: "DELETE" });
@@ -1048,7 +1157,7 @@ export const ModulesPage: React.FC = () => {
       {/* Profiles Drawer Modal */}
       {selectedModule && (
         <Modal
-          isOpen={!isProfileModalOpen && !!selectedModule}
+          isOpen={!isProfileModalOpen && !freebuffProfile && !!selectedModule}
           onClose={() => setSelectedModule(null)}
           title={`Профили модуля: ${selectedModule.manifest.name}`}
           maxWidth="xl"
@@ -1186,7 +1295,13 @@ export const ModulesPage: React.FC = () => {
                         </div>
 
                         {/* Actions */}
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {selectedModule.manifest.id === "freebuff" && (
+                            <button type="button" onClick={() => setFreebuffProfile(p)} disabled={selectedModule.status !== "ready"}
+                              className="btn-press px-2.5 py-1.5 bg-indigo-600/20 text-indigo-300 rounded-lg text-xs border border-indigo-500/30 disabled:opacity-50">
+                              Войти в Freebuff
+                            </button>
+                          )}
                           <button
                             onClick={() => handleTestProfile(p.id)}
                             disabled={isTesting}
@@ -1266,6 +1381,32 @@ export const ModulesPage: React.FC = () => {
         </Modal>
       )}
 
+      <Modal isOpen={!!freebuffProfile && selectedModule?.manifest.id === "freebuff" && !isProfileModalOpen}
+        onClose={() => setFreebuffProfile(null)} title={`Вход в Freebuff: ${freebuffProfile?.name || ""}`} maxWidth="sm">
+        <div className="space-y-3 text-xs">
+          <p className="text-slate-400">Ссылка не открывается автоматически. Скопируйте её в выбранный браузер или нажмите «Открыть ссылку». Вход сохраняется на настроенном сервере Freebuff; настройки профиля и прокси браузера не изменяются.</p>
+          <p role="status" aria-live="polite" className="text-indigo-300">{freebuffMessage}</p>
+          {freebuffError && <p role="alert" className="text-rose-300">{freebuffError}</p>}
+          {freebuffFlow?.status === "pending" && !freebuffError && (
+            <>
+              <label htmlFor="freebuff-login-url" className="block text-slate-300">HTTPS-ссылка для входа</label>
+              <input id="freebuff-login-url" readOnly value={freebuffFlow.loginUrl} onFocus={e => e.currentTarget.select()}
+                autoComplete="off" spellCheck={false} className="w-full px-3 py-2 bg-slate-950 border border-white/10 rounded-xl text-slate-200" />
+              <div className="flex flex-wrap gap-3">
+                <button type="button" className="text-indigo-300 underline" onClick={async () => {
+                  try { await navigator.clipboard.writeText(freebuffFlow.loginUrl); setFreebuffMessage("Ссылка скопирована. Ожидание входа…"); }
+                  catch { setFreebuffMessage("Выделите ссылку и скопируйте вручную."); }
+                }}>Скопировать ссылку</button>
+                <a href={freebuffFlow.loginUrl} target="_blank" rel="noopener noreferrer" className="text-indigo-300 underline">Открыть ссылку</a>
+              </div>
+            </>
+          )}
+          <button type="button" onClick={() => setFreebuffProfile(null)} className="px-3 py-2 bg-slate-800 text-slate-300 rounded-xl">
+            {freebuffFlow?.status === "done" ? "Закрыть" : "Отменить вход"}
+          </button>
+        </div>
+      </Modal>
+
       {/* Create / Edit Profile Modal */}
       {selectedModule && (
         <Modal
@@ -1339,6 +1480,9 @@ export const ModulesPage: React.FC = () => {
 
             {supportsBrowserOAuth && (
               <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 space-y-3 text-xs">
+                {selectedModule.manifest.id === "qoder" && (
+                  <p className="text-slate-300">Qoder CLI: войдите по ссылке ниже либо отмените вход и добавьте Personal Access Token из Qoder → Settings → Integrations. Это два отдельных способа добавления аккаунта; ключ DashScope не является аккаунтом Qoder.</p>
+                )}
                 <p className="text-slate-400 leading-relaxed">
                   Ссылка не открывается автоматически: скопируйте её в выбранный браузер. Для одного IP настройте браузер и прокси профиля на один и тот же статический выходной IP. Выбранный прокси применяется на сервере для обмена токенами и вызовов моделей, но не управляет сетью браузера. Во время OAuth прокси изменить нельзя.
                 </p>
@@ -1360,7 +1504,7 @@ export const ModulesPage: React.FC = () => {
                 {oauthSession && (
                   <>
                     <div role="status" aria-live="polite" className={oauthSession.status === "authorized" ? "text-emerald-300" : oauthSession.status === "error" ? "text-rose-300" : "text-indigo-300"}>
-                      {oauthSession.status === "authorized" ? "Авторизация завершена. Нажмите «Создать профиль» или «Обновить профиль», чтобы сохранить." : oauthSession.status === "error" ? (oauthSession.message || "Ошибка авторизации. Попробуйте снова.") : "Ожидание входа в браузере… Сессия действует 10 минут."}
+                      {oauthSession.status === "authorized" ? "Авторизация завершена. Нажмите «Создать профиль» или «Обновить профиль», чтобы сохранить." : oauthSession.status === "error" ? (oauthSession.message || "Ошибка авторизации. Попробуйте снова.") : `Ожидание входа в браузере… Сессия действует ${oauthSession.moduleId === "qoder" ? 5 : 10} минут.`}
                     </div>
                     {oauthSession.status === "pending" && (
                       <>
@@ -1375,6 +1519,7 @@ export const ModulesPage: React.FC = () => {
                           spellCheck={false}
                           className="w-full px-3 py-2 bg-slate-950 border border-white/[0.08] focus:border-indigo-500 rounded-xl text-slate-200 focus:outline-hidden"
                         />
+                        {oauthSession.moduleId === "qoder" ? <p className="text-slate-400 leading-relaxed">Qoder CLI автоматически проверяет завершение входа. URL возврата и токены вставлять не нужно.</p> : <>
                         <p className="text-slate-400 leading-relaxed">
                           {oauthSession.loopback ? "Возврат может обработаться автоматически, если браузер и сервер находятся на одном компьютере. " : "Автоматический возврат недоступен. "}
                           Если вход не завершился здесь, скопируйте полный URL из адресной строки после входа (даже если страница localhost не открылась) и вставьте ниже. Не вставляйте токены.
@@ -1394,6 +1539,7 @@ export const ModulesPage: React.FC = () => {
                         <button type="button" onClick={handleOAuthCallback} disabled={oauthCallbackBusy || !callbackUrl.trim()} className="btn-press px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl disabled:opacity-50">
                           {oauthCallbackBusy ? "Обработка..." : "Отправить URL возврата"}
                         </button>
+                        </>}
                       </>
                     )}
                   </>
@@ -1515,6 +1661,7 @@ export const ModulesPage: React.FC = () => {
                           <input
                             type={isPassword ? (showPass ? "text" : "password") : field.type === "number" ? "number" : "text"}
                             required={field.required}
+                            disabled={selectedModule.manifest.id === "qoder" && field.key === "cli_path" && (oauthStarting || !!oauthSession || savingProfile)}
                             value={value}
                             onChange={(e) => setFormFields({ ...formFields, [field.key]: e.target.value })}
                             placeholder={field.placeholder || ""}

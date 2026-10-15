@@ -3,8 +3,12 @@ import asyncio
 import base64
 import hashlib
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
+import os
+import re
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
@@ -47,6 +51,7 @@ class OAuthSession:
     owner: str
     proxy_id: int | None
     proxy_url: str | None = field(repr=False)
+    cli_path: str | None = field(default=None, repr=False)
     state: str = field(default_factory=lambda: secrets.token_urlsafe(32), repr=False)
     verifier: str = field(default="", repr=False)
     redirect_uri: str = ""
@@ -57,6 +62,7 @@ class OAuthSession:
     expires_at: float = field(default_factory=lambda: time.monotonic() + TTL)
     server: asyncio.Server | None = field(default=None, repr=False)
     expiry_task: asyncio.Task | None = field(default=None, repr=False)
+    native_task: asyncio.Task | None = field(default=None, repr=False)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     def public(self):
@@ -68,6 +74,7 @@ class OAuthSession:
 sessions: dict[str, OAuthSession] = {}
 # ponytail: serialize local starts; shared coordination is needed for multiple workers.
 start_lock = asyncio.Lock()
+_native_tasks: set[asyncio.Task] = set()
 
 
 def discard(session_id: str):
@@ -78,6 +85,8 @@ def discard(session_id: str):
             session.server.close()
         if session.expiry_task and session.expiry_task is not asyncio.current_task():
             session.expiry_task.cancel()
+        if session.native_task and session.native_task is not asyncio.current_task() and not session.native_task.done():
+            session.native_task.cancel()
         session.status = "cancelled"
         session.expires_at = 0
         session.tokens.clear()
@@ -90,6 +99,13 @@ async def cancel(session_id: str):
     if session:
         async with session.lock:
             discard(session_id)
+        if session.native_task:
+            cleanup = asyncio.gather(session.native_task, return_exceptions=True)
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                raise
 
 
 def get_session(session_id: str, module_id: str, owner: str) -> OAuthSession:
@@ -103,24 +119,27 @@ def get_session(session_id: str, module_id: str, owner: str) -> OAuthSession:
     return session
 
 
-async def start(module_id: str, owner: str, proxy_id: int | None, proxy_url: str | None):
+async def start(module_id: str, owner: str, proxy_id: int | None, proxy_url: str | None, cli_path: str | None = None):
     async with start_lock:
-        return await _start(module_id, owner, proxy_id, proxy_url)
+        return await _start(module_id, owner, proxy_id, proxy_url, cli_path)
 
 
-async def _start(module_id: str, owner: str, proxy_id: int | None, proxy_url: str | None):
-    if module_id not in CONFIG:
+async def _start(module_id: str, owner: str, proxy_id: int | None, proxy_url: str | None, cli_path: str | None = None):
+    if module_id not in CONFIG and module_id != "qoder":
         raise HTTPException(400, "Browser OAuth is not supported for this module")
-    config = CONFIG[module_id]
-    if not config["client_id"] or (module_id == "agy_cli" and not config.get("client_secret")):
+    config = CONFIG.get(module_id)
+    if config and (not config["client_id"] or (module_id == "agy_cli" and not config.get("client_secret"))):
         raise HTTPException(503, "OAuth application credentials are not configured; set the module's OAuth environment variables")
     for sid, existing in list(sessions.items()):
         if existing.expires_at <= time.monotonic() or (existing.owner == owner and existing.module_id == module_id):
             await cancel(sid)
     if len(sessions) >= 32:
         raise HTTPException(429, "Too many pending OAuth sessions")
-    session = OAuthSession(module_id, owner, proxy_id, proxy_url)
+    session = OAuthSession(module_id, owner, proxy_id, proxy_url, cli_path=cli_path)
     session_id = secrets.token_urlsafe(32)
+    if module_id == "qoder":
+        return await _start_qoder(session_id, session)
+    assert config is not None
     port = config["port"]
     try:
         session.server = await asyncio.start_server(
@@ -150,8 +169,96 @@ async def _start(module_id: str, owner: str, proxy_id: int | None, proxy_url: st
             "loopback": session.server is not None, **session.public()}
 
 
+async def _start_qoder(session_id: str, session: OAuthSession):
+    """Let the genuine CLI own device polling and its encrypted credential format."""
+    from modules.qoder.handler import native_environment, qoder_executable, read_native_auth, stop_process, egress_fingerprint
+
+    try:
+        executable = qoder_executable(session.cli_path)
+    except ValueError:
+        raise HTTPException(503, 'Qoder CLI executable is unavailable; check its installation or selected path') from None
+    session.expires_at = time.monotonic() + 300
+    sessions[session_id] = session
+    ready = asyncio.get_running_loop().create_future()
+
+    async def login():
+        try:
+            scratch = Path(os.environ.get("TMPDIR") or Path.home() / ".hermes/cache/scratch")
+            scratch.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="qoder-login-", dir=scratch) as directory:
+                root, proc = Path(directory), None
+                try:
+                    env = native_environment(root, {}, session.proxy_url)
+                    async with asyncio.timeout(300):
+                        proc = await asyncio.create_subprocess_exec(executable, "--config-dir", env["QODER_CONFIG_DIR"], "login",
+                            cwd=root, env=env, stdin=asyncio.subprocess.DEVNULL,
+                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+                        size = 0
+                        while line := await proc.stdout.readline():
+                            size += len(line)
+                            if size > 1024 * 1024:
+                                raise ValueError("Native login output exceeds its bound")
+                            if ready.done():
+                                continue
+                            for value in re.findall(r"https://[^\s\x1b<>\"']+", line.decode("utf-8", errors="replace")):
+                                url = urlsplit(value)
+                                if (url.hostname in ("qoder.com", "www.qoder.com") and url.port in (None, 443)
+                                        and not url.username and not url.password and not url.fragment
+                                        and url.path == "/device/selectAccounts"):
+                                    session.auth_url = value
+                                    ready.set_result(value)
+                                    break
+                        if await proc.wait() != 0:
+                            raise ValueError("Native login failed")
+                        auth = read_native_auth(root)
+                finally:
+                    if proc is not None:
+                        cleanup = asyncio.create_task(stop_process(proc))
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            await cleanup
+                            raise
+            async with session.lock:
+                if (sessions.get(session_id) is session and session.status == "pending"
+                        and session.expires_at > time.monotonic()):
+                    session.tokens = {"personal_access_token": "", "api_key": "", "apiKey": "", "token": "",
+                                      "access_token": "", "refresh_token": "", "api_base": "", "auth_json": auth,
+                                      "qoder_egress_pin": egress_fingerprint(session.proxy_url),
+                                      "cli_path": session.cli_path or ''}
+                    session.status, session.message = "authorized", "Qoder authorization complete; save the profile"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            async with session.lock:
+                if sessions.get(session_id) is session and session.status == "pending":
+                    session.status, session.message = "error", "Qoder CLI login failed; check the selected proxy and start again"
+        finally:
+            if not ready.done():
+                ready.set_exception(HTTPException(503, "Qoder CLI did not return a valid login URL"))
+
+    async def expire():
+        await asyncio.sleep(300)
+        await cancel(session_id)
+
+    session.native_task = asyncio.create_task(login())
+    _native_tasks.add(session.native_task)
+    session.native_task.add_done_callback(_native_tasks.discard)
+    session.expiry_task = asyncio.create_task(expire())
+    try:
+        await asyncio.wait_for(ready, 25)
+    except BaseException as exc:
+        await cancel(session_id)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise HTTPException(503, "Qoder CLI login could not start") from None
+    return {"session_id": session_id, "auth_url": session.auth_url, "loopback": False, **session.public()}
+
+
 async def exchange(session: OAuthSession, callback_url: str):
     """Validate the complete callback, then perform a single token exchange."""
+    if session.module_id == "qoder":
+        raise HTTPException(400, "Qoder CLI handles device authorization; no pasted callback is required")
     try:
         url = urlsplit(callback_url.strip())
         expected = urlsplit(session.redirect_uri)
@@ -249,3 +356,5 @@ async def close_all():
     async with start_lock:
         for session_id in list(sessions):
             await cancel(session_id)
+        if _native_tasks:
+            await asyncio.gather(*_native_tasks, return_exceptions=True)

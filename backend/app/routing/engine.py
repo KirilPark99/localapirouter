@@ -57,7 +57,24 @@ class RoutingEngine:
         if credential_group:
             query = query.where(ProviderCredential.group_name == credential_group)
         query = query.order_by(ProviderCredential.priority.asc(), ProviderCredential.weight.desc(), ProviderCredential.id.asc())
-        return [c for c in (await db.execute(query)).scalars().all() if cls._eligible(provider, model_obj, c)]
+        credentials = list((await db.execute(query)).scalars().all())
+        available = [c for c in credentials if cls._eligible(provider, model_obj, c)]
+        if not available:
+            cls._raise_terminal_freebuff_block(provider, credentials)
+        return available
+
+    @staticmethod
+    def _raise_terminal_freebuff_block(provider, credentials):
+        if not credentials or getattr(provider, 'adapter_type', None) != 'custom_module' or (getattr(provider, 'configuration', None) or {}).get('module_id') != 'freebuff':
+            return
+        states = [circuit_breaker.get_status(c.id) for c in credentials]
+        messages = {f'Freebuff blocked access for this account or region: {reason}'
+                    for reason in ('banned', 'country_blocked', 'region_locked', 'access_blocked')}
+        if all(s['status'] == CredentialStatus.INVALID and s.get('last_error') in messages for s in states):
+            # Preserve only already-sanitized module refusals; never echo arbitrary cached provider text.
+            message = states[0]['last_error'] if len({s['last_error'] for s in states}) == 1 else 'Freebuff blocked access for this account or region'
+            raise RouterException(message, ErrorCategory.AUTH_ERROR, status_code=403,
+                                  upstream_status=403, replay_safe=False)
 
     @staticmethod
     def _reserve_credential(cred, request, model_obj):
@@ -80,6 +97,11 @@ class RoutingEngine:
 
     @classmethod
     async def _reserve_dispatch(cls, cred, provider, model_obj, request):
+        from app.services.audio_service import is_transcription_model
+        if getattr(model_obj, 'model_type', None) == 'audio' or is_transcription_model(
+                model_obj.provider_model_id, getattr(model_obj, 'supported_endpoints', ())):
+            raise RouterException('Audio models require /v1/audio/transcriptions with a file, not chat/completions',
+                                  ErrorCategory.INVALID_REQUEST, status_code=400)
         # Reject native history before charging quota or dispatching to a lossy adapter.
         wire = getattr(provider, 'adapter_type', '')
         module = (getattr(provider, 'configuration', None) or {}).get('module_id')
@@ -533,6 +555,8 @@ class RoutingEngine:
         fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True, default=str,
                                                 ensure_ascii=False).encode()).hexdigest()
         capabilities = getattr(model_obj, "capabilities", {}) or {}
+        if (provider.configuration or {}).get('module_id') == 'freebuff':
+            effective.reject_unknown_parameters('Freebuff')  # Refuse before response-cache lookup too.
         vision = capabilities.get("vision")
         context.update(skip_response_cache=False, supports_vision=vision if isinstance(vision, bool) else None,
                        config_fingerprint=fingerprint,
@@ -1807,6 +1831,8 @@ class RoutingEngine:
 
         # Step 5: Separate into available (non-cooldown) and cooldown/unavailable pairs
         available_pairs = [pair for pair in valid_pairs if circuit_breaker.is_available(pair[0].id, pair[1].provider_model_id)[0]]
+        if not available_pairs:
+            cls._raise_terminal_freebuff_block(provider, [pair[0] for pair in valid_pairs])
         active_pool = available_pairs
 
         # Default random key selection across available credentials for this provider/model
